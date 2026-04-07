@@ -24,7 +24,7 @@ jobs:
         run: sleep 120
 
       - name: Wait for Screenshot Tests to complete
-        uses: lewagon/wait-on-check-action@v1.3.1
+        uses: lewagon/wait-on-check-action@v1.6.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           check-name: 'Run Screenshot Tests'
@@ -33,7 +33,7 @@ jobs:
           allowed-conclusions: success,skipped,failure
       - name: Check Screenshot Tests status
         id: check-status
-        uses: actions/github-script@v6
+        uses: actions/github-script@v8.0.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -80,7 +80,7 @@ jobs:
               core.setOutput('failed', 'false');
             }
       - name: Find Existing Comment
-        uses: peter-evans/find-comment@v3
+        uses: peter-evans/find-comment@v4.0.0
         id: existingCommentId
         with:
           issue-number: ${{ github.event.pull_request.number }}
@@ -89,7 +89,7 @@ jobs:
 
       - name: Comment on PR if tests fail
         if: steps.check-status.outputs.failed == 'true'
-        uses: peter-evans/create-or-update-comment@v4
+        uses: peter-evans/create-or-update-comment@v5.0.0
         with:
           issue-number: ${{ github.event.pull_request.number }}
           body: |
