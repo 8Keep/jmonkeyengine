@@ -100,7 +100,6 @@ public class BufferObject extends NativeObject implements Savable {
     private AccessHint accessHint = AccessHint.Dynamic;
     private NatureHint natureHint = NatureHint.Draw;
 
-    private transient WeakReference<BufferObject> weakRef;
     private transient int binding = -1;
     protected transient DirtyRegionsIterator dirtyRegionsIterator;
 
@@ -294,11 +293,6 @@ public class BufferObject extends NativeObject implements Savable {
         this.binding = binding;
     }
 
-    public WeakReference<BufferObject> getWeakRef() {
-        if (weakRef == null) weakRef = new WeakReference<BufferObject>(this);
-        return weakRef;
-    }
-
     public AccessHint getAccessHint() {
         return accessHint;
     }
@@ -341,7 +335,8 @@ public class BufferObject extends NativeObject implements Savable {
         InputCapsule ic = im.getCapsule(this);
         accessHint = AccessHint.values()[ic.readInt("accessHint", 0)];
         natureHint = NatureHint.values()[ic.readInt("natureHint", 0)];
-        regions.addAll(ic.readSavableArrayList("regions", null));
+        ArrayList<BufferRegion> loadedRegions = ic.readSavableArrayList("regions", null);
+        regions.addAll(loadedRegions);
         data = ic.readByteBuffer("data", null);
         setUpdateNeeded(true);
     }
@@ -350,7 +345,6 @@ public class BufferObject extends NativeObject implements Savable {
     public BufferObject clone() {
         BufferObject clone = (BufferObject) super.clone();
         clone.binding = -1;
-        clone.weakRef = null;
         clone.data = BufferUtils.clone(data);
         clone.regions = new ArrayList<BufferRegion>();
         assert clone.regions != regions;

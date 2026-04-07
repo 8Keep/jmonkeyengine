@@ -306,7 +306,7 @@ public class EnvironmentCamera extends BaseAppState {
             viewports[i] = createOffViewPort("EnvView" + i, cameras[i]);
             framebuffers[i] = createOffScreenFrameBuffer(size, viewports[i]);
             textures[i] = new Texture2D(size, size, imageFormat);
-            framebuffers[i].setColorTexture(textures[i]);
+            framebuffers[i].addColorTarget(FrameBuffer.FrameBufferTarget.newTarget(textures[i]));
         }
     }
 
@@ -386,7 +386,7 @@ public class EnvironmentCamera extends BaseAppState {
     protected FrameBuffer createOffScreenFrameBuffer(int mapSize, ViewPort offView) {
         // create offscreen framebuffer
         final FrameBuffer offBuffer = new FrameBuffer(mapSize, mapSize, 1);
-        offBuffer.setDepthBuffer(Image.Format.Depth);
+        offBuffer.setDepthTarget(FrameBuffer.FrameBufferTarget.newTarget(Image.Format.Depth));
         offView.setOutputFrameBuffer(offBuffer);
         return offBuffer;
     }
