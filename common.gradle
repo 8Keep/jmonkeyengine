@@ -119,11 +119,10 @@ ext.pomConfig = {
     }
 }
 
-artifacts {
-    archives jar
-    archives sourcesJar
+tasks.named('assemble') {
+    dependsOn sourcesJar
     if (buildJavaDoc == "true") {
-        archives javadocJar
+        dependsOn javadocJar
     }
 }
 
@@ -204,7 +203,6 @@ signing {
     def signingPassword = gradle.rootProject.findProperty('signingPassword')
     useInMemoryPgpKeys(signingKey, signingPassword)
 
-    sign configurations.archives
     sign publishing.publications.maven
 }
 tasks.withType(Sign) {
