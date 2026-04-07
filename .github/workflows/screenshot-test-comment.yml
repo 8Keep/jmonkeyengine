@@ -24,7 +24,7 @@ jobs:
         run: sleep 120
 
       - name: Wait for Screenshot Tests to complete
-        uses: lewagon/wait-on-check-action@v1.6.1
+        uses: lewagon/wait-on-check-action@v1.4.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           check-name: 'Run Screenshot Tests'
