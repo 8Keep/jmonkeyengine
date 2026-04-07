@@ -232,7 +232,7 @@ jobs:
           name: android-natives
           path: build/native
 
-  # Build the engine, we only deploy from ubuntu-latest jdk21
+  # Build the engine, we only deploy from ubuntu-latest jdk25
   BuildJMonkey:
     needs: [BuildAndroidNatives, BuildIosNatives]
     name: Build on ${{ matrix.osName }} jdk${{ matrix.jdk }}
@@ -241,7 +241,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest,windows-latest,macOS-latest]
-        jdk: [17, 21]
+        jdk: [17, 21, 25]
         include:
           - os: ubuntu-latest
             osName: linux
@@ -253,6 +253,10 @@ jobs:
             osName: mac
             deploy: false
           - jdk: 17
+            deploy: false
+          - jdk: 21
+            deploy: false
+          - jdk: 25
             deploy: false
 
     steps:
