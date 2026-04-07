@@ -37,29 +37,14 @@ package com.jme3.system;
 public enum Platform {
 
     /**
-     * Microsoft Windows 32-bit AMD/Intel
-     */
-    Windows32(Os.Windows),
-
-    /**
      * Microsoft Windows 64-bit AMD/Intel
      */
     Windows64(Os.Windows, true),
 
     /**
-     * Microsoft Windows 32-bit ARM
-     */
-    Windows_ARM32(Os.Windows),
-
-    /**
      * Microsoft Windows 64-bit ARM
      */
     Windows_ARM64(Os.Windows, true),
-
-    /**
-     * Linux 32-bit Intel
-     */
-    Linux32(Os.Linux),
 
     /**
      * Linux 64-bit Intel
@@ -77,11 +62,6 @@ public enum Platform {
     Linux_ARM64(Os.Linux, true),
 
     /**
-     * Apple Mac OS X 32-bit Intel
-     */
-    MacOSX32(Os.MacOS),
-
-    /**
      * Apple Mac OS X 64-bit Intel
      */
     MacOSX64(Os.MacOS, true),
@@ -90,16 +70,6 @@ public enum Platform {
      * Apple Mac OS X 64-bit ARM
      */
     MacOSX_ARM64(Os.MacOS, true),
-
-    /**
-     * Apple Mac OS X 32 bit PowerPC
-     */
-    MacOSX_PPC32(Os.MacOS),
-
-    /**
-     * Apple Mac OS X 64 bit PowerPC
-     */
-    MacOSX_PPC64(Os.MacOS, true),
 
     /**
      * Android ARM5

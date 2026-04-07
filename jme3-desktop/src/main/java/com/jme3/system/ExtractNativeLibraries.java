@@ -60,7 +60,7 @@ public class ExtractNativeLibraries {
         }
         if (args.length < 2) {
             System.err.println("Usage: ExtractNativeLibraries Platform ExtractionPath");
-            System.err.println("Where 'Platform' is either Windows32, Windows64, Linux32, Linux64, MacOSX32 or MacOSX64");
+            System.err.println("Where 'Platform' is either Windows64, Linux64, or MacOSX64");
             System.err.println("'ExtractionPath' is a folder to extract the binaries to.");
             System.err.println("You can also use ExtractNativeLibraries getjarexcludes to get a list of excludes for the jar files that contain binaries.");
             System.exit(1);
@@ -68,20 +68,14 @@ public class ExtractNativeLibraries {
         String path = args[1].replace('/', File.separatorChar);
         File folder = new File(path);
         try {
-            if ("Windows32".equals(args[0])) {
-                NativeLibraryLoader.extractNativeLibraries(Platform.Windows32, folder);
-            } else if ("Windows64".equals(args[0])) {
+            if ("Windows64".equals(args[0])) {
                 NativeLibraryLoader.extractNativeLibraries(Platform.Windows64, folder);
-            } else if ("Linux32".equals(args[0])) {
-                NativeLibraryLoader.extractNativeLibraries(Platform.Linux32, folder);
             } else if ("Linux64".equals(args[0])) {
                 NativeLibraryLoader.extractNativeLibraries(Platform.Linux64, folder);
-            } else if ("MacOSX32".equals(args[0])) {
-                NativeLibraryLoader.extractNativeLibraries(Platform.MacOSX32, folder);
             } else if ("MacOSX64".equals(args[0])) {
                 NativeLibraryLoader.extractNativeLibraries(Platform.MacOSX64, folder);
             } else {
-                System.err.println("Please specify a platform, Windows32, Windows64, Linux32, Linux64, MacOSX32 or MacOSX64");
+                System.err.println("Please specify a platform, Windows64, Linux64, or MacOSX64");
                 System.exit(3);
             }
         } catch (IOException ex) {
