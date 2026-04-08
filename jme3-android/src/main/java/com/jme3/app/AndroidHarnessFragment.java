@@ -70,6 +70,7 @@ import java.util.logging.Logger;
  *
  * @author iwgeric
  */
+@SuppressWarnings("deprecation")
 public class AndroidHarnessFragment extends Fragment implements
         TouchListener, DialogInterface.OnClickListener, View.OnLayoutChangeListener, SystemListener {
     private static final Logger logger = Logger.getLogger(AndroidHarnessFragment.class.getName());
@@ -494,9 +495,9 @@ public class AndroidHarnessFragment extends Fragment implements
         if (splashPicID != 0) {
             splashImageView = new ImageView(getActivity());
 
-            Drawable drawable = getResources().getDrawable(splashPicID);
+            Drawable drawable = splashImageView.getContext().getDrawable(splashPicID);
             if (drawable instanceof NinePatchDrawable) {
-                splashImageView.setBackgroundDrawable(drawable);
+                splashImageView.setBackground(drawable);
             } else {
                 splashImageView.setImageResource(splashPicID);
             }

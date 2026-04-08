@@ -5,6 +5,7 @@ import android.app.AlertDialog;
 import android.content.DialogInterface;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.NinePatchDrawable;
+import android.graphics.Point;
 import android.opengl.GLSurfaceView;
 import android.os.Bundle;
 import android.util.Log;
@@ -216,7 +217,9 @@ public class AndroidHarness extends Activity implements TouchListener, DialogInt
             //TODO try to find a better way to get a hand on the resolution
             WindowManager wind = this.getWindowManager();
             Display disp = wind.getDefaultDisplay();
-            Log.d("AndroidHarness", "Resolution from Window, width:" + disp.getWidth() + ", height: " + disp.getHeight());
+            Point displaySize = new Point();
+            disp.getSize(displaySize);
+            Log.d("AndroidHarness", "Resolution from Window, width:" + displaySize.x + ", height: " + displaySize.y);
 
             // Create Settings
             logger.log(Level.FINE, "Creating settings");
@@ -232,7 +235,7 @@ public class AndroidHarness extends Activity implements TouchListener, DialogInt
             settings.setSamples(eglSamples);
             settings.setStencilBits(eglStencilBits);
 
-            settings.setResolution(disp.getWidth(), disp.getHeight());
+            settings.setResolution(displaySize.x, displaySize.y);
             settings.setAudioRenderer(audioRendererType);
 
             settings.setFrameRate(frameRate);
@@ -410,9 +413,9 @@ public class AndroidHarness extends Activity implements TouchListener, DialogInt
             frameLayout = new FrameLayout(this);
             splashImageView = new ImageView(this);
 
-            Drawable drawable = this.getResources().getDrawable(splashPicID);
+            Drawable drawable = splashImageView.getContext().getDrawable(splashPicID);
             if (drawable instanceof NinePatchDrawable) {
-                splashImageView.setBackgroundDrawable(drawable);
+                splashImageView.setBackground(drawable);
             } else {
                 splashImageView.setImageResource(splashPicID);
             }
