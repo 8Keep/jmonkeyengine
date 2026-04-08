@@ -46,13 +46,13 @@ subprojects {
         // Currently we only warn about issues and try to fix them as we go, but those aren't mission critical.
         spotbugs {
             ignoreFailures = true
-            toolVersion = '4.8.6'
+            toolVersion = libs.versions.spotbugs.get()
         }
 
         tasks.withType(com.github.spotbugs.snom.SpotBugsTask ) {
             reports {
-                html.enabled = !project.hasProperty("xml-reports")
-                xml.enabled = project.hasProperty("xml-reports")
+                html.required = !project.hasProperty("xml-reports")
+                xml.required = project.hasProperty("xml-reports")
             }
         }
     }

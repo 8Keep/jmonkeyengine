@@ -57,6 +57,60 @@ on:
     types: [published]
 
 jobs:
+  Checkstyle:
+    name: Run Checkstyle
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - name: Setup the java environment
+        uses: actions/setup-java@v5.2.0
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+      - name: Validate the Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v5.0.2
+      - name: Run Checkstyle
+        run: |
+          ./gradlew checkstyleMain checkstyleTest --console=plain --stacktrace
+      - name: Upload Checkstyle Reports
+        uses: actions/upload-artifact@v7.0.0
+        if: always()
+        with:
+          name: checkstyle-report
+          retention-days: 30
+          path: |
+            **/build/reports/checkstyle/**
+
+  SpotBugs:
+    name: Run SpotBugs
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - name: Setup the java environment
+        uses: actions/setup-java@v5.2.0
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+      - name: Validate the Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v5.0.2
+      - name: Run SpotBugs
+        run: |
+          ./gradlew -PenableSpotBugs=true spotbugsMain spotbugsTest --console=plain --stacktrace
+      - name: Upload SpotBugs Reports
+        uses: actions/upload-artifact@v7.0.0
+        if: always()
+        with:
+          name: spotbugs-report
+          retention-days: 30
+          path: |
+            **/build/reports/spotbugs/**
+
   ScreenshotTests:
     name: Run Screenshot Tests
     runs-on: ubuntu-latest
@@ -234,6 +288,7 @@ jobs:
         run: |
           # Normal build plus ZIP distribution and merged javadoc
           ./gradlew -PuseCommitHashAsVersionName=true -PskipPrebuildLibraries=true \
+          -x checkstyleMain -x checkstyleTest \
           build createZipDistribution mergedJavadoc
 
           if [ "${{ matrix.deploy }}" = "true" ];
