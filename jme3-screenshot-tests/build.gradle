@@ -16,11 +16,21 @@ dependencies {
 
     implementation 'com.aventstack:extentreports:5.1.2'
     implementation platform('org.junit:junit-bom:5.9.1')
-    implementation 'org.junit.jupiter:junit-jupiter'
+    implementation 'org.junit.jupiter:junit-jupiter-api'
     testRuntimeOnly project(':jme3-testdata')
 }
 
+testing {
+    suites {
+        test {
+            useJUnitJupiter('5.9.1')
+        }
+    }
+}
+
 tasks.register("screenshotTest", Test) {
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
     useJUnitPlatform{
         filter{
             includeTags 'integration'

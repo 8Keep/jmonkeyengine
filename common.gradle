@@ -72,6 +72,9 @@ javadoc {
     options.use = "true"
     options.charSet = "UTF-8"
     options.encoding = "UTF-8"
+    if (JavaVersion.current().isJava8Compatible()) {
+        options.addStringOption('Xdoclint:none', '-quiet')
+    }
     source = sourceSets.main.allJava // main only, exclude tests
 }
 
@@ -154,7 +157,7 @@ publishing {
                 }
                 url = POM_URL
             }
-            version project.version
+            version = project.version
         }
     }
 
@@ -209,8 +212,8 @@ tasks.withType(Sign) {
 }
 
 checkstyle {
-    toolVersion libs.versions.checkstyle.get()
-    configFile file("${gradle.rootProject.rootDir}/config/checkstyle/checkstyle.xml")
+    toolVersion = libs.versions.checkstyle.get()
+    configFile = file("${gradle.rootProject.rootDir}/config/checkstyle/checkstyle.xml")
 }
 
 checkstyleMain {
