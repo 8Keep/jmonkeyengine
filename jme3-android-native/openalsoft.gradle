@@ -92,6 +92,9 @@ def openalAbis = [
     "x86",
     "x86_64"
 ]
+def openalCmakeBuildJobs = providers.gradleProperty('openalCmakeBuildJobs')
+        .map { it as int }
+        .orElse(Math.max(1, Runtime.runtime.availableProcessors().intdiv(openalAbis.size())))
 
 // 2) for each ABI, register a configure/build pair
 openalAbis.each { abi ->
@@ -135,7 +138,8 @@ openalAbis.each { abi ->
         commandLine = [
             "cmake",
             "--build", "cmake-build-${abi}",
-            "--config", "Release"
+            "--config", "Release",
+            "--parallel", openalCmakeBuildJobs.get() as String
         ]
     }
 }
