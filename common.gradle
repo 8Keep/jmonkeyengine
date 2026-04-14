@@ -1,3 +1,5 @@
+import org.gradle.api.attributes.java.TargetJvmVersion
+
 //
 // This file is to be applied to every subproject.
 //
@@ -20,12 +22,12 @@ java {
     targetCompatibility = JavaVersion.VERSION_1_8
 }
 
-tasks.withType(JavaCompile) { // compile-time options:
+tasks.withType(JavaCompile).configureEach { // compile-time options:
     //options.compilerArgs << '-Xlint:deprecation' // to show deprecation warnings
     options.compilerArgs << '-Xlint:unchecked'
     options.encoding = 'UTF-8'
     if (JavaVersion.current().isCompatibleWith(JavaVersion.VERSION_1_10)) {
-        options.release = 8
+        options.release = name == 'compileTestJava' ? 17 : 8
     }
 }
 
@@ -44,6 +46,10 @@ dependencies {
     testImplementation libs.mokito.junit.jupiter
     testImplementation libs.groovy.test
     testRuntimeOnly libs.junit.platform.launcher
+}
+
+configurations.matching { it.name in ['testCompileClasspath', 'testRuntimeClasspath'] }.configureEach {
+    attributes.attribute(TargetJvmVersion.TARGET_JVM_VERSION_ATTRIBUTE, 17)
 }
 
 // Uncomment if you want to see the status of every test that is run and

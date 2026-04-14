@@ -2,8 +2,25 @@ plugins {
     id 'java'
 }
 
+import org.gradle.api.attributes.java.TargetJvmVersion
+
 repositories {
     mavenCentral()
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+tasks.withType(JavaCompile).configureEach {
+    if (JavaVersion.current().isCompatibleWith(JavaVersion.VERSION_17)) {
+        options.release = 17
+    }
+}
+
+configurations.configureEach {
+    attributes.attribute(TargetJvmVersion.TARGET_JVM_VERSION_ATTRIBUTE, 17)
 }
 
 dependencies {
@@ -15,7 +32,7 @@ dependencies {
     implementation project(':jme3-plugins')
 
     implementation 'com.aventstack:extentreports:5.1.2'
-    implementation platform('org.junit:junit-bom:5.9.1')
+    implementation platform('org.junit:junit-bom:6.0.3')
     implementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
     testRuntimeOnly project(':jme3-testdata')
@@ -24,7 +41,7 @@ dependencies {
 testing {
     suites {
         test {
-            useJUnitJupiter('5.9.1')
+            useJUnitJupiter('6.0.3')
         }
     }
 }
