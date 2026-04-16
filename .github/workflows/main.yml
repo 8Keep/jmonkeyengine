@@ -256,8 +256,6 @@ jobs:
             deploy: false
           - jdk: 21
             deploy: false
-          - jdk: 25
-            deploy: false
 
     steps:
       - name: Clone the repo
