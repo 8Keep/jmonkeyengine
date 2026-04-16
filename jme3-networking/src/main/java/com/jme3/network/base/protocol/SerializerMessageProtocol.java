@@ -51,6 +51,9 @@ import com.jme3.network.serializing.Serializer;
  */ 
 public class SerializerMessageProtocol implements MessageProtocol {
  
+    /**
+     * Creates a serializer-backed message protocol.
+     */
     public SerializerMessageProtocol() {
     }
  
@@ -99,6 +102,5 @@ public class SerializerMessageProtocol implements MessageProtocol {
     }
      
 }
-
 
 
