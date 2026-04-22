@@ -173,6 +173,8 @@ ext {
     ndkExists       = false
 }
 
+apply from: 'gradle/jacoco.gradle'
+
 task configureAndroidNDK {
     def ndkBuildFile = "ndk-build"
     // if windows, use ndk-build.cmd instead

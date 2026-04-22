@@ -3,6 +3,7 @@
 [versions]
 
 checkstyle = "13.3.0"
+jacoco = "0.8.12"
 lwjgl3 = "3.4.1"
 nifty = "1.4.3"
 spotbugs = "4.9.8"
@@ -14,7 +15,7 @@ androidx-lifecycle-common = "androidx.lifecycle:lifecycle-common:2.7.0"
 android-build-gradle = "com.android.tools.build:gradle:9.1.0"
 android-support-appcompat = "com.android.support:appcompat-v7:28.0.0"
 gradle-git = "org.ajoberstar:gradle-git:1.2.0"
-groovy-test = "org.codehaus.groovy:groovy-test:3.0.25"
+groovy-test = "org.apache.groovy:groovy-test:4.0.31"
 gson = "com.google.code.gson:gson:2.13.2"
 j-ogg-vorbis = "com.github.stephengold:j-ogg-vorbis:1.0.6"
 jbullet = "com.github.stephengold:jbullet:1.0.3"
@@ -50,3 +51,4 @@ vecmath = "javax.vecmath:vecmath:1.5.2"
 [bundles]
 
 [plugins]
+jacoco = { id = "jacoco", version.ref = "jacoco" }
