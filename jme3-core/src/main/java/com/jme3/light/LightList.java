@@ -51,6 +51,7 @@ public final class LightList implements Iterable<Light>, Savable, Cloneable, Jme
     private Light[] list, tlist;
     private float[] distToOwner;
     private int listSize;
+    private int tlistSize;
     private Spatial owner;
 
     private static final int DEFAULT_SIZE = 1;
@@ -136,8 +137,9 @@ public final class LightList implements Iterable<Light>, Savable, Cloneable, Jme
             return;
         }
 
-        for (int i = index; i < listSize; i++) {
-            list[i] = list[i+1];
+        int copyLength = listSize - index;
+        if (copyLength > 0) {
+            System.arraycopy(list, index + 1, list, index, copyLength);
         }
         list[listSize] = null;
     }
@@ -186,7 +188,8 @@ public final class LightList implements Iterable<Light>, Savable, Cloneable, Jme
             list[i] = null;
 
         if (tlist != null)
-            Arrays.fill(tlist, null);
+            Arrays.fill(tlist, 0, tlistSize, null);
+        tlistSize = 0;
 
         listSize = 0;
     }
@@ -206,10 +209,14 @@ public final class LightList implements Iterable<Light>, Savable, Cloneable, Jme
         if (listSize > 1) {
             // resize or populate our temporary array as necessary
             if (tlist == null || tlist.length != list.length) {
-                tlist = list.clone();
+                tlist = new Light[list.length];
             } else {
-                System.arraycopy(list, 0, tlist, 0, list.length);
+                if (tlistSize > listSize) {
+                    Arrays.fill(tlist, listSize, tlistSize, null);
+                }
             }
+            System.arraycopy(list, 0, tlist, 0, listSize);
+            tlistSize = listSize;
 
             if (transformChanged) {
                 // check distance of each light
@@ -253,13 +260,20 @@ public final class LightList implements Iterable<Light>, Savable, Cloneable, Jme
             doubleSize();
         }
         
-        int localListSize = 0;
-        for(int i=0;i<local.listSize;i++){
-            Light l = local.list[i];
-            if (filter != null && !filter.test(l))  continue; 
-            list[localListSize] = l;
-            distToOwner[localListSize] = Float.NEGATIVE_INFINITY;
-            localListSize++;
+        int localListSize;
+        if (filter == null) {
+            localListSize = local.listSize;
+            System.arraycopy(local.list, 0, list, 0, localListSize);
+            Arrays.fill(distToOwner, 0, localListSize, Float.NEGATIVE_INFINITY);
+        } else {
+            localListSize = 0;
+            for(int i=0;i<local.listSize;i++){
+                Light l = local.list[i];
+                if (!filter.test(l))  continue;
+                list[localListSize] = l;
+                distToOwner[localListSize] = Float.NEGATIVE_INFINITY;
+                localListSize++;
+            }
         }
 
         // if the spatial has a parent node, add the lights
@@ -269,11 +283,8 @@ public final class LightList implements Iterable<Light>, Savable, Cloneable, Jme
             while (list.length <= sz)
                 doubleSize();
 
-            for (int i = 0; i < parent.listSize; i++) {
-                int p = i + localListSize;
-                list[p] = parent.list[i];
-                distToOwner[p] = Float.NEGATIVE_INFINITY;
-            }
+            System.arraycopy(parent.list, 0, list, localListSize, parent.listSize);
+            Arrays.fill(distToOwner, localListSize, sz, Float.NEGATIVE_INFINITY);
 
             listSize = localListSize + parent.listSize;
         } else {
