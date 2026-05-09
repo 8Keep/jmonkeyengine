@@ -13,12 +13,36 @@ sourceSets {
 
         System.setProperty "java.awt.headless", "true"
     }
+    benchmark {
+        java {
+            srcDir 'src/benchmark/java'
+        }
+        compileClasspath += sourceSets.main.output
+        runtimeClasspath += output + compileClasspath
+    }
 }
 
 dependencies {
     testRuntimeOnly project(':jme3-testdata')
     testImplementation project(':jme3-desktop')
     testRuntimeOnly project(':jme3-plugins')
+    benchmarkImplementation libs.jmh.core
+    benchmarkAnnotationProcessor libs.jmh.generator.annprocess
+}
+
+tasks.register('jmh', JavaExec) {
+    dependsOn tasks.named('benchmarkClasses')
+    description = 'Run jme3-core JMH benchmarks. Pass JMH options with -PjmhArgs="...".'
+    group = 'verification'
+    classpath = sourceSets.benchmark.runtimeClasspath
+    mainClass = 'org.openjdk.jmh.Main'
+
+    def rawArgs = providers.gradleProperty('jmhArgs').orElse('').map { it.trim() }
+    doFirst {
+        if (rawArgs.get()) {
+            args rawArgs.get().split(/\s+/)
+        }
+    }
 }
 
 task updateVersionPropertiesFile {
