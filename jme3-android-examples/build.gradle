@@ -1,6 +1,11 @@
 apply plugin: 'com.android.application'
 
-def examplesJar = project(':jme3-examples').tasks.named('jar')
+def examplesProject = project(':jme3-examples')
+def examplesClassesJar = examplesProject.tasks.register('androidExamplesClassesJar', Jar) {
+    archiveClassifier = 'android-classes'
+    from examplesProject.sourceSets.main.output.classesDirs
+    dependsOn examplesProject.tasks.named('classes')
+}
 
 android {
     namespace "org.jmonkeyengine.jme3androidexamples"
@@ -72,11 +77,11 @@ dependencies {
     implementation project(':jme3-plugins-json')
     implementation project(':jme3-plugins-json-gson')
     implementation project(':jme3-terrain')
-    implementation files(examplesJar.flatMap { it.archiveFile })
+    implementation files(examplesClassesJar.flatMap { it.archiveFile })
 }
 
 tasks.named('preBuild') {
-    dependsOn examplesJar
+    dependsOn examplesClassesJar
     if (buildNativeProjects == "true") {
         dependsOn ':jme3-android-native:updatePreCompiledOpenAlSoftLibs'
         dependsOn ':jme3-android-native:updatePreCompiledLibs'
