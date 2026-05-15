@@ -14,7 +14,7 @@ jobs:
     if: startsWith(github.event.label.name, 'diff:')
     steps:
       - name: Comment bounty info
-        uses: actions/github-script@v9.0.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           FORUM_URL: "https://hub.jmonkeyengine.org/t/bounty-program-trial-starts-today/49394/"
           RESERVE_HOURS: "48"
