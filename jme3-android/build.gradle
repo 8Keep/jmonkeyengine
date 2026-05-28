@@ -13,6 +13,7 @@ dependencies {
     compileOnly sourceSets.androidxStubs.output
     androidxStubsCompileOnly files(rootProject.file('lib/android.jar'))
     api project(':jme3-core')
+    api project(':jme3-plugins')
     implementation libs.jme3.android.natives
     compileOnly files(rootProject.file('lib/android.jar'))
 }
