@@ -498,9 +498,8 @@ public interface Renderer {
      * Returns the time in nanoseconds elapsed for the task with the given id.
      * Note that the result may not be available right after stopProfiling has been called.
      * You need to check if the result is available with isTaskResultAvailable.
-     * Also note that it's guaranteed that the result will be available on next frame.
-     * If you use getProfilingTime on the next frame you called stopProfiling,
-     * you don't need to check the result availability with isTaskResultAvailable
+     * Availability depends on queued GPU work. Check isTaskResultAvailable before reading
+     * even on later frames; an unconditional read can stall the calling thread.
      *
      * @param taskId the id of the task given by startProfiling.
      * @return the time in nanosecond of the profiling task with the given id.
@@ -514,6 +513,20 @@ public interface Renderer {
      * @return true if the results of the task with the given task id are available.
      */
     public boolean isTaskResultAvailable(int taskId);
+
+    /**
+     * Reports whether the GPU timer clock became discontinuous since the previous check.
+     * A discontinuity invalidates timer-query values spanning that interval. Callers should
+     * check after collecting available results and discard pending results across the event.
+     * Desktop OpenGL timer queries do not expose a disjoint flag; an OpenGL renderer returns
+     * false there. GLES renderers use the EXT_disjoint_timer_query disjoint state.
+     *
+     * @return true if a GPU timer discontinuity occurred since the previous check
+     * @throws UnsupportedOperationException if this renderer cannot validate GPU timer state
+     */
+    public default boolean isGpuTimingDisjoint() {
+        throw new UnsupportedOperationException("GPU timer disjoint state is unavailable");
+    }
 
     /**
      * Gets the alpha to coverage state.
