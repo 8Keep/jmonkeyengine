@@ -58,6 +58,7 @@ import com.jme3.texture.FrameBuffer.RenderBuffer;
 import com.jme3.texture.Image;
 import com.jme3.texture.Texture;
 import com.jme3.texture.Texture2D;
+import com.jme3.texture.TextureArray;
 import com.jme3.texture.Texture.ShadowCompareMode;
 import com.jme3.texture.Texture.WrapAxis;
 import com.jme3.texture.TextureImage;
@@ -2537,6 +2538,7 @@ public final class GLRenderer implements Renderer {
             if (context.boundFBO == fb.getId()) {
                 glfbo.glBindFramebufferEXT(GLFbo.GL_FRAMEBUFFER_EXT, 0);
                 context.boundFBO = 0;
+                context.boundFB = null;
             }
 
             if (fb.getDepthTarget() != null) {
@@ -2548,6 +2550,7 @@ public final class GLRenderer implements Renderer {
 
             intBuf1.put(0, fb.getId());
             glfbo.glDeleteFramebuffersEXT(intBuf1);
+            objManager.unregisterObject(fb);
             fb.resetObject();
 
             statistics.onDeleteFrameBuffer();
@@ -3249,12 +3252,45 @@ public final class GLRenderer implements Renderer {
     }
 
     @Override
+    public void modifyTexture(TextureArray dest, Image pixels, int layer, int x, int y) {
+        if (!caps.contains(Caps.TextureArray) || gl2 == null) {
+            throw new UnsupportedOperationException("Texture arrays are not supported by this renderer");
+        }
+        if (dest == null || dest.getImage() == null || pixels == null) {
+            throw new IllegalArgumentException("Source and destination images must not be null");
+        }
+        if (dest.getType() != Texture.Type.TwoDimensionalArray
+                || dest.getMinFilter().usesMipMapLevels()) {
+            throw new UnsupportedOperationException("Only non-mipmapped texture arrays can be updated");
+        }
+        // Validation precedes binding: setTexture can allocate/reupload the entire array.
+        GLImageFormat format = texUtil.validateArrayLayerUpdate(dest.getImage(), pixels,
+                layer, x, y, linearizeSrgbImages);
+        try {
+            setTexture(0, dest);
+        } catch (TextureUnitException exception) {
+            throw new IllegalStateException("Renderer has no texture unit zero", exception);
+        }
+        texUtil.uploadArrayLayer(pixels, format, layer, x, y);
+    }
+
+    @Override
     public void deleteImage(Image image) {
         int texId = image.getId();
         if (texId != -1) {
             intBuf1.put(0, texId);
             intBuf1.position(0).limit(1);
             gl.glDeleteTextures(intBuf1);
+            // Image identity survives native recreation. Cached bindings must not.
+            // Match the native id too: object-manager deletion can use a destructible clone.
+            for (int unit = 0; unit < context.boundTextures.length; unit++) {
+                WeakReference<Image> reference = context.boundTextures[unit];
+                Image bound = reference == null ? null : reference.get();
+                if (bound != null && bound.getId() == texId) {
+                    context.boundTextures[unit] = null;
+                }
+            }
+            objManager.unregisterObject(image);
             image.resetObject();
 
             statistics.onDeleteTexture();

@@ -116,6 +116,22 @@ public class NativeObjectManager {
         }
     }
     
+    /**
+     * (Internal use only) Removes a registration after its native resource has
+     * been deleted explicitly. This does not delete GPU resources or CPU buffers.
+     * Call before resetting the object's native id. Manager-driven deletion has
+     * already removed its registration, so repeated calls are harmless.
+     *
+     * @param obj the real registered object (not a destructible clone)
+     */
+    public void unregisterObject(NativeObject obj) {
+        NativeObjectRef ref = refMap.get(obj.getUniqueId());
+        if (ref != null && ref.realObj.get() == obj) {
+            refMap.remove(obj.getUniqueId());
+            ref.clear();
+        }
+    }
+
     private void deleteNativeObject(Object rendererObject, NativeObject obj, NativeObjectRef ref, 
                                     boolean deleteGL, boolean deleteBufs) {
         assert rendererObject != null;
