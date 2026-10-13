@@ -81,7 +81,7 @@ public class NativeObjectManager {
      * List of real objects requested by user for deletion.
      */
     private final ArrayDeque<NativeObject> userDeletionQueue = new ArrayDeque<>();
-    private final IdentityHashMap<NativeObject, Boolean> pendingUserDeletions = new IdentityHashMap<>();
+    private final IdentityHashMap<NativeObject, NativeObjectRef> pendingUserDeletions = new IdentityHashMap<>();
 
     private static class NativeObjectRef extends PhantomReference<Object> {
         
@@ -125,13 +125,15 @@ public class NativeObjectManager {
      * @param obj the deleted native object (not null, with its original ID)
      */
     public void unregisterObject(NativeObject obj) {
-        NativeObjectRef ref = refMap.remove(obj.getUniqueId());
-        if (ref != null) {
+        NativeObjectRef ref = refMap.get(obj.getUniqueId());
+        if (ref != null && ref.realObj.get() == obj) {
+            refMap.remove(obj.getUniqueId());
             ref.clear();
         }
         // Managed deletion already removed the pending request before calling
         // the renderer. Only a still-queued object needs this identity scan.
-        if (pendingUserDeletions.remove(obj) != null) {
+        if (pendingUserDeletions.containsKey(obj)) {
+            pendingUserDeletions.remove(obj);
             userDeletionQueue.removeIf(queued -> queued == obj);
             // The renderer deleted the native name, not the CPU buffers that
             // the pending dispose() explicitly requested us to release.
@@ -193,7 +195,7 @@ public class NativeObjectManager {
     
     /**
      * (Internal use only) Deletes unused NativeObjects.
-     * Will delete at most {@link #MAX_REMOVES_PER_FRAME} objects.
+     * Processes at most {@link #MAX_REMOVES_PER_FRAME} cleanup requests.
      * 
      * @param rendererObject The renderer object. 
      * For graphics objects, {@link Renderer} is used, for audio, {#link AudioRenderer} is used.
@@ -203,8 +205,15 @@ public class NativeObjectManager {
         while (removed < MAX_REMOVES_PER_FRAME && !userDeletionQueue.isEmpty()) {
             // Remove user requested objects.
             NativeObject obj = userDeletionQueue.pop();
-            pendingUserDeletions.remove(obj);
-            deleteNativeObject(rendererObject, obj, null, true, true);
+            NativeObjectRef requested = pendingUserDeletions.remove(obj);
+            NativeObjectRef current = refMap.get(obj.getUniqueId());
+            if (requested != null && current == requested && current.realObj.get() == obj) {
+                deleteNativeObject(rendererObject, obj, null, true, true);
+            } else if (UNSAFE && (current == null || current.realObj.get() != obj)) {
+                // Honor CPU disposal of an already deleted object, but never
+                // free buffers belonging to a newer registration of this object.
+                obj.deleteNativeBuffersInternal();
+            }
             removed++;
         }
         while (removed < MAX_REMOVES_PER_FRAME) {
@@ -215,11 +224,9 @@ public class NativeObjectManager {
             }
             // Explicit deletion may have unregistered an already queued reference.
             // Its native name can now belong to a different object.
-            if (refMap.get(ref.objClone.getUniqueId()) != ref) {
-                continue;
+            if (refMap.get(ref.objClone.getUniqueId()) == ref) {
+                deleteNativeObject(rendererObject, ref.objClone, ref, true, false);
             }
-
-            deleteNativeObject(rendererObject, ref.objClone, ref, true, false);
             removed++;
         }
         if (removed >= 1) {
@@ -255,7 +262,11 @@ public class NativeObjectManager {
      * @param obj The object to mark as unused.
      */
     void enqueueUnusedObject(NativeObject obj) {
-        if (pendingUserDeletions.put(obj, Boolean.TRUE) == null) {
+        boolean alreadyQueued = pendingUserDeletions.containsKey(obj);
+        // Keep one request per object, tied to its most recent dispose call.
+        // A later registration must not inherit a stale native deletion request.
+        pendingUserDeletions.put(obj, refMap.get(obj.getUniqueId()));
+        if (!alreadyQueued) {
             userDeletionQueue.push(obj);
         }
     }
