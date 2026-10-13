@@ -903,7 +903,8 @@ public final class GLRenderer implements Renderer {
     @Override
     public void invalidateState() {
         context.reset();
-        if (gl2 != null) {
+        // GL_DRAW_BUFFER is a desktop-only query, even when GLES exposes GL2 operations.
+        if (gl2 != null && !(gl instanceof GLES_30)) {
             context.initialDrawBuf = getInteger(GL2.GL_DRAW_BUFFER);
             context.initialReadBuf = getInteger(GL2.GL_READ_BUFFER);
         }
