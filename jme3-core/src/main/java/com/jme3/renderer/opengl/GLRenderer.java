@@ -58,6 +58,7 @@ import com.jme3.texture.FrameBuffer.RenderBuffer;
 import com.jme3.texture.Image;
 import com.jme3.texture.Texture;
 import com.jme3.texture.Texture2D;
+import com.jme3.texture.TextureArray;
 import com.jme3.texture.Texture.ShadowCompareMode;
 import com.jme3.texture.Texture.WrapAxis;
 import com.jme3.texture.TextureImage;
@@ -3575,6 +3576,29 @@ public final class GLRenderer implements Renderer {
         int target = convertTextureType(dest.getType(), src.getMultiSamples(), -1);
         texUtil.uploadSubTexture(target, src, 0, destX, destY,
                 srcX, srcY, areaW, areaH, linearizeSrgbImages, dest.getImage().getColorSpace());
+    }
+
+    @Override
+    public void modifyTexture(TextureArray dest, Image pixels, int layer, int x, int y) {
+        if (!caps.contains(Caps.TextureArray) || gl2 == null) {
+            throw new UnsupportedOperationException("Texture arrays are not supported by this renderer");
+        }
+        if (dest == null || dest.getImage() == null || pixels == null) {
+            throw new IllegalArgumentException("Source and destination images must not be null");
+        }
+        if (dest.getType() != Texture.Type.TwoDimensionalArray
+                || dest.getMinFilter().usesMipMapLevels()) {
+            throw new UnsupportedOperationException("Only non-mipmapped texture arrays can be updated");
+        }
+        // Validation precedes binding: setTexture can allocate/reupload the entire array.
+        GLImageFormat format = texUtil.validateArrayLayerUpdate(dest.getImage(), pixels,
+                layer, x, y, linearizeSrgbImages);
+        try {
+            setTexture(0, dest);
+        } catch (TextureUnitException exception) {
+            throw new IllegalStateException("Renderer has no texture unit zero", exception);
+        }
+        texUtil.uploadArrayLayer(pixels, format, layer, x, y);
     }
 
     @Override
