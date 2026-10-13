@@ -34,8 +34,12 @@ package com.jme3.util;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.lang.ref.PhantomReference;
+import java.lang.reflect.Field;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
@@ -112,6 +116,145 @@ public class NativeObjectManagerUnregisterTest {
         assertTrue(deletedIds.isEmpty());
         manager.deleteAllObjects(new Object());
         assertTrue(deletedIds.isEmpty());
+    }
+
+    @Test
+    public void deferredDisposeDoesNotDeleteAReplacementRegistration() {
+        NativeObjectManager manager = new NativeObjectManager();
+        List<Integer> deletedIds = new ArrayList<>();
+        FakeNativeObject image = new FakeNativeObject(61, manager, deletedIds);
+        manager.registerObject(image);
+
+        // Queue cleanup for ID 61, then model an explicit delete and a new GL ID
+        // being assigned to the same Java object before the queue is drained.
+        image.dispose();
+        image.explicitDelete();
+        image.setId(62);
+        manager.registerObject(image);
+
+        manager.deleteUnused(new Object());
+
+        assertEquals(Arrays.asList(61), deletedIds,
+                "a deferred request for the old registration must not delete ID 62");
+        assertEquals(62, image.getId(), "the replacement registration remains live");
+        manager.deleteAllObjects(new Object());
+        assertEquals(Arrays.asList(61, 62), deletedIds,
+                "the replacement registration is still available for normal cleanup");
+    }
+
+    @Test
+    public void deferredDisposeFromBeforeResetDoesNotDeleteNewContextObject() {
+        NativeObjectManager manager = new NativeObjectManager();
+        List<Integer> deletedIds = new ArrayList<>();
+        FakeNativeObject image = new FakeNativeObject(71, manager, deletedIds);
+        manager.registerObject(image);
+
+        image.dispose();
+        manager.resetObjects();
+        image.setId(72);
+        manager.registerObject(image);
+
+        manager.deleteUnused(new Object());
+
+        assertTrue(deletedIds.isEmpty(), "reset discards deferred requests for the old context");
+        assertEquals(72, image.getId(), "the new context registration remains live");
+        manager.deleteAllObjects(new Object());
+        assertEquals(Arrays.asList(72), deletedIds);
+    }
+
+    @Test
+    public void duplicateDisposeForOneRegistrationDeletesItOnlyOnce() {
+        NativeObjectManager manager = new NativeObjectManager();
+        List<Integer> deletedIds = new ArrayList<>();
+        FakeNativeObject image = new FakeNativeObject(81, manager, deletedIds);
+        manager.registerObject(image);
+
+        image.dispose();
+        image.dispose();
+        manager.deleteUnused(new Object());
+
+        assertEquals(Arrays.asList(81), deletedIds,
+                "duplicate requests for one registration must result in one deletion");
+        assertEquals(NativeObject.INVALID_ID, image.getId());
+        manager.deleteAllObjects(new Object());
+        assertEquals(Arrays.asList(81), deletedIds,
+                "the deleted registration must not be visited again");
+    }
+
+    @Test
+    public void staleDisposeRequestsStillCountTowardPerFrameCleanupLimit()
+            throws ReflectiveOperationException {
+        NativeObjectManager manager = new NativeObjectManager();
+        List<Integer> deletedIds = new ArrayList<>();
+        // Distinct objects retain distinct stale requests. Repeated disposal
+        // of one object is intentionally deduplicated by the upstream manager.
+        for (int request = 0; request < 101; request++) {
+            FakeNativeObject stale = new FakeNativeObject(101, manager, deletedIds);
+            manager.registerObject(stale);
+            stale.dispose();
+        }
+        FakeNativeObject image = new FakeNativeObject(101, manager, deletedIds);
+        manager.registerObject(image);
+
+        assertEquals(101, getUserDeletionQueueSize(manager), "all old requests are queued");
+        manager.deleteUnused(new Object());
+
+        assertEquals(1, getUserDeletionQueueSize(manager),
+                "the frame limit processes only 100 requests, including stale ones");
+        assertTrue(deletedIds.isEmpty(),
+                "draining stale requests must not delete the replacement registration");
+        assertEquals(101, image.getId(), "the replacement remains live after the first drain");
+
+        manager.deleteUnused(new Object());
+
+        assertEquals(0, getUserDeletionQueueSize(manager), "the next frame drains the last stale request");
+        assertTrue(deletedIds.isEmpty(),
+                "the remaining stale request must not delete the replacement registration");
+        assertEquals(101, image.getId(), "the replacement remains live after all stale requests drain");
+
+        manager.deleteAllObjects(new Object());
+        assertEquals(Arrays.asList(101), deletedIds,
+                "normal cleanup still deletes the replacement registration exactly once");
+    }
+
+    @Test
+    public void queuedPhantomForReplacedRegistrationDoesNotRemoveCurrentRegistration()
+            throws ReflectiveOperationException {
+        NativeObjectManager manager = new NativeObjectManager();
+        List<Integer> deletedIds = new ArrayList<>();
+        FakeNativeObject older = new FakeNativeObject(91, manager, deletedIds);
+        FakeNativeObject current = new FakeNativeObject(91, manager, deletedIds);
+        manager.registerObject(older);
+        PhantomReference<?> replacedReference = getRegisteredReference(manager, older.getUniqueId());
+
+        // Both objects intentionally have the same unique key. A delayed queue
+        // entry for the replaced reference must not act on the current mapping.
+        manager.registerObject(current);
+        assertTrue(replacedReference.enqueue(), "the old phantom reference should be queued");
+        manager.deleteUnused(new Object());
+
+        assertTrue(deletedIds.isEmpty(), "a stale phantom reference must not delete either object");
+        assertEquals(91, current.getId(), "the current registration remains live");
+        manager.deleteAllObjects(new Object());
+        assertEquals(Arrays.asList(91), deletedIds,
+                "normal cleanup still deletes the current registration exactly once");
+        assertEquals(NativeObject.INVALID_ID, current.getId());
+    }
+
+    private static PhantomReference<?> getRegisteredReference(NativeObjectManager manager, long id)
+            throws ReflectiveOperationException {
+        Field refMapField = NativeObjectManager.class.getDeclaredField("refMap");
+        refMapField.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        HashMap<Long, ?> refMap = (HashMap<Long, ?>) refMapField.get(manager);
+        return (PhantomReference<?>) refMap.get(id);
+    }
+
+    private static int getUserDeletionQueueSize(NativeObjectManager manager)
+            throws ReflectiveOperationException {
+        Field queueField = NativeObjectManager.class.getDeclaredField("userDeletionQueue");
+        queueField.setAccessible(true);
+        return ((ArrayDeque<?>) queueField.get(manager)).size();
     }
 
     private static final class FakeNativeObject extends NativeObject {
