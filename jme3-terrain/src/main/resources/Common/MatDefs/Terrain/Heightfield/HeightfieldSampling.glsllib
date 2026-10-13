@@ -1,0 +1,14 @@
+#ifdef GL_ES
+precision highp sampler2DArray;
+#endif
+
+uniform sampler2DArray m_HeightPages;
+uniform int m_HeightLayer;
+uniform float m_SampleSpacing;
+
+float Heightfield_readHeight(ivec2 latticePoint) {
+    // Grid vertices address the interior. The added one selects the first
+    // vertex sample after the low-side halo; high-side halo lies at cells + 2.
+    ivec2 pageTexel = latticePoint + ivec2(1);
+    return texelFetch(m_HeightPages, ivec3(pageTexel, m_HeightLayer), 0).r;
+}

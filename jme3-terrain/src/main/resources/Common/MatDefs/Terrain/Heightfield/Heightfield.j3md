@@ -1,0 +1,59 @@
+// GPU-displaced terrain backed by R32F height pages with a one-texel halo.
+MaterialDef Heightfield {
+    MaterialParameters {
+        // Each array layer stores (cells + 3) x (cells + 3) samples: cells+1
+        // vertex samples plus one neighbor-halo sample on every side.
+        TextureArray HeightPages -LINEAR
+        Int HeightLayer : 0
+        // Must match HeightfieldPage.getSampleSpacing() used to create the mesh
+        // bound. Positive and finite; shared by main and depth vertex passes.
+        Float SampleSpacing : 1.0
+
+        // Linear-space surface colors. The shader returns linear HDR values.
+        Color GrassColor : 0.18 0.28 0.12 1.0
+        Color RockColor : 0.24 0.23 0.21 1.0
+        Color SnowColor : 0.78 0.84 0.88 1.0
+        Float Roughness : 0.88
+
+        // World-space breakup frequency and configurable snow elevation band.
+        Float TextureScale : 0.035
+        Float SnowLine : 120.0
+        Float SnowFade : 18.0
+
+    }
+
+    Technique {
+        // PBR helpers consume world-space light vectors. Ordinary SinglePass
+        // uploads view-space lights and would rotate the sun with the camera.
+        LightMode SinglePassAndImageBased
+
+        VertexShader GLSL300 GLSL150: Common/MatDefs/Terrain/Heightfield/Heightfield.vert
+        FragmentShader GLSL300 GLSL150: Common/MatDefs/Terrain/Heightfield/Heightfield.frag
+
+        WorldParameters {
+            WorldViewProjectionMatrix
+            WorldMatrix
+            WorldNormalMatrix
+            CameraPosition
+        }
+
+    }
+
+    // Keep the depth pass on the same GPU-displaced surface as the lit pass.
+    Technique PreShadow {
+        VertexShader GLSL300 GLSL150: Common/MatDefs/Terrain/Heightfield/HeightfieldPreShadow.vert
+        FragmentShader GLSL300 GLSL150: Common/MatDefs/Shadow/PreShadow.frag
+
+        WorldParameters {
+            WorldViewProjectionMatrix
+        }
+
+        ForcedRenderState {
+            FaceCull Off
+            DepthTest On
+            DepthWrite On
+            PolyOffset 5 3
+            ColorWrite Off
+        }
+    }
+}
