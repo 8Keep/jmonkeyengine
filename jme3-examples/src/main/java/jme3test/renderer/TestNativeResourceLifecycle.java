@@ -35,6 +35,8 @@ import com.jme3.app.SimpleApplication;
 import com.jme3.math.ColorRGBA;
 import com.jme3.renderer.Caps;
 import com.jme3.renderer.Renderer;
+import com.jme3.renderer.RenderContext;
+import com.jme3.renderer.lwjgl.LwjglGLES;
 import com.jme3.renderer.opengl.GL4;
 import com.jme3.renderer.opengl.GLFence;
 import com.jme3.renderer.opengl.GLRenderer;
@@ -64,7 +66,9 @@ import javax.imageio.ImageIO;
  * Asset-free pixel probe for explicit resource deletion, recreation, stale
  * deferred disposal and shutdown cleanup. UBO drawing is required on GL/GLES;
  * the same buffer is also read through an independent SSBO binding on desktop
- * GL4. GLES storage-block/fence wrappers are not claimed by this example.
+ * GL4. Invalid binding and unsupported managed storage blocks must reject
+ * before allocation. GLES fences use existing raw GLExt creation and managed
+ * deletion; this example does not introduce a portable fence creation API.
  * Arguments: renderer name, output directory. Run with Java assertions enabled.
  */
 public final class TestNativeResourceLifecycle extends SimpleApplication {
@@ -128,6 +132,7 @@ public final class TestNativeResourceLifecycle extends SimpleApplication {
         require(renderer.getCaps().contains(Caps.UniformBufferObject), "UBO capability");
         boolean storage = !renderer.getCaps().contains(Caps.OpenGLES30)
                 && renderer.getCaps().contains(Caps.ShaderStorageBufferObject);
+        verifyRejectedBindings(renderer);
         String language = renderer.getCaps().contains(Caps.OpenGLES30) ? "GLSL300"
                 : storage ? "GLSL430" : "GLSL330";
         Shader shader = new Shader();
@@ -183,10 +188,11 @@ public final class TestNativeResourceLifecycle extends SimpleApplication {
             last = draw(renderer, framebuffer, shader, mesh);
         }
 
-        GL4 gl4 = ((GLRenderer) renderer).getGl4();
-        if (gl4 != null && renderer.getCaps().contains(Caps.OpenGL32)) {
+        boolean fences = renderer.getCaps().contains(Caps.OpenGL32)
+                || renderer.getCaps().contains(Caps.OpenGLES30);
+        if (fences) {
             for (int i = 0; i < 4; i++) {
-                GLFence fence = gl4.glFenceSync(GL4.GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+                GLFence fence = newFence(renderer);
                 renderer.registerNativeObject(fence);
                 fence.dispose();
                 renderer.deleteFence(fence);
@@ -194,14 +200,76 @@ public final class TestNativeResourceLifecycle extends SimpleApplication {
                 require(fence.getId() == NativeObject.INVALID_ID, "fence retired");
             }
             // Leave a live replacement for manager-owned shutdown cleanup.
-            renderer.registerNativeObject(gl4.glFenceSync(GL4.GL_SYNC_GPU_COMMANDS_COMPLETE, 0));
+            renderer.registerNativeObject(newFence(renderer));
         }
         writePixels(last);
         renderer.setFrameBuffer(null);
         System.out.println("NATIVE_LIFECYCLE_DRAW_PASS storage=" + storage
-                + " fence=" + (gl4 != null) + " checks=" + checks);
+                + " fence=" + fences + " checks=" + checks);
         // Shader, VBs, BO, FBO and optional fence remain registered. Assertion-
         // enabled app.stop(true) checks ordinary manager-owned teardown too.
+    }
+
+    private GLFence newFence(Renderer renderer) {
+        if (renderer.getCaps().contains(Caps.OpenGLES30)) {
+            Object sync = new LwjglGLES().glFenceSync(GL4.GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+            return new GLFence(((Long) sync).longValue(), null);
+        }
+        return ((GLRenderer) renderer).getGl4().glFenceSync(GL4.GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    }
+
+    private void verifyRejectedBindings(Renderer renderer) {
+        for (int index : new int[]{-1, RenderContext.maxBufferObjectUnits}) {
+            BufferObject buffer = new BufferObject();
+            buffer.setData(BufferUtils.createByteBuffer(16));
+            expectRejection(IllegalArgumentException.class,
+                    () -> renderer.setUniformBufferObject(index, buffer));
+            require(buffer.getId() == NativeObject.INVALID_ID && buffer.isUpdateNeeded()
+                    && buffer.getBinding() == -1, "invalid binding preserves unallocated buffer");
+        }
+        BufferObject cpuOnly = new BufferObject();
+        cpuOnly.setAccessHint(BufferObject.AccessHint.CpuOnly);
+        expectRejection(IllegalArgumentException.class,
+                () -> renderer.setUniformBufferObject(0, cpuOnly));
+        require(cpuOnly.getId() == NativeObject.INVALID_ID, "CPU-only buffer remains unallocated");
+
+        if (renderer.getCaps().contains(Caps.OpenGLES30)) {
+            require(!renderer.getCaps().contains(Caps.ShaderStorageBufferObject),
+                    "GLES does not advertise managed storage block rebinding");
+            BufferObject storage = new BufferObject();
+            storage.setData(BufferUtils.createByteBuffer(16));
+            storage.setBinding(0);
+            expectRejection(UnsupportedOperationException.class,
+                    () -> renderer.setShaderStorageBufferObject(0, storage));
+            expectRejection(UnsupportedOperationException.class,
+                    () -> renderer.updateShaderStorageBufferObjectData(storage));
+            require(storage.getId() == NativeObject.INVALID_ID && storage.isUpdateNeeded(),
+                    "unsupported dirty storage buffer remains unallocated");
+            storage.clearUpdateNeeded();
+            expectRejection(UnsupportedOperationException.class,
+                    () -> renderer.setShaderStorageBufferObject(0, storage));
+            require(storage.getId() == NativeObject.INVALID_ID && !storage.isUpdateNeeded(),
+                    "unsupported clean buffer cannot bypass capability check");
+            Shader unsupported = new Shader();
+            unsupported.addSource(Shader.ShaderType.Vertex, "Unsupported.vert",
+                    "void main(){gl_Position=vec4(0.0);}", "", "GLSL300");
+            unsupported.getBufferBlock("m_StorageBlock")
+                    .setBufferObject(BufferType.ShaderStorageBufferObject, storage);
+            expectRejection(UnsupportedOperationException.class, () -> renderer.setShader(unsupported));
+            require(unsupported.getId() == NativeObject.INVALID_ID
+                    && unsupported.getSources().iterator().next().getId() == NativeObject.INVALID_ID,
+                    "unsupported block rejects before shader allocation");
+        }
+    }
+
+    private void expectRejection(Class<? extends RuntimeException> type, Runnable operation) {
+        try {
+            operation.run();
+        } catch (RuntimeException exception) {
+            require(type.isInstance(exception), "rejection type: " + exception);
+            return;
+        }
+        throw new IllegalStateException("Expected rejection: " + type.getSimpleName());
     }
 
     private byte[] draw(Renderer renderer, FrameBuffer framebuffer, Shader shader, Mesh mesh) {

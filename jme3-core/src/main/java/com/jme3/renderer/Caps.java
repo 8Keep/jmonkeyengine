@@ -483,7 +483,9 @@ public enum Caps {
      */
     UniformBufferObject,
     /**
-     * Supporting working with ShaderStorageBufferObjects.
+     * Supports renderer-managed shader storage blocks, including program
+     * interface queries and changing block bindings after linking. OpenGL ES
+     * storage blocks have fixed link-time bindings and are not advertised here.
      */
     ShaderStorageBufferObject,
 
