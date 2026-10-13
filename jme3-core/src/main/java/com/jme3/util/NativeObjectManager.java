@@ -61,8 +61,8 @@ public class NativeObjectManager {
     public static boolean UNSAFE = false;
     
     /**
-     * The maximum number of objects that should be removed per frame.
-     * If the limit is reached, no more objects will be removed for that frame.
+     * The maximum number of cleanup requests processed per frame, including
+     * stale requests. Bounds work even when many registrations were replaced.
      */
     private static final int MAX_REMOVES_PER_FRAME = 100;
     
@@ -77,9 +77,20 @@ public class NativeObjectManager {
     private final HashMap<Long, NativeObjectRef> refMap = new HashMap<>();
     
     /**
-     * List of real objects requested by user for deletion.
+     * Requests tied to the registration that was live when dispose was called.
+     * Retaining the real object also retains its CPU buffers until cleanup.
      */
-    private final ArrayDeque<NativeObject> userDeletionQueue = new ArrayDeque<>();
+    private final ArrayDeque<DeletionRequest> userDeletionQueue = new ArrayDeque<>();
+
+    private static class DeletionRequest {
+        final NativeObject object;
+        final NativeObjectRef registration;
+
+        DeletionRequest(NativeObject object, NativeObjectRef registration) {
+            this.object = object;
+            this.registration = registration;
+        }
+    }
 
     private static class NativeObjectRef extends PhantomReference<Object> {
         
@@ -184,7 +195,7 @@ public class NativeObjectManager {
     
     /**
      * (Internal use only) Deletes unused NativeObjects.
-     * Will delete at most {@link #MAX_REMOVES_PER_FRAME} objects.
+     * Processes at most {@link #MAX_REMOVES_PER_FRAME} cleanup requests.
      * 
      * @param rendererObject The renderer object. 
      * For graphics objects, {@link Renderer} is used, for audio, {#link AudioRenderer} is used.
@@ -193,8 +204,12 @@ public class NativeObjectManager {
         int removed = 0;
         while (removed < MAX_REMOVES_PER_FRAME && !userDeletionQueue.isEmpty()) {
             // Remove user requested objects.
-            NativeObject obj = userDeletionQueue.pop();
-            deleteNativeObject(rendererObject, obj, null, true, true);
+            DeletionRequest request = userDeletionQueue.pop();
+            long key = request.registration.objClone.getUniqueId();
+            if (refMap.get(key) == request.registration
+                    && request.object.getUniqueId() == key) {
+                deleteNativeObject(rendererObject, request.object, null, true, true);
+            }
             removed++;
         }
         while (removed < MAX_REMOVES_PER_FRAME) {
@@ -204,11 +219,15 @@ public class NativeObjectManager {
                 break;
             }
 
-            deleteNativeObject(rendererObject, ref.objClone, ref, true, false);
+            // A delayed phantom from an old registration must not delete a
+            // replacement that happens to reuse the same native name.
+            if (refMap.get(ref.objClone.getUniqueId()) == ref) {
+                deleteNativeObject(rendererObject, ref.objClone, ref, true, false);
+            }
             removed++;
         }
         if (removed >= 1) {
-            logger.log(Level.FINE, "NativeObjectManager: {0} native objects were removed from native", removed);
+            logger.log(Level.FINE, "NativeObjectManager: {0} cleanup requests processed", removed);
         }
     }
 
@@ -237,7 +256,10 @@ public class NativeObjectManager {
      * @param obj The object to mark as unused.
      */
     void enqueueUnusedObject(NativeObject obj) {
-        userDeletionQueue.push(obj);
+        NativeObjectRef ref = refMap.get(obj.getUniqueId());
+        if (ref != null && ref.realObj.get() == obj) {
+            userDeletionQueue.push(new DeletionRequest(obj, ref));
+        }
     }
     
     /**
@@ -256,6 +278,7 @@ public class NativeObjectManager {
             logger.log(Level.FINEST, "Reset: {0}", realObj);
         }
         refMap.clear();
+        userDeletionQueue.clear();
         refQueue = new ReferenceQueue<Object>();
     }
 
