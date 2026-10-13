@@ -793,8 +793,12 @@ public final class GLRenderer implements Renderer {
             caps.add(Caps.TesselationShader);
         }
 
-        if (hasExtension("GL_ARB_shader_storage_buffer_object") || caps.contains(Caps.OpenGL43)
-                || caps.contains(Caps.OpenGLES31)) {
+        // GLES storage block bindings are fixed at link time. Our managed
+        // block path requires desktop program-interface queries and rebinding.
+        if (!caps.contains(Caps.OpenGLES20)
+                && (caps.contains(Caps.OpenGL43)
+                || (hasExtension("GL_ARB_shader_storage_buffer_object")
+                && hasExtension("GL_ARB_program_interface_query")))) {
             caps.add(Caps.ShaderStorageBufferObject);
             limits.put(Limits.ShaderStorageBufferObjectMaxBlockSize,
                     getInteger(GL4.GL_MAX_SHADER_STORAGE_BLOCK_SIZE));
@@ -903,14 +907,14 @@ public final class GLRenderer implements Renderer {
     }
 
     private int getUniformBlockIndex(int program, String uniformBlockName) {
-        if (gl3 != null) {
+        if (gl3 != null && caps.contains(Caps.OpenGL31)) {
             return gl3.glGetUniformBlockIndex(program, uniformBlockName);
         }
         return glext.glGetUniformBlockIndex(program, uniformBlockName);
     }
 
     private void bindUniformBufferBase(int bindingPoint, int buffer) {
-        if (gl3 != null) {
+        if (gl3 != null && caps.contains(Caps.OpenGL30)) {
             gl3.glBindBufferBase(GL3.GL_UNIFORM_BUFFER, bindingPoint, buffer);
         } else {
             glext.glBindBufferBase(GL3.GL_UNIFORM_BUFFER, bindingPoint, buffer);
@@ -918,7 +922,7 @@ public final class GLRenderer implements Renderer {
     }
 
     private void bindUniformBlock(int program, int uniformBlockIndex, int uniformBlockBinding) {
-        if (gl3 != null) {
+        if (gl3 != null && caps.contains(Caps.OpenGL31)) {
             gl3.glUniformBlockBinding(program, uniformBlockIndex, uniformBlockBinding);
         } else {
             glext.glUniformBlockBinding(program, uniformBlockIndex, uniformBlockBinding);
@@ -926,22 +930,22 @@ public final class GLRenderer implements Renderer {
     }
 
     private int getProgramResourceIndex(int program, int programInterface, String name) {
-        if (gl4 != null) {
+        if (gl4 != null && caps.contains(Caps.OpenGL43)) {
             return gl4.glGetProgramResourceIndex(program, programInterface, name);
         }
         return glext.glGetProgramResourceIndex(program, programInterface, name);
     }
 
     private void bindShaderStorageBufferBase(int bindingPoint, int buffer) {
-        if (gl4 != null) {
-            gl4.glBindBufferBase(GL4.GL_SHADER_STORAGE_BUFFER, bindingPoint, buffer);
+        if (gl3 != null && caps.contains(Caps.OpenGL30)) {
+            gl3.glBindBufferBase(GL4.GL_SHADER_STORAGE_BUFFER, bindingPoint, buffer);
         } else {
             glext.glBindBufferBase(GL4.GL_SHADER_STORAGE_BUFFER, bindingPoint, buffer);
         }
     }
 
     private void bindShaderStorageBlock(int program, int storageBlockIndex, int storageBlockBinding) {
-        if (gl4 != null) {
+        if (gl4 != null && caps.contains(Caps.OpenGL43)) {
             gl4.glShaderStorageBlockBinding(program, storageBlockIndex, storageBlockBinding);
         } else {
             glext.glShaderStorageBlockBinding(program, storageBlockIndex, storageBlockBinding);
@@ -2068,19 +2072,45 @@ public final class GLRenderer implements Renderer {
     public void setShader(Shader shader) {
         if (shader == null) {
             throw new IllegalArgumentException("Shader cannot be null");
-        } else {            
-            if (shader.isUpdateNeeded()) {
-                updateShaderData(shader);
+        }
+        // Validate the entire block set before compiling, binding a program or
+        // uploading earlier blocks. Unsupported blocks and invalid binding
+        // inputs must reject without partially mutating GL.
+        validateShaderBufferBlocks(shader);
+        if (shader.isUpdateNeeded()) {
+            updateShaderData(shader);
+        }
+
+        assert shader.getId() > 0;
+        updateShaderUniforms(shader);
+        updateShaderBufferBlocks(shader);
+        bindProgram(shader);
+    }
+
+    private void validateShaderBufferBlocks(Shader shader) {
+        ListMap<String, ShaderBufferBlock> blocks = shader.getBufferBlockMap();
+        for (int i = 0; i < blocks.size(); i++) {
+            ShaderBufferBlock block = blocks.getValue(i);
+            Caps capability;
+            if (block.getType() == BufferType.UniformBufferObject) {
+                capability = Caps.UniformBufferObject;
+            } else if (block.getType() == BufferType.ShaderStorageBufferObject) {
+                capability = Caps.ShaderStorageBufferObject;
+            } else {
+                throw new IllegalArgumentException("Buffer block type must be specified: " + block.getName());
             }
-
-            // NOTE: might want to check if any of the
-            // sources need an update?
-
-            assert shader.getId() > 0;
-
-            updateShaderUniforms(shader);
-            updateShaderBufferBlocks(shader);
-            bindProgram(shader);
+            BufferObject buffer = block.getBufferObject();
+            requireBufferObject(buffer);
+            if (buffer.getAccessHint() == BufferObject.AccessHint.CpuOnly) {
+                // Clean CPU-only blocks are ignored without any GPU work.
+                // Dirty ones retain the upload path's capability requirement
+                // before it retires a previous GPU allocation.
+                if (buffer.isUpdateNeeded()) {
+                    requireBufferCapability(capability);
+                }
+            } else {
+                validateBufferBinding(buffer.getBinding(), buffer, capability);
+            }
         }
     }
 
@@ -3501,6 +3531,7 @@ public final class GLRenderer implements Renderer {
     
     @Override
     public void setUniformBufferObject(int bindingPoint, BufferObject bufferObject) {
+        validateBufferBinding(bindingPoint, bufferObject, Caps.UniformBufferObject);
         if (bufferObject.isUpdateNeeded()) {
             updateUniformBufferObjectData(bufferObject);
         }
@@ -3521,6 +3552,7 @@ public final class GLRenderer implements Renderer {
 
     @Override
     public void setShaderStorageBufferObject(int bindingPoint, BufferObject bufferObject) {
+        validateBufferBinding(bindingPoint, bufferObject, Caps.ShaderStorageBufferObject);
         if (bufferObject.isUpdateNeeded()) {
             updateShaderStorageBufferObjectData(bufferObject);
         }
@@ -3775,15 +3807,41 @@ public final class GLRenderer implements Renderer {
         return -1;
     }
 
+    private void requireBufferCapability(Caps capability) {
+        if (!caps.contains(capability)) {
+            throw new UnsupportedOperationException("Renderer does not support managed " + capability);
+        }
+    }
+
+    private void requireBufferObject(BufferObject buffer) {
+        if (buffer == null) {
+            throw new IllegalArgumentException("Buffer object cannot be null");
+        }
+    }
+
+    private void validateBufferBinding(int bindingPoint, BufferObject buffer, Caps capability) {
+        requireBufferCapability(capability);
+        requireBufferObject(buffer);
+        if (bindingPoint < 0 || bindingPoint >= RenderContext.maxBufferObjectUnits) {
+            throw new IllegalArgumentException("Buffer binding point must be between 0 and "
+                    + (RenderContext.maxBufferObjectUnits - 1) + ": " + bindingPoint);
+        }
+        if (buffer.getAccessHint() == BufferObject.AccessHint.CpuOnly) {
+            throw new IllegalArgumentException("CPU-only buffer cannot be bound to the GPU");
+        }
+    }
+
     @Override
     public void updateShaderStorageBufferObjectData(BufferObject bo) {
-        if (!caps.contains(Caps.ShaderStorageBufferObject)) throw new IllegalArgumentException("The current video hardware doesn't support shader storage buffer objects ");
+        requireBufferCapability(Caps.ShaderStorageBufferObject);
+        requireBufferObject(bo);
         updateBufferData(GL4.GL_SHADER_STORAGE_BUFFER, bo);
     }
 
     @Override
     public void updateUniformBufferObjectData(BufferObject bo) {
-        if (!caps.contains(Caps.UniformBufferObject)) throw new IllegalArgumentException("The current video hardware doesn't support uniform buffer objects");
+        requireBufferCapability(Caps.UniformBufferObject);
+        requireBufferObject(bo);
         updateBufferData(GL4.GL_UNIFORM_BUFFER, bo);
     }
 
@@ -4432,17 +4490,44 @@ public final class GLRenderer implements Renderer {
         return gl4;
     }
 
-    @Override
-    public void deleteFence(GLFence fence) {
-        if(gl4 != null && fence.getId() != NativeObject.INVALID_ID){
-            gl4.glDeleteSync(fence);
-            objManager.unregisterObject(fence);
-            fence.resetObject();
+    private boolean supportsCoreDesktopFences() {
+        return gl4 != null && caps.contains(Caps.OpenGL32);
+    }
+
+    private void requireFenceSupport() {
+        boolean extensionSupport = glext != null
+                && (caps.contains(Caps.OpenGLES30)
+                || (extensions != null && hasExtension("GL_ARB_sync")));
+        if (!supportsCoreDesktopFences() && !extensionSupport) {
+            throw new UnsupportedOperationException("Renderer does not support fence cleanup");
         }
     }
 
     @Override
+    public void deleteFence(GLFence fence) {
+        if (fence.getId() == NativeObject.INVALID_ID) {
+            return;
+        }
+        requireFenceSupport();
+        if (supportsCoreDesktopFences()) {
+            gl4.glDeleteSync(fence);
+        } else {
+            // LWJGL2's extension API uses GLSync; LWJGL3/GLES use long handles.
+            Object handle = fence.getNativeSync();
+            if (caps.contains(Caps.OpenGLES30) || handle == null) {
+                handle = Long.valueOf(fence.getFenceId());
+            }
+            glext.glDeleteSync(handle);
+        }
+        objManager.unregisterObject(fence);
+        fence.resetObject();
+    }
+
+    @Override
     public void registerNativeObject(NativeObject nativeObject) {
+        if (nativeObject instanceof GLFence) {
+            requireFenceSupport();
+        }
         objManager.registerObject(nativeObject);
     }
 }

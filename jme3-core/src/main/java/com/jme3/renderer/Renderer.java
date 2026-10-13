@@ -360,14 +360,18 @@ public interface Renderer {
     /**
      * Uploads data of the buffer object on the GPU.
      *
-     * @param bo the buffer object to upload.
+     * @param bo the non-null buffer object to upload
+     * @throws UnsupportedOperationException if managed storage blocks are unsupported
+     * @throws IllegalArgumentException if the buffer is null
      */
     public void updateShaderStorageBufferObjectData(BufferObject bo);
 
     /**
      * Uploads data of the buffer object on the GPU.
      *
-     * @param bo the buffer object to upload.
+     * @param bo the non-null buffer object to upload
+     * @throws UnsupportedOperationException if uniform buffers are unsupported
+     * @throws IllegalArgumentException if the buffer is null
      */
     public void updateUniformBufferObjectData(BufferObject bo);
     
@@ -611,9 +615,33 @@ public interface Renderer {
      */
     public FrameBuffer getCurrentFrameBuffer();
 
-    public void setShaderStorageBufferObject(int bindingPoint, BufferObject bufferObject) ;
-    public void setUniformBufferObject(int bindingPoint, BufferObject bufferObject) ;
+    /**
+     * Uploads if needed and binds a shader storage buffer at an indexed point.
+     *
+     * @param bindingPoint index in [0, {@link RenderContext#maxBufferObjectUnits})
+     * @param bufferObject non-null buffer with a GPU access hint
+     * @throws UnsupportedOperationException if managed storage blocks are unsupported
+     * @throws IllegalArgumentException if the buffer or binding point is invalid
+     */
+    public void setShaderStorageBufferObject(int bindingPoint, BufferObject bufferObject);
 
+    /**
+     * Uploads if needed and binds a uniform buffer at an indexed point.
+     *
+     * @param bindingPoint index in [0, {@link RenderContext#maxBufferObjectUnits})
+     * @param bufferObject non-null buffer with a GPU access hint
+     * @throws UnsupportedOperationException if uniform buffers are unsupported
+     * @throws IllegalArgumentException if the buffer or binding point is invalid
+     */
+    public void setUniformBufferObject(int bindingPoint, BufferObject bufferObject);
+
+    /**
+     * Deletes a live fence and unregisters it from cleanup. Already deleted
+     * fences are ignored.
+     *
+     * @param fence the fence to delete
+     * @throws UnsupportedOperationException if this backend cannot clean up fences
+     */
     public void deleteFence(GLFence fence);
 
     /**

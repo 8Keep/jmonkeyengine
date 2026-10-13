@@ -109,6 +109,7 @@ class NativeResourceLifecycleTest {
     void fenceDeleteUnregistersBeforeCleanup() throws Exception {
         RecordingGl gl = new RecordingGl();
         GLRenderer renderer = gl.renderer();
+        renderer.getCaps().add(Caps.OpenGL32);
         GLFence first = new GLFence(41L, null);
         renderer.registerNativeObject(first);
 
