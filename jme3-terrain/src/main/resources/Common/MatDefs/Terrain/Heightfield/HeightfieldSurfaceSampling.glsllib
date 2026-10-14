@@ -1,0 +1,274 @@
+#ifdef GL_ES
+precision highp float;
+precision highp int;
+#endif
+
+// Surface cache pages store already-composed logical samples. Each logical
+// mip occupies its own array layer; these samplers must not use hardware mip
+// filtering. Albedo and normal/moment data are continuous, while semantics
+// are categorical and therefore use a nearest-filtered texture.
+uniform sampler2DArray m_SurfaceAlbedoPages;
+uniform sampler2DArray m_SurfaceNormalPages;
+uniform sampler2DArray m_SurfaceSemanticPages;
+uniform sampler2D m_SurfacePageTable;
+uniform int m_SurfacePhysicalSide;
+uniform int m_SurfaceGutter;
+uniform int m_SurfaceMipCount;
+uniform vec2 m_SurfaceRegionOrigin;
+uniform float m_SurfaceRegionSize;
+uniform float m_SurfaceCanonicalSpacing;
+
+// The direct path is an intentionally expensive reference implementation.
+// Its three source layers carry albedo/perceptual roughness and tangent-space
+// normals. Weights RGB are nonnegative normalized weights; A is an integer ID.
+uniform sampler2DArray m_SurfaceSourceAlbedo;
+uniform sampler2DArray m_SurfaceSourceNormal;
+uniform sampler2D m_SurfaceSourceWeights;
+uniform vec2 m_SurfaceSourceOriginFine;
+
+struct HeightfieldSurfaceSample {
+    vec3 albedo;
+    vec3 normalMoment;
+    float roughnessSquared;
+    float semanticId;
+};
+
+ivec2 HeightfieldSurface_pageTableCoord(vec2 worldXZ) {
+    ivec2 size = textureSize(m_SurfacePageTable, 0);
+    vec2 regionUV = (worldXZ - m_SurfaceRegionOrigin) / m_SurfaceRegionSize;
+    return clamp(ivec2(floor(regionUV * vec2(size))), ivec2(0), size - ivec2(1));
+}
+
+vec4 HeightfieldSurface_pageRecord(vec2 worldXZ) {
+    return texelFetch(m_SurfacePageTable,
+                      HeightfieldSurface_pageTableCoord(worldXZ), 0);
+}
+
+float HeightfieldSurface_autoLod(vec2 dxWorld, vec2 dyWorld, float baseStride) {
+    vec2 dxFine = dxWorld / m_SurfaceCanonicalSpacing;
+    vec2 dyFine = dyWorld / m_SurfaceCanonicalSpacing;
+    float footprint = max(length(dxFine), length(dyFine));
+    return log2(max(footprint / max(baseStride, 1.0), 1.0));
+}
+
+float HeightfieldSurface_selectLod(float autoLod, float fixedLod) {
+    float maximum = float(max(m_SurfaceMipCount - 1, 0));
+    return clamp(fixedLod >= 0.0 ? fixedLod : autoLod, 0.0, maximum);
+}
+
+HeightfieldSurfaceSample HeightfieldSurface_zeroSample() {
+    HeightfieldSurfaceSample value;
+    value.albedo = vec3(0.0);
+    value.normalMoment = vec3(0.0);
+    value.roughnessSquared = 0.0;
+    value.semanticId = 0.0;
+    return value;
+}
+
+HeightfieldSurfaceSample HeightfieldSurface_mixContinuous(
+        HeightfieldSurfaceSample first, HeightfieldSurfaceSample second, float alpha) {
+    HeightfieldSurfaceSample value;
+    value.albedo = mix(first.albedo, second.albedo, alpha);
+    value.normalMoment = mix(first.normalMoment, second.normalMoment, alpha);
+    value.roughnessSquared = mix(first.roughnessSquared, second.roughnessSquared, alpha);
+    // Semantic identity is categorical: it is selected from one logical mip.
+    value.semanticId = first.semanticId;
+    return value;
+}
+
+// Numerical reference for separating encoded payload errors from hardware
+// linear-filter phase precision. Production defaults to explicit-gradient taps.
+#ifdef SURFACE_PRECISE_FILTER
+vec4 HeightfieldSurface_preciseFilter(sampler2DArray pages, vec2 pageLocal, int layer) {
+    vec2 coordinate = pageLocal + float(m_SurfaceGutter) - vec2(0.5);
+    ivec2 lower = ivec2(floor(coordinate));
+    // Derive the weights from the same rounded coordinate used for the taps.
+    // Independently optimized floor/fract expressions can disagree near an
+    // integer after page-local coordinates are translated by the gutter.
+    vec2 alpha = coordinate - vec2(lower);
+    ivec2 maximum = textureSize(pages, 0).xy - ivec2(1);
+    vec4 a = texelFetch(pages, ivec3(clamp(lower, ivec2(0), maximum), layer), 0);
+    vec4 b = texelFetch(pages, ivec3(clamp(lower + ivec2(1, 0), ivec2(0), maximum), layer), 0);
+    vec4 c = texelFetch(pages, ivec3(clamp(lower + ivec2(0, 1), ivec2(0), maximum), layer), 0);
+    vec4 d = texelFetch(pages, ivec3(clamp(lower + ivec2(1, 1), ivec2(0), maximum), layer), 0);
+    return mix(mix(a, b, alpha.x), mix(c, d, alpha.x), alpha.y);
+}
+#endif
+
+HeightfieldSurfaceSample HeightfieldSurface_readCacheLevel(
+        vec2 worldXZ, vec2 dxFine, vec2 dyFine, vec4 page, int logicalMip) {
+    int physicalSide = max(m_SurfacePhysicalSide, 1);
+    float stride = max(page.z, 1.0) * exp2(float(logicalMip));
+    vec2 finePosition = (worldXZ - m_SurfaceRegionOrigin) / m_SurfaceCanonicalSpacing;
+    vec2 pageLocal = (finePosition - page.xy) / stride;
+    vec2 uv = (pageLocal + float(m_SurfaceGutter)) / float(physicalSide);
+    vec2 dxUV = dxFine / stride / float(physicalSide);
+    vec2 dyUV = dyFine / stride / float(physicalSide);
+    float layer = page.w + float(logicalMip);
+
+    HeightfieldSurfaceSample value;
+#ifdef SURFACE_PRECISE_FILTER
+    value.albedo = HeightfieldSurface_preciseFilter(m_SurfaceAlbedoPages, pageLocal, int(layer + 0.5)).rgb;
+    vec4 normalAndRoughness = HeightfieldSurface_preciseFilter(m_SurfaceNormalPages, pageLocal, int(layer + 0.5));
+#else
+    value.albedo = textureGrad(m_SurfaceAlbedoPages, vec3(uv, layer), dxUV, dyUV).rgb;
+    vec4 normalAndRoughness = textureGrad(
+            m_SurfaceNormalPages, vec3(uv, layer), dxUV, dyUV);
+#endif
+    value.normalMoment = normalAndRoughness.rgb;
+    value.roughnessSquared = normalAndRoughness.a;
+
+    // NEAREST filtering is required for the semantic page sampler. Convert
+    // its normalized Luminance8 value back to the stored byte-sized ID.
+    ivec2 semanticTexel = ivec2(floor(pageLocal)) + ivec2(m_SurfaceGutter);
+    semanticTexel = clamp(semanticTexel, ivec2(0), ivec2(physicalSide - 1));
+    float encodedSemantic = texelFetch(m_SurfaceSemanticPages,
+            ivec3(semanticTexel, int(layer + 0.5)), 0).r;
+    value.semanticId = floor(encodedSemantic * 255.0 + 0.5);
+    return value;
+}
+
+// Returns the closest semantic sample at the nearest logical mip. The
+// continuous channels are blended between adjacent logical mips below.
+float HeightfieldSurface_readCacheSemantic(vec2 worldXZ, vec4 page, float lod) {
+    int logicalMip = int(floor(lod + 0.5));
+    float stride = max(page.z, 1.0) * exp2(float(logicalMip));
+    vec2 finePosition = (worldXZ - m_SurfaceRegionOrigin) / m_SurfaceCanonicalSpacing;
+    vec2 pageLocal = (finePosition - page.xy) / stride;
+    int physicalSide = max(m_SurfacePhysicalSide, 1);
+    ivec2 semanticTexel = ivec2(floor(pageLocal)) + ivec2(m_SurfaceGutter);
+    semanticTexel = clamp(semanticTexel, ivec2(0), ivec2(physicalSide - 1));
+    float encodedSemantic = texelFetch(m_SurfaceSemanticPages,
+            ivec3(semanticTexel, int(page.w + float(logicalMip) + 0.5)), 0).r;
+    return floor(encodedSemantic * 255.0 + 0.5);
+}
+
+HeightfieldSurfaceSample HeightfieldSurface_readCache(
+        vec2 worldXZ, vec2 dxWorld, vec2 dyWorld, float fixedLod) {
+    vec4 page = HeightfieldSurface_pageRecord(worldXZ);
+    vec2 dxFine = dxWorld / m_SurfaceCanonicalSpacing;
+    vec2 dyFine = dyWorld / m_SurfaceCanonicalSpacing;
+    float lod = HeightfieldSurface_selectLod(
+            HeightfieldSurface_autoLod(dxWorld, dyWorld, page.z), fixedLod);
+    int lowerMip = int(floor(lod));
+    int upperMip = min(lowerMip + 1, max(m_SurfaceMipCount - 1, 0));
+    float alpha = lod - float(lowerMip);
+    HeightfieldSurfaceSample lower = HeightfieldSurface_readCacheLevel(
+            worldXZ, dxFine, dyFine, page, lowerMip);
+    HeightfieldSurfaceSample upper = HeightfieldSurface_readCacheLevel(
+            worldXZ, dxFine, dyFine, page, upperMip);
+    HeightfieldSurfaceSample value = HeightfieldSurface_mixContinuous(lower, upper, alpha);
+    value.semanticId = HeightfieldSurface_readCacheSemantic(worldXZ, page, lod);
+    return value;
+}
+
+ivec2 HeightfieldSurface_clampSource(ivec2 sourceTexel) {
+    ivec2 size = textureSize(m_SurfaceSourceWeights, 0);
+    return clamp(sourceTexel, ivec2(0), size - ivec2(1));
+}
+
+HeightfieldSurfaceSample HeightfieldSurface_composeCanonical(ivec2 sourceTexel) {
+    sourceTexel = HeightfieldSurface_clampSource(sourceTexel);
+    vec4 weights = texelFetch(m_SurfaceSourceWeights, sourceTexel, 0);
+    vec3 albedo = vec3(0.0);
+    vec3 normalSum = vec3(0.0);
+    float roughnessSquared = 0.0;
+    for (int layer = 0; layer < 3; ++layer) {
+        float weight = weights[layer];
+        vec4 material = texelFetch(m_SurfaceSourceAlbedo,
+                                   ivec3(sourceTexel, layer), 0);
+        vec3 normal = texelFetch(m_SurfaceSourceNormal,
+                                 ivec3(sourceTexel, layer), 0).xyz;
+        albedo += material.rgb * weight;
+        normalSum += normal * weight;
+        roughnessSquared += material.a * material.a * weight;
+    }
+    float normalLength = length(normalSum);
+    HeightfieldSurfaceSample value;
+    value.albedo = albedo;
+    value.normalMoment = normalLength > 1.0e-8
+            ? normalSum / normalLength : vec3(0.0, 1.0, 0.0);
+    value.roughnessSquared = roughnessSquared;
+    value.semanticId = floor(weights.a + 0.5);
+    return value;
+}
+
+HeightfieldSurfaceSample HeightfieldSurface_averageCanonicalBlock(
+        ivec2 blockOrigin, int footprint) {
+    HeightfieldSurfaceSample total = HeightfieldSurface_zeroSample();
+    for (int z = 0; z < 32; ++z) {
+        if (z >= footprint) {
+            break;
+        }
+        for (int x = 0; x < 32; ++x) {
+            if (x >= footprint) {
+                break;
+            }
+            HeightfieldSurfaceSample sampleValue =
+                    HeightfieldSurface_composeCanonical(blockOrigin + ivec2(x, z));
+            total.albedo += sampleValue.albedo;
+            total.normalMoment += sampleValue.normalMoment;
+            total.roughnessSquared += sampleValue.roughnessSquared;
+        }
+    }
+    float sampleCount = float(max(footprint * footprint, 1));
+    total.albedo /= sampleCount;
+    total.normalMoment /= sampleCount;
+    total.roughnessSquared /= sampleCount;
+    return total;
+}
+
+HeightfieldSurfaceSample HeightfieldSurface_readDirectLevel(
+        vec2 worldXZ, vec4 page, int logicalMip) {
+    float sampleStride = max(page.z, 1.0) * exp2(float(logicalMip));
+    int footprint = int(sampleStride + 0.5);
+    vec2 finePosition = (worldXZ - m_SurfaceRegionOrigin) / m_SurfaceCanonicalSpacing;
+    vec2 q = (finePosition - page.xy) / sampleStride - vec2(0.5);
+    ivec2 lower = ivec2(floor(q));
+    vec2 alpha = q - vec2(lower);
+    ivec2 baseOrigin = ivec2(floor(page.xy - m_SurfaceSourceOriginFine + vec2(0.5)));
+
+    HeightfieldSurfaceSample s00 = HeightfieldSurface_averageCanonicalBlock(
+            baseOrigin + lower * footprint, footprint);
+    HeightfieldSurfaceSample s10 = HeightfieldSurface_averageCanonicalBlock(
+            baseOrigin + (lower + ivec2(1, 0)) * footprint, footprint);
+    HeightfieldSurfaceSample s01 = HeightfieldSurface_averageCanonicalBlock(
+            baseOrigin + (lower + ivec2(0, 1)) * footprint, footprint);
+    HeightfieldSurfaceSample s11 = HeightfieldSurface_averageCanonicalBlock(
+            baseOrigin + (lower + ivec2(1, 1)) * footprint, footprint);
+    HeightfieldSurfaceSample row0 = HeightfieldSurface_mixContinuous(s00, s10, alpha.x);
+    HeightfieldSurfaceSample row1 = HeightfieldSurface_mixContinuous(s01, s11, alpha.x);
+    HeightfieldSurfaceSample value = HeightfieldSurface_mixContinuous(row0, row1, alpha.y);
+    return value;
+}
+
+float HeightfieldSurface_directSemanticAtMip(vec2 worldXZ, vec4 page, int logicalMip) {
+    float sampleStride = max(page.z, 1.0) * exp2(float(logicalMip));
+    int footprint = int(sampleStride + 0.5);
+    vec2 finePosition = (worldXZ - m_SurfaceRegionOrigin) / m_SurfaceCanonicalSpacing;
+    vec2 q = (finePosition - page.xy) / sampleStride - vec2(0.5);
+    ivec2 nearestCell = ivec2(floor(q + vec2(0.5)));
+    ivec2 blockOrigin = ivec2(floor(page.xy - m_SurfaceSourceOriginFine + vec2(0.5)))
+                      + nearestCell * footprint;
+    ivec2 semanticOffset = ivec2((footprint - 1) / 2);
+    ivec2 sourceTexel = HeightfieldSurface_clampSource(blockOrigin + semanticOffset);
+    return floor(texelFetch(m_SurfaceSourceWeights, sourceTexel, 0).a + 0.5);
+}
+
+HeightfieldSurfaceSample HeightfieldSurface_readDirect(
+        vec2 worldXZ, vec2 dxWorld, vec2 dyWorld, float fixedLod) {
+    vec4 page = HeightfieldSurface_pageRecord(worldXZ);
+    float lod = HeightfieldSurface_selectLod(
+            HeightfieldSurface_autoLod(dxWorld, dyWorld, page.z), fixedLod);
+    int lowerMip = int(floor(lod));
+    int upperMip = min(lowerMip + 1, max(m_SurfaceMipCount - 1, 0));
+    float alpha = lod - float(lowerMip);
+    HeightfieldSurfaceSample lower = HeightfieldSurface_readDirectLevel(
+            worldXZ, page, lowerMip);
+    HeightfieldSurfaceSample upper = HeightfieldSurface_readDirectLevel(
+            worldXZ, page, upperMip);
+    HeightfieldSurfaceSample value = HeightfieldSurface_mixContinuous(lower, upper, alpha);
+    int semanticMip = int(floor(lod + 0.5));
+    value.semanticId = HeightfieldSurface_directSemanticAtMip(worldXZ, page, semanticMip);
+    return value;
+}
