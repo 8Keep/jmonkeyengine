@@ -4,6 +4,12 @@
 #import "Common/ShaderLib/GLSLCompat.glsllib"
 #import "Common/ShaderLib/module/pbrlighting/PBRLightingUtils.glsllib"
 
+// Preserve the legacy GLSL 1.10 path even if the material flag is set.
+#if defined(DIRECTIONAL_VISIBILITY) && ((!defined(GL_ES) && __VERSION__ >= 150) || (defined(GL_ES) && __VERSION__ >= 300))
+    #import "Common/ShaderLib/module/pbrlighting/DirectionalVisibility.glsllib"
+    #define DIRECTIONAL_VISIBILITY_ENABLED 1
+#endif
+
 uniform vec4 g_LightData[NB_LIGHTS];
 uniform int g_LightCount;
 uniform vec3 g_CameraPosition;
@@ -70,8 +76,22 @@ void main() {
             break;
         }
         #endif
+        #ifdef DIRECTIONAL_VISIBILITY_ENABLED
+            vec4 lightData0 = g_LightData[i];
+            vec4 lightData1 = g_LightData[i + 1];
+            bool designatedSun = DirectionalVisibilityMatchesLight(lightData0, lightData1);
+            vec3 directBefore = surface.directLightContribution.rgb;
+        #endif
         PBRLightingUtils_computeDirectLightContribution(
             g_LightData[i], g_LightData[i + 1], g_LightData[i + 2], surface);
+        #ifdef DIRECTIONAL_VISIBILITY_ENABLED
+            if (designatedSun) {
+                float viewDepth = -(g_ViewMatrix * vec4(worldPosition, 1.0)).z;
+                float visibility = DirectionalVisibilityForPosition(worldPosition, viewDepth);
+                vec3 sunDelta = surface.directLightContribution.rgb - directBefore;
+                surface.directLightContribution.rgb = directBefore + sunDelta * visibility;
+            }
+        #endif
     }
 
     // Artistic hemisphere fill from the scene's AmbientLights. The lighting

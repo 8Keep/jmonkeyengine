@@ -40,6 +40,25 @@ MaterialDef Heightfield {
         Float SnowLine : 120.0
         Float SnowFade : 18.0
 
+        // Optional four-cascade directional visibility for one designated sun.
+        Boolean UseDirectionalVisibility : false
+        Boolean DirectionalHardwareShadows : false
+        Int DirectionalCascadeCount : 1
+        Float DirectionalShadowMapSize : 1024.0
+        Float DirectionalShadowBias : 0.0005
+        Float DirectionalShadowStrength : 1.0
+        Color DirectionalShadowSplits : 100.0 300.0 900.0 3000.0
+        Vector3 DirectionalShadowLightDir
+        Vector2 DirectionalShadowFade : 0.0 0.0
+        Texture2D DirectionalShadowMap0
+        Texture2D DirectionalShadowMap1
+        Texture2D DirectionalShadowMap2
+        Texture2D DirectionalShadowMap3
+        Matrix4 DirectionalLightViewProjectionMatrix0
+        Matrix4 DirectionalLightViewProjectionMatrix1
+        Matrix4 DirectionalLightViewProjectionMatrix2
+        Matrix4 DirectionalLightViewProjectionMatrix3
+
     }
 
     Technique {
@@ -55,10 +74,13 @@ MaterialDef Heightfield {
             WorldMatrix
             WorldNormalMatrix
             CameraPosition
+            ViewMatrix
         }
 
         Defines {
             HEIGHTFIELD_LOD : UseHeightfieldLod
+            DIRECTIONAL_VISIBILITY : UseDirectionalVisibility
+            DIRECTIONAL_HARDWARE_SHADOWS : DirectionalHardwareShadows
         }
 
     }

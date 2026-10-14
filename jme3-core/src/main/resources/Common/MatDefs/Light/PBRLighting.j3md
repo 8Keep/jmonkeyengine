@@ -119,6 +119,25 @@ MaterialDef PBR Lighting {
         Float PCFEdge
         Float ShadowMapSize
 
+        // Opt-in four-cascade visibility for the designated directional light.
+        Boolean UseDirectionalVisibility : false
+        Boolean DirectionalHardwareShadows : false
+        Int DirectionalCascadeCount : 1
+        Float DirectionalShadowMapSize : 1024.0
+        Float DirectionalShadowBias : 0.0005
+        Float DirectionalShadowStrength : 1.0
+        Color DirectionalShadowSplits : 100.0 300.0 900.0 3000.0
+        Vector3 DirectionalShadowLightDir
+        Vector2 DirectionalShadowFade : 0.0 0.0
+        Texture2D DirectionalShadowMap0
+        Texture2D DirectionalShadowMap1
+        Texture2D DirectionalShadowMap2
+        Texture2D DirectionalShadowMap3
+        Matrix4 DirectionalLightViewProjectionMatrix0
+        Matrix4 DirectionalLightViewProjectionMatrix1
+        Matrix4 DirectionalLightViewProjectionMatrix2
+        Matrix4 DirectionalLightViewProjectionMatrix3
+
         // For hardware skinning
         Int NumberOfBones
         Matrix4Array BoneMatrices
@@ -209,6 +228,8 @@ MaterialDef PBR Lighting {
             NUM_MORPH_TARGETS: NumberOfMorphTargets
             NUM_TARGETS_BUFFERS: NumberOfTargetsBuffers
             HORIZON_FADE: HorizonFade
+            DIRECTIONAL_VISIBILITY : UseDirectionalVisibility
+            DIRECTIONAL_HARDWARE_SHADOWS : DirectionalHardwareShadows
             EXPOSUREMAP : SunLightExposureMap
             USE_VERTEX_COLORS_AS_SUN_INTENSITY : UseVertexColorsAsSunIntensity
             STATIC_SUN_INTENSITY : StaticSunIntensity
