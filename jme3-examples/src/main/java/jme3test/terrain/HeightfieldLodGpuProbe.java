@@ -235,6 +235,84 @@ public final class HeightfieldLodGpuProbe implements AutoCloseable {
         return new Verification(compared, maxError, maxTolerance);
     }
 
+    /**
+     * Check a decimated node page in a caller-owned streaming atlas against the
+     * canonical source supplied to this probe. Each node has its own complete
+     * grid and halo; its page origin is expressed in that node's sample lattice.
+     * The shader outputs local coordinates, so the node translation is added
+     * here before comparison with the canonical CPU oracle. This checks actual
+     * layer contents and uniforms after incremental upload or slot reuse.
+     */
+    public Verification verifyNodePage(Patch patch, HeightfieldPage payload,
+            TextureArray atlas, int layer, FrameBuffer resumeTarget) {
+        requireOpen();
+        requireFloatReadbackSupport();
+        int cells = gridCells(patch);
+        Node node = patch.getNode();
+        if (payload == null || atlas == null || payload.getCells() != cells
+                || atlas.getImage().getWidth() != payload.getTextureSize()
+                || atlas.getImage().getHeight() != payload.getTextureSize()
+                || layer < 0 || layer >= atlas.getImage().getData().size()
+                || payload.getSampleSpacing() != page.getSampleSpacing() * node.getStride()
+                || node.getOriginX() % node.getStride() != 0
+                || node.getOriginZ() % node.getStride() != 0) {
+            throw new IllegalArgumentException("node page, layer and spacing must match the canonical patch");
+        }
+        ensureTarget(cells);
+        material.setTexture("HeightPages", atlas);
+        material.setInt("HeightLayer", layer);
+        material.setFloat("SampleSpacing", payload.getSampleSpacing());
+        material.setInt("PageCells", cells);
+        configure(patch, cells);
+        material.setVector2("PageLatticeOrigin", new Vector2f(
+                node.getOriginX() / node.getStride(), node.getOriginZ() / node.getStride()));
+        material.setVector2("PatchLatticeOrigin", new Vector2f(0, 0));
+        material.setInt("SampleStride", 1);
+        FloatBuffer actual;
+        try {
+            renderManager.renderViewPort(viewPort, 0f);
+            readback.clear();
+            renderer.readFrameBufferWithFormat(target, readback, Image.Format.RGBA32F);
+            readback.rewind();
+            actual = readback.asFloatBuffer();
+        } finally {
+            renderer.setFrameBuffer(resumeTarget);
+        }
+        float originX = node.getOriginX() * page.getSampleSpacing();
+        float originZ = node.getOriginZ() * page.getSampleSpacing();
+        Vector3f expected = new Vector3f();
+        int compared = 0;
+        float maximum = 0, allowed = 0;
+        for (int z = 0; z <= cells; z++) for (int x = 0; x <= cells; x++) {
+            HeightfieldReconstruction.morphVertex(page,
+                    node.getOriginX() + x * node.getStride(),
+                    node.getOriginZ() + z * node.getStride(), node.getStride(),
+                    morphForVertex(patch, x, z, cells), expected);
+            int offset = (z * (cells + 1) + x) * 4;
+            float[] values = {actual.get(offset) + originX, actual.get(offset + 1),
+                actual.get(offset + 2) + originZ, actual.get(offset + 3)};
+            float[] oracle = {expected.x, expected.y, expected.z, 1};
+            for (int channel = 0; channel < 4; channel++) {
+                float value = values[channel];
+                float limit = tolerance(oracle[channel], value);
+                float error = Math.abs(value - oracle[channel]);
+                if (!Float.isFinite(value) || error > limit || (channel == 3 && value != 1)) {
+                    throw mismatch(patch, x, z, channel, oracle[channel], value, limit,
+                            "streamed node page differs from canonical source");
+                }
+                maximum = Math.max(maximum, error);
+                allowed = Math.max(allowed, limit);
+                compared++;
+            }
+        }
+        // Leave the ordinary resident verification API usable on this probe.
+        material.setTexture("HeightPages", heightPages);
+        material.setInt("HeightLayer", heightLayer);
+        material.setFloat("SampleSpacing", page.getSampleSpacing());
+        material.setInt("PageCells", page.getCells());
+        return new Verification(compared, maximum, allowed);
+    }
+
     private void configure(Patch patch, int cells) {
         Node node = patch.getNode();
         if (node.getOriginX() < 0 || node.getOriginZ() < 0

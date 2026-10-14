@@ -624,6 +624,35 @@ public interface Renderer {
     public void setUniformBufferObject(int bindingPoint, BufferObject bufferObject);
 
     /**
+     * Inserts a GPU completion fence into the command stream and registers it
+     * for cleanup by this renderer. The fence covers commands issued earlier
+     * in the same GL command stream. Call this on the renderer's GL context
+     * thread.
+     *
+     * @return a live fence owned by this renderer
+     * @throws UnsupportedOperationException if this backend does not support fences
+     * @throws IllegalStateException if GL reports a null or zero fence handle
+     */
+    public default GLFence createFence() {
+        throw new UnsupportedOperationException("Renderer does not support fences");
+    }
+
+    /**
+     * Polls a fence without waiting for GPU completion.
+     * The zero-timeout poll may flush queued commands and may incur CPU
+     * overhead; it does not wait for GPU completion.
+     *
+     * @param fence a live fence created by this renderer, on its GL context thread
+     * @return true if the fence is signaled, false if it is still pending
+     * @throws UnsupportedOperationException if this backend does not support fences
+     * @throws IllegalArgumentException if the fence is null, stale, or owned by another renderer
+     * @throws IllegalStateException if the GL wait reports a failure or unknown status
+     */
+    public default boolean isFenceSignaled(GLFence fence) {
+        throw new UnsupportedOperationException("Renderer does not support fences");
+    }
+
+    /**
      * Deletes a live fence and unregisters it from cleanup. Already deleted
      * fences are ignored.
      *

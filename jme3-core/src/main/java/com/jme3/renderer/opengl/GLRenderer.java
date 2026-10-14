@@ -98,6 +98,9 @@ public final class GLRenderer implements Renderer {
     private final IntBuffer intBuf16 = BufferUtils.createIntBuffer(16);
     private final RenderContext context = new RenderContext();
     private final NativeObjectManager objManager = new NativeObjectManager();
+    // Weak keys validate createFence ownership without keeping otherwise-unused
+    // wrappers alive; NativeObjectManager remains responsible for native cleanup.
+    private final Set<GLFence> managedFences = Collections.newSetFromMap(new WeakHashMap<>());
     private final EnumSet<Caps> caps = EnumSet.noneOf(Caps.class);
     private final EnumMap<Limits, Integer> limits = new EnumMap<>(Limits.class);
 
@@ -919,6 +922,7 @@ public final class GLRenderer implements Renderer {
     public void resetGLObjects() {
         logger.log(Level.FINE, "Resetting objects and invalidating state");
         objManager.resetObjects();
+        managedFences.clear();
         statistics.clearMemory();
         invalidateState();
     }
@@ -928,6 +932,7 @@ public final class GLRenderer implements Renderer {
         logger.log(Level.FINE, "Deleting objects and invalidating state");
         texUtil.cleanup();
         objManager.deleteAllObjects(this);
+        managedFences.clear();
         statistics.clearMemory();
         invalidateState();
     }
@@ -2565,8 +2570,18 @@ public final class GLRenderer implements Renderer {
     }
 
     private void deleteRenderBuffer(FrameBuffer fb, RenderBuffer rb) {
-        intBuf1.put(0, rb.getId());
+        if (rb.getTexture() != null || rb.getId() <= 0) {
+            return;
+        }
+        int renderBufferId = rb.getId();
+        intBuf1.put(0, renderBufferId);
         glfbo.glDeleteRenderbuffersEXT(intBuf1);
+        // OpenGL resets the current renderbuffer binding when that object is
+        // deleted. Do not let a newly allocated object reusing this name skip
+        // its bind and storage setup.
+        if (context.boundRB == renderBufferId) {
+            context.boundRB = 0;
+        }
     }
 
     @Override
@@ -4160,8 +4175,97 @@ public final class GLRenderer implements Renderer {
                 && (caps.contains(Caps.OpenGLES30)
                 || (extensions != null && hasExtension("GL_ARB_sync")));
         if (!supportsCoreDesktopFences() && !extensionSupport) {
-            throw new UnsupportedOperationException("Renderer does not support fence cleanup");
+            throw new UnsupportedOperationException("Renderer does not support fences");
         }
+    }
+
+    private void forgetManagedFence(GLFence fence) {
+        if (managedFences.remove(fence)) {
+            return;
+        }
+        // NativeObjectManager deletes a destructible clone, not the original
+        // wrapper. Both share the same NativeObject unique ID, so retire the
+        // original wrapper's weak entry as well.
+        long uniqueId = fence.getUniqueId();
+        Iterator<GLFence> iterator = managedFences.iterator();
+        while (iterator.hasNext()) {
+            if (iterator.next().getUniqueId() == uniqueId) {
+                iterator.remove();
+            }
+        }
+    }
+
+    @Override
+    public GLFence createFence() {
+        // Check support before issuing any GL commands.
+        requireFenceSupport();
+
+        GLFence fence;
+        if (supportsCoreDesktopFences()) {
+            fence = gl4.glFenceSync(GL4.GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+            if (fence == null || fence.getFenceId() == 0L || fence.getId() == NativeObject.INVALID_ID) {
+                throw new IllegalStateException("OpenGL failed to create a fence");
+            }
+        } else {
+            Object nativeSync = glext.glFenceSync(GLExt.GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+            if (nativeSync == null) {
+                throw new IllegalStateException("OpenGL failed to create a fence");
+            }
+            long fenceId;
+            if (nativeSync instanceof Number) {
+                fenceId = ((Number) nativeSync).longValue();
+                if (fenceId == 0L) {
+                    throw new IllegalStateException("OpenGL returned a zero fence handle");
+                }
+            } else {
+                // Extension bindings such as LWJGL2 expose GLSync as an opaque
+                // object. Keep that object as the native handle; this non-zero
+                // value is only the wrapper's diagnostic/fallback ID.
+                fenceId = Integer.toUnsignedLong(System.identityHashCode(nativeSync));
+                if (fenceId == 0L) {
+                    fenceId = 1L;
+                }
+            }
+            fence = new GLFence(fenceId, nativeSync);
+        }
+
+        objManager.registerObject(fence);
+        managedFences.add(fence);
+        return fence;
+    }
+
+    @Override
+    public boolean isFenceSignaled(GLFence fence) {
+        requireFenceSupport();
+        if (fence == null || fence.getId() == NativeObject.INVALID_ID
+                || fence.getFenceId() == 0L || !managedFences.contains(fence)) {
+            throw new IllegalArgumentException("Fence is not live and owned by this renderer");
+        }
+
+        int status;
+        if (supportsCoreDesktopFences()) {
+            status = gl4.glClientWaitSync(fence, GLExt.GL_SYNC_FLUSH_COMMANDS_BIT, 0L);
+        } else {
+            // LWJGL2 needs its GLSync wrapper, while LWJGL3 and GLES use the
+            // pointer value represented by a Long.
+            Object handle = fence.getNativeSync();
+            if (caps.contains(Caps.OpenGLES30) || handle == null) {
+                handle = Long.valueOf(fence.getFenceId());
+            }
+            status = glext.glClientWaitSync(handle, GLExt.GL_SYNC_FLUSH_COMMANDS_BIT, 0L);
+        }
+
+        if (status == GLExt.GL_ALREADY_SIGNALED || status == GLExt.GL_CONDITION_SATISFIED) {
+            return true;
+        }
+        if (status == GLExt.GL_TIMEOUT_EXPIRED) {
+            return false;
+        }
+        if (status == GLExt.GL_WAIT_FAILED) {
+            throw new IllegalStateException("OpenGL failed while polling a fence");
+        }
+        throw new IllegalStateException("OpenGL returned an unknown fence status: 0x"
+                + Integer.toHexString(status));
     }
 
     @Override
@@ -4181,6 +4285,7 @@ public final class GLRenderer implements Renderer {
             glext.glDeleteSync(handle);
         }
         objManager.unregisterObject(fence);
+        forgetManagedFence(fence);
         fence.resetObject();
     }
 
