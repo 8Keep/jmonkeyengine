@@ -31,6 +31,7 @@
  */
 package com.jme3.terrain.heightfield;
 
+import com.jme3.bounding.BoundingBox;
 import com.jme3.renderer.Caps;
 import com.jme3.renderer.Renderer;
 import com.jme3.scene.Mesh;
@@ -89,11 +90,34 @@ public final class HeightfieldGrid {
         if (page == null || page.getCells() != cells) {
             throw new IllegalArgumentException("page dimensions must match the shared topology");
         }
+        return shareTopology(page.createBound());
+    }
+
+    /**
+     * Share this grid's buffers for a hierarchy node. The node's displaced
+     * bound and LOD shader coordinates are relative to its complete source
+     * page, not to the node's lower-left corner. The material must use the
+     * node origin/stride and this grid's cell count with UseHeightfieldLod.
+     * Its global PageLatticeOrigin must be exactly representable and aligned
+     * to the power-of-two source page's cell count; otherwise global parent
+     * snapping differs from the CPU hierarchy's page-relative reconstruction.
+     *
+     * @param node immutable node whose patch grid matches this topology
+     * @return independent mesh wrapper with a conservative displaced bound
+     */
+    public Mesh createLodPatchMesh(HeightfieldHierarchy.Node node) {
+        if (node == null || node.getSpan() / node.getStride() != cells) {
+            throw new IllegalArgumentException("node patch dimensions must match the shared topology");
+        }
+        return shareTopology(node.getBound());
+    }
+
+    private Mesh shareTopology(BoundingBox bound) {
         Mesh patch = new Mesh();
         for (VertexBuffer buffer : topology.getBufferList().getArray()) {
             patch.setBuffer(buffer);
         }
-        patch.setBound(page.createBound());
+        patch.setBound(bound);
         return patch;
     }
 

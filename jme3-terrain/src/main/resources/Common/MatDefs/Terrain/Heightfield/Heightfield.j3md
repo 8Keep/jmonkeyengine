@@ -9,6 +9,26 @@ MaterialDef Heightfield {
         // bound. Positive and finite; shared by main and depth vertex passes.
         Float SampleSpacing : 1.0
 
+        // Optional CPU-selected patch LOD. When enabled, the vertex grid uses
+        // integer patch coordinates and samples the global source lattice.
+        Boolean UseHeightfieldLod : false
+        // Fine-lattice cell dimensions of the page layer and this draw patch.
+        Int PageCells : 0
+        Int PatchGridCells : 0
+        // Integer-valued origins: global source origin, then patch offset within page.
+        // For the CPU hierarchy contract, PageLatticeOrigin must be aligned to
+        // the power-of-two PageCells lattice. An arbitrary offset changes the
+        // shader's global parent snap and is not supported by that hierarchy.
+        Vector2 PageLatticeOrigin : 0.0 0.0
+        Vector2 PatchLatticeOrigin : 0.0 0.0
+        Int SampleStride : 1
+        Float InteriorMorph : 0.0
+        // Edge order: West (-X), East (+X), North (+Z), South (-Z).
+        Float EdgeMorphWest : 0.0
+        Float EdgeMorphEast : 0.0
+        Float EdgeMorphNorth : 0.0
+        Float EdgeMorphSouth : 0.0
+
         // Linear-space surface colors. The shader returns linear HDR values.
         Color GrassColor : 0.18 0.28 0.12 1.0
         Color RockColor : 0.24 0.23 0.21 1.0
@@ -37,6 +57,10 @@ MaterialDef Heightfield {
             CameraPosition
         }
 
+        Defines {
+            HEIGHTFIELD_LOD : UseHeightfieldLod
+        }
+
     }
 
     // Keep the depth pass on the same GPU-displaced surface as the lit pass.
@@ -46,6 +70,10 @@ MaterialDef Heightfield {
 
         WorldParameters {
             WorldViewProjectionMatrix
+        }
+
+        Defines {
+            HEIGHTFIELD_LOD : UseHeightfieldLod
         }
 
         ForcedRenderState {

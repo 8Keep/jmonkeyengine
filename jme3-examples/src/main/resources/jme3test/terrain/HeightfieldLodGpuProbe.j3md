@@ -1,0 +1,35 @@
+// Example-only float readback material for the shared heightfield LOD helper.
+MaterialDef HeightfieldLodGpuProbe {
+    MaterialParameters {
+        TextureArray HeightPages -LINEAR
+        Int HeightLayer : 0
+        Float SampleSpacing : 1.0
+        Boolean UseHeightfieldLod : true
+        Int PageCells : 0
+        Int PatchGridCells : 0
+        Vector2 PageLatticeOrigin : 0.0 0.0
+        Vector2 PatchLatticeOrigin : 0.0 0.0
+        Int SampleStride : 1
+        Float InteriorMorph : 0.0
+        Float EdgeMorphWest : 0.0
+        Float EdgeMorphEast : 0.0
+        Float EdgeMorphNorth : 0.0
+        Float EdgeMorphSouth : 0.0
+    }
+
+    Technique {
+        VertexShader GLSL300 GLSL150: jme3test/terrain/HeightfieldLodGpuProbe.vert
+        FragmentShader GLSL300 GLSL150: jme3test/terrain/HeightfieldLodGpuProbe.frag
+
+        Defines {
+            HEIGHTFIELD_LOD : UseHeightfieldLod
+        }
+
+        RenderState {
+            FaceCull Off
+            DepthTest Off
+            DepthWrite Off
+            Blend Off
+        }
+    }
+}

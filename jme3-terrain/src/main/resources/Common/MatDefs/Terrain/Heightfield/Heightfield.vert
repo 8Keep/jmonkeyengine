@@ -14,13 +14,32 @@ varying vec3 wPosition;
 varying vec3 wNormal;
 
 void main() {
-    ivec2 grid = ivec2(floor(inPosition.xz + vec2(0.5)));
-    float height = Heightfield_readHeight(grid);
+    ivec2 grid;
+    vec3 localPosition;
+    float leftHeight;
+    float rightHeight;
+    float backHeight;
+    float frontHeight;
 
-    float leftHeight = Heightfield_readHeight(grid + ivec2(-1, 0));
-    float rightHeight = Heightfield_readHeight(grid + ivec2(1, 0));
-    float backHeight = Heightfield_readHeight(grid + ivec2(0, -1));
-    float frontHeight = Heightfield_readHeight(grid + ivec2(0, 1));
+#ifdef HEIGHTFIELD_LOD
+    ivec2 patchVertex = ivec2(floor(inPosition.xz + vec2(0.5)));
+    localPosition = Heightfield_lodPosition(patchVertex, grid);
+    // Shading keeps the fine source-lattice central difference as an explicit
+    // approximation while geometry moves between fine and parent surfaces.
+    leftHeight = Heightfield_readGlobalHeight(grid + ivec2(-1, 0));
+    rightHeight = Heightfield_readGlobalHeight(grid + ivec2(1, 0));
+    backHeight = Heightfield_readGlobalHeight(grid + ivec2(0, -1));
+    frontHeight = Heightfield_readGlobalHeight(grid + ivec2(0, 1));
+#else
+    grid = ivec2(floor(inPosition.xz + vec2(0.5)));
+    float height = Heightfield_readHeight(grid);
+    leftHeight = Heightfield_readHeight(grid + ivec2(-1, 0));
+    rightHeight = Heightfield_readHeight(grid + ivec2(1, 0));
+    backHeight = Heightfield_readHeight(grid + ivec2(0, -1));
+    frontHeight = Heightfield_readHeight(grid + ivec2(0, 1));
+    localPosition = vec3(inPosition.x * m_SampleSpacing, height,
+                         inPosition.z * m_SampleSpacing);
+#endif
 
     // Equivalent to the central-difference gradient, without overflow from
     // subtracting opposite finite heights or dividing by very small spacing.
@@ -31,8 +50,6 @@ void main() {
                         gradientNormal.y);
     vec3 localNormal = normalize(gradientNormal / largest);
 
-    vec3 localPosition = vec3(inPosition.x * m_SampleSpacing, height,
-                              inPosition.z * m_SampleSpacing);
     vec4 worldPosition = g_WorldMatrix * vec4(localPosition, 1.0);
 
     wPosition = worldPosition.xyz;
