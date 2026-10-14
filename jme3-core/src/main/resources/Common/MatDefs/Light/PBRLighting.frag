@@ -12,6 +12,12 @@
 
 #import "Common/ShaderLib/module/pbrlighting/PBRLightingUtils.glsllib"
 
+// Preserve the legacy GLSL 1.10 path even if the material flag is set.
+#if defined(DIRECTIONAL_VISIBILITY) && ((!defined(GL_ES) && __VERSION__ >= 150) || (defined(GL_ES) && __VERSION__ >= 300))
+    #import "Common/ShaderLib/module/pbrlighting/DirectionalVisibility.glsllib"
+    #define DIRECTIONAL_VISIBILITY_ENABLED 1
+#endif
+
 #ifdef DEBUG_VALUES_MODE
     uniform int m_DebugValuesMode;
 #endif
@@ -48,10 +54,22 @@ void main(){
         vec4 lightData0 = g_LightData[i];
         vec4 lightData1 = g_LightData[i+1];
         vec4 lightData2 = g_LightData[i+2];    
+        #ifdef DIRECTIONAL_VISIBILITY_ENABLED
+            bool designatedSun = DirectionalVisibilityMatchesLight(lightData0, lightData1);
+            vec3 directBefore = surface.directLightContribution.rgb;
+        #endif
         PBRLightingUtils_computeDirectLightContribution(
-          lightData0, lightData1, lightData2, 
+          lightData0, lightData1, lightData2,
           surface
         );
+        #ifdef DIRECTIONAL_VISIBILITY_ENABLED
+            if (designatedSun) {
+                float viewDepth = -(g_ViewMatrix * vec4(surface.position, 1.0)).z;
+                float visibility = DirectionalVisibilityForPosition(surface.position, viewDepth);
+                vec3 sunDelta = surface.directLightContribution.rgb - directBefore;
+                surface.directLightContribution.rgb = directBefore + sunDelta * visibility;
+            }
+        #endif
     }
 
 
