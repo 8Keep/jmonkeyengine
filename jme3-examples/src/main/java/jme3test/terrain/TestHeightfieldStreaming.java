@@ -1,0 +1,779 @@
+/*
+ * Copyright (c) 2009-2024 jMonkeyEngine
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are
+ * met:
+ *
+ * * Redistributions of source code must retain the above copyright
+ *   notice, this list of conditions and the following disclaimer.
+ *
+ * * Redistributions in binary form must reproduce the above copyright
+ *   notice, this list of conditions and the following disclaimer in the
+ *   documentation and/or other materials provided with the distribution.
+ *
+ * * Neither the name of 'jMonkeyEngine' nor the names of its contributors
+ *   may be used to endorse or promote products derived from this software
+ *   without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+package jme3test.terrain;
+
+import com.jme3.app.SimpleApplication;
+import com.jme3.light.AmbientLight;
+import com.jme3.light.DirectionalLight;
+import com.jme3.material.Material;
+import com.jme3.math.ColorRGBA;
+import com.jme3.math.Vector2f;
+import com.jme3.math.Vector3f;
+import com.jme3.post.FilterPostProcessor;
+import com.jme3.post.SceneProcessor;
+import com.jme3.post.filters.FXAAFilter;
+import com.jme3.post.filters.KHRToneMapFilter;
+import com.jme3.profile.AppProfiler;
+import com.jme3.renderer.RenderManager;
+import com.jme3.renderer.ViewPort;
+import com.jme3.renderer.queue.RenderQueue;
+import com.jme3.renderer.queue.RenderQueue.ShadowMode;
+import com.jme3.shadow.DirectionalLightShadowFilter;
+import com.jme3.scene.Geometry;
+import com.jme3.system.AppSettings;
+import com.jme3.terrain.heightfield.HeightfieldGrid;
+import com.jme3.terrain.heightfield.HeightfieldHierarchy;
+import com.jme3.terrain.heightfield.HeightfieldHierarchy.Node;
+import com.jme3.terrain.heightfield.HeightfieldLod;
+import com.jme3.terrain.heightfield.HeightfieldLod.Patch;
+import com.jme3.terrain.heightfield.HeightfieldLod.Selection;
+import com.jme3.terrain.heightfield.HeightfieldLod.Transition;
+import com.jme3.terrain.heightfield.HeightfieldPage;
+import com.jme3.terrain.heightfield.HeightfieldReconstruction;
+import com.jme3.terrain.heightfield.HeightfieldResidency;
+import com.jme3.terrain.heightfield.HeightfieldResidency.PageKey;
+import com.jme3.terrain.heightfield.HeightfieldResidency.Request;
+import com.jme3.terrain.heightfield.HeightfieldResidency.Handle;
+import com.jme3.terrain.heightfield.HeightfieldResidency.Frame;
+import com.jme3.terrain.heightfield.HeightfieldResidency.Stats;
+import com.jme3.renderer.opengl.GLFence;
+import com.jme3.bounding.BoundingBox;
+import com.jme3.texture.FrameBuffer;
+import com.jme3.texture.Image;
+import com.jme3.texture.Texture;
+import com.jme3.texture.TextureArray;
+import com.jme3.util.BufferUtils;
+import java.awt.image.BufferedImage;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.FloatBuffer;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.LinkedHashSet;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import javax.imageio.ImageIO;
+
+/**
+ * Finite engine-only residency control: one canonical source is decimated into
+ * independent 16-cell GPU pages, with a fixed atlas and delayed synthetic jobs.
+ * This proves publication and retirement around the existing CPU LOD oracle.
+ * It does not stream a regional dataset, accelerate selection, or claim scenic
+ * quality or production speed. Preparation runs deterministically on the owner
+ * thread; real worker scheduling and device loss remain separate acceptance.
+ */
+public final class TestHeightfieldStreaming extends SimpleApplication {
+    private static final int CELLS = 128, PATCH_CELLS = 16, CAPACITY = 32;
+    private static final int PAGE_BYTES = (PATCH_CELLS + 3) * (PATCH_CELLS + 3) * Float.BYTES;
+    private static final float SPACING = .5f, TRANSITION_STEP = .25f;
+    private static final int PATCH_BUDGET = 16, MAX_FRAMES = 720, MAX_JOBS = 12;
+    private static final double PIXEL_TARGET = 1.5;
+    private final Path output;
+    private final CountDownLatch completed = new CountDownLatch(1);
+    private final Map<Node, Geometry> geometryByNode = new IdentityHashMap<>();
+    private final Set<Node> displayed = Collections.newSetFromMap(new IdentityHashMap<>());
+    private final List<Job> jobs = new ArrayList<>();
+    private final Map<PageKey, Integer> requestedAt = new HashMap<>();
+    private final Set<PageKey> obsolete = new LinkedHashSet<>();
+    private final List<Integer> publicationLatency = new ArrayList<>();
+    private HeightfieldResidency residency;
+    private HeightfieldPage page, pendingPage;
+    private HeightfieldHierarchy hierarchy, pendingHierarchy;
+    private HeightfieldLod lod;
+    private Transition transition;
+    private Selection currentSelection;
+    private CameraPath cameraPath;
+    private HeightfieldLodGpuProbe gpuProbe;
+    private TextureArray atlas;
+    private FrameBuffer captureTarget;
+    private Frame frameLease;
+    private volatile Throwable failure;
+    private long revision;
+    private int frame, checks, uploads, staleResults, preparationFailures, uploadFailures;
+    private int cancellations, recreations, edits, peakRequests, peakReady, peakRetired, peakFrames;
+    private int fencePolls, fencePending, fenceSignaled, waitingFrames, fullAtlasFrames;
+    private long peakQueuedBytes, peakPreparedBytes, comparedChannels;
+    private float maximumGpuError;
+    private boolean injectedPreparation, injectedUpload, injectedCancellation;
+    private boolean retiringStorage;
+
+    private TestHeightfieldStreaming(Path output) { this.output = output; }
+
+    public static void main(String[] args) throws Exception {
+        boolean assertions = false;
+        assert assertions = true;
+        Path output = args.length > 1 ? Paths.get(args[1]) : null;
+        if (!assertions) throw new IllegalStateException("Streaming control requires -ea");
+        TestHeightfieldStreaming app = new TestHeightfieldStreaming(output);
+        AppSettings settings = new AppSettings(true);
+        settings.setRenderer(args.length > 0 ? args[0] : AppSettings.ANGLE_GLES3);
+        settings.setResolution(960, 640);
+        settings.setAudioRenderer(null);
+        settings.setGraphicsDebug(Boolean.getBoolean("jme.heightfieldLod.debug"));
+        settings.setGammaCorrection(true);
+        settings.setVSync(false);
+        app.setSettings(settings);
+        app.setShowSettings(false);
+        app.start();
+        if (output != null) {
+            if (!app.completed.await(90, TimeUnit.SECONDS)) {
+                app.stop(false);
+                throw new IllegalStateException("Streaming control exceeded 90 seconds", app.failure);
+            }
+            app.stop(true);
+            if (app.failure != null) throw new IllegalStateException("Streaming control failed", app.failure);
+        }
+    }
+
+    @Override public void handleError(String message, Throwable error) {
+        fail(error == null ? new IllegalStateException(message) : error);
+    }
+
+    @Override public void simpleInitApp() {
+        try {
+            flyCam.setEnabled(output == null);
+            flyCam.setMoveSpeed(24);
+            flyCam.setDragToRotate(true);
+            HeightfieldGrid.requireSupported(renderer);
+            residency = new HeightfieldResidency(PATCH_CELLS,
+                    new HeightfieldResidency.Limits(CAPACITY, MAX_JOBS, MAX_JOBS * PAGE_BYTES,
+                            6L * PAGE_BYTES, 2, 2L * PAGE_BYTES, 12, 12));
+            atlas = createAtlas();
+            page = makePage(0);
+            hierarchy = new HeightfieldHierarchy(page, PATCH_CELLS, 0);
+            installRoot(hierarchy, revision);
+            rebuildScene();
+            addLightingAndCapture();
+            cameraPath = new CameraPath();
+            cameraPath.apply(0);
+        } catch (Throwable error) { fail(error); }
+    }
+
+    private TextureArray createAtlas() {
+        List<Image> layers = new ArrayList<>();
+        float[] zeros = new float[(PATCH_CELLS + 3) * (PATCH_CELLS + 3)];
+        for (int slot = 0; slot < CAPACITY; slot++) {
+            layers.add(new HeightfieldPage(PATCH_CELLS, SPACING, zeros).createImage());
+        }
+        TextureArray result = new TextureArray(layers);
+        result.setMinFilter(Texture.MinFilter.NearestNoMipMaps);
+        result.setMagFilter(Texture.MagFilter.Nearest);
+        result.setWrap(Texture.WrapMode.EdgeClamp);
+        return result;
+    }
+
+    private static HeightfieldPage makePage(long sourceRevision) {
+        int side = CELLS + 3;
+        float[] samples = new float[side * side];
+        for (int z = -1; z <= CELLS + 1; z++) for (int x = -1; x <= CELLS + 1; x++) {
+            samples[(z + 1) * side + x + 1] = (float) height(x * (double) SPACING,
+                    z * (double) SPACING, sourceRevision);
+        }
+        return new HeightfieldPage(CELLS, SPACING, samples);
+    }
+
+    private static double height(double x, double z) { return height(x, z, 0); }
+    private static double height(double x, double z, long sourceRevision) {
+        double rolling = 1.1 * Math.sin(.19 * x) * Math.cos(.16 * z)
+                + .42 * Math.sin(.31 * (x + .7 * z));
+        double ridge = 5.2 * Math.exp(-((x - 17.5) * (x - 17.5)) / 30.0)
+                * Math.exp(-((z - 31.0) * (z - 31.0)) / 520.0);
+        double spike = 7.0 * Math.exp(-((x - 43.0) * (x - 43.0)
+                + (z - 22.0) * (z - 22.0)) / 7.0);
+        return rolling + ridge + spike + sourceRevision * 2.0
+                * Math.exp(-((x - 35) * (x - 35) + (z - 30) * (z - 30)) / 180.0);
+    }
+
+    private static PageKey key(Node node, long sourceRevision) {
+        return new PageKey(sourceRevision, node.getOriginX(), node.getOriginZ(), node.getStride());
+    }
+
+    private HeightfieldPage prepare(Node node, long sourceRevision) {
+        int side = PATCH_CELLS + 3, stride = node.getStride();
+        float[] samples = new float[side * side];
+        for (int z = -1; z <= PATCH_CELLS + 1; z++) for (int x = -1; x <= PATCH_CELLS + 1; x++) {
+            samples[(z + 1) * side + x + 1] = (float) height(
+                    (node.getOriginX() + x * stride) * (double) SPACING,
+                    (node.getOriginZ() + z * stride) * (double) SPACING, sourceRevision);
+        }
+        return new HeightfieldPage(PATCH_CELLS, SPACING * stride, samples);
+    }
+
+    private void installRoot(HeightfieldHierarchy source, long sourceRevision) {
+        PageKey root = key(source.getRoot(), sourceRevision);
+        Request request = residency.request(root);
+        require(request != null && residency.complete(request, prepare(source.getRoot(), sourceRevision)),
+                "bootstrap root preparation fits bounded storage");
+        uploadPrepared(false);
+        require(residency.ready(root) != null && residency.pin(root), "ready root pinned before drawing");
+    }
+
+    private void rebuildScene() {
+        for (Node node : displayed) rootNode.detachChild(geometryByNode.get(node));
+        displayed.clear();
+        geometryByNode.clear();
+        if (gpuProbe != null) gpuProbe.close();
+        gpuProbe = output == null ? null
+                : new HeightfieldLodGpuProbe(assetManager, renderManager, renderer, page);
+        lod = new HeightfieldLod(hierarchy);
+        transition = new Transition(hierarchy);
+        HeightfieldGrid grid = new HeightfieldGrid(PATCH_CELLS);
+        for (Node node : hierarchy.getNodes()) {
+            Geometry geometry = new Geometry("stream-" + node.getOriginX() + "-" + node.getOriginZ()
+                    + "-" + node.getStride(), grid.createLodPatchMesh(node));
+            Vector3f origin = new Vector3f(node.getOriginX() * SPACING, 0, node.getOriginZ() * SPACING);
+            BoundingBox bound = node.getBound();
+            bound.setCenter(bound.getCenter().subtract(origin));
+            geometry.getMesh().setBound(bound);
+            geometry.setLocalTranslation(origin);
+            geometry.setShadowMode(ShadowMode.CastAndReceive);
+            // Capture.postFrame precedes ForwardPipeline's Translucent queue;
+            // this atlas is sampled only by opaque terrain and its earlier shadows.
+            geometry.setQueueBucket(RenderQueue.Bucket.Opaque);
+            Material material = new Material(assetManager, "Common/MatDefs/Terrain/Heightfield/Heightfield.j3md");
+            material.setTexture("HeightPages", atlas);
+            material.setFloat("SampleSpacing", SPACING * node.getStride());
+            material.setBoolean("UseHeightfieldLod", true);
+            material.setInt("PageCells", PATCH_CELLS);
+            material.setInt("PatchGridCells", PATCH_CELLS);
+            material.setVector2("PageLatticeOrigin", new Vector2f(
+                    node.getOriginX() / node.getStride(), node.getOriginZ() / node.getStride()));
+            material.setVector2("PatchLatticeOrigin", new Vector2f(0, 0));
+            material.setInt("SampleStride", 1);
+            material.setFloat("SnowLine", 7.8f);
+            material.setFloat("SnowFade", 1.5f);
+            material.setColor("GrassColor", new ColorRGBA(.12f, .20f, .075f, 1));
+            material.setColor("RockColor", new ColorRGBA(.29f, .26f, .22f, 1));
+            material.setColor("SnowColor", new ColorRGBA(.83f, .87f, .9f, 1));
+            geometry.setMaterial(material);
+            geometryByNode.put(node, geometry);
+        }
+    }
+
+    @Override public void simpleUpdate(float tpf) {
+        if (failure != null || hierarchy == null) return;
+        try {
+            frame++;
+            require(frameLease == null, "preceding opaque terrain and shadow reads fenced");
+            if (frame == 500) retiringStorage = true;
+            residency.poll();
+            Iterator<PageKey> oldKeys = obsolete.iterator();
+            while (oldKeys.hasNext()) {
+                PageKey old = oldKeys.next();
+                residency.evict(old);
+                residency.cancelPrepared(old);
+                if (residency.ready(old) == null) oldKeys.remove();
+            }
+            if (output != null) cameraPath.apply(frame);
+            if (frame == 320) beginEdit();
+            // Avoid accumulating whole retired arrays outside the slot budget.
+            // Keep the old cover if a real fence still reports pending, and
+            // replace storage only when every old terrain use has completed.
+            if (retiringStorage && residency.stats().frames == 0) {
+                recreate();
+                retiringStorage = false;
+            }
+            double target = output == null ? PIXEL_TARGET : requestedPixels(frame);
+            Selection ideal = lod.select(cam, target, PATCH_BUDGET, node -> true);
+            Set<PageKey> retained = new LinkedHashSet<>();
+            for (Patch patch : transition.getPatches()) addAncestors(retained, patch.getNode(), revision);
+            Set<PageKey> wanted = new LinkedHashSet<>();
+            if (pendingHierarchy != null) wanted.add(key(pendingHierarchy.getRoot(), revision + 1));
+            wanted.add(key(hierarchy.getRoot(), revision));
+            // Parent-first ordering keeps coarse fallback and sibling transactions useful.
+            Set<PageKey> idealAncestors = new LinkedHashSet<>();
+            for (Node leaf : ideal.getLeaves()) addAncestors(idealAncestors, leaf, revision);
+            for (Node node : hierarchy.getNodes()) {
+                if (idealAncestors.contains(key(node, revision))) wanted.add(key(node, revision));
+            }
+            if (frame >= 150 && frame < 205) {
+                // Deliberately retain more desired cache pages than the atlas can
+                // hold. This is a finite capacity-pressure test, not useful prefetch.
+                for (Node node : hierarchy.getNodes()) {
+                    wanted.add(key(node, revision));
+                    if (wanted.size() >= CAPACITY + 8) break;
+                }
+            }
+            for (Node node : hierarchy.getNodes()) {
+                PageKey candidate = key(node, revision);
+                if (!retained.contains(candidate) && !wanted.contains(candidate)) {
+                    residency.evict(candidate);
+                    residency.cancelPrepared(candidate);
+                }
+            }
+            for (Job job : jobs) {
+                if (!wanted.contains(job.request.getKey()) && !retained.contains(job.request.getKey())) {
+                    residency.cancel(job.request);
+                }
+            }
+            schedule(wanted);
+            deliverJobs();
+            uploadPrepared(true);
+            publishEdit();
+            currentSelection = lod.select(cam, target, PATCH_BUDGET,
+                    node -> residency.ready(key(node, revision)) != null);
+            if (currentSelection.isReadinessLimited()) waitingFrames++;
+            transition.advance(currentSelection, TRANSITION_STEP);
+            List<Patch> patches = transition.getPatches();
+            verifyFrame(patches);
+            List<PageKey> drawKeys = new ArrayList<>();
+            for (Patch patch : patches) drawKeys.add(key(patch.getNode(), revision));
+            frameLease = residency.acquire(drawKeys);
+            require(frameLease != null, "whole draw cover acquired atomically");
+            syncDrawSet(patches);
+            sampleBudgets();
+            if (output != null && isCaptureFrame(frame)) {
+                for (Patch patch : patches) {
+                    Handle handle = residency.ready(key(patch.getNode(), revision));
+                    HeightfieldLodGpuProbe.Verification result = gpuProbe.verifyNodePage(patch,
+                            residency.get(handle), atlas, handle.getSlot(), captureTarget);
+                    comparedChannels += result.getComparedChannels();
+                    maximumGpuError = Math.max(maximumGpuError, result.getMaximumAbsoluteError());
+                }
+                printMetrics(patches, target);
+            }
+        } catch (Throwable error) { fail(error); }
+    }
+
+    private void addAncestors(Set<PageKey> keys, Node node, long sourceRevision) {
+        for (Node current = node; current != null; current = current.getParent()) keys.add(key(current, sourceRevision));
+    }
+
+    private void schedule(Set<PageKey> wanted) {
+        for (PageKey candidate : wanted) {
+            if (jobs.size() >= MAX_JOBS) break;
+            Request request = residency.request(candidate);
+            if (request == null) continue;
+            Node node = findNode(candidate);
+            require(node != null, "request matches an immutable source node");
+            requestedAt.put(candidate, frame);
+            jobs.add(new Job(request, node, candidate.revision, frame + (candidate.revision != revision ? 8 : 2 + node.getLevel() * 2)));
+            if (!injectedCancellation && frame > 15 && node.getLevel() > 0) {
+                require(residency.cancel(request), "explicit cancellation accepted");
+                injectedCancellation = true;
+                cancellations++;
+            }
+        }
+    }
+
+    private Node findNode(PageKey candidate) {
+        HeightfieldHierarchy source = candidate.revision == revision ? hierarchy : pendingHierarchy;
+        if (source == null) return null;
+        for (Node node : source.getNodes()) if (key(node, candidate.revision).equals(candidate)) return node;
+        return null;
+    }
+
+    private void deliverJobs() {
+        Iterator<Job> iterator = jobs.iterator();
+        while (iterator.hasNext()) {
+            Job job = iterator.next();
+            if (frame < job.due) continue;
+            if (!injectedPreparation && frame > 5 && job.node.getLevel() > 0) {
+                residency.cancel(job.request);
+                injectedPreparation = true;
+                preparationFailures++;
+                iterator.remove();
+                continue;
+            }
+            boolean accepted = residency.complete(job.request, job.payload == null
+                    ? (job.payload = prepare(job.node, job.revision)) : job.payload);
+            if (accepted || !residency.isPending(job.request)) {
+                if (!accepted) staleResults++;
+                iterator.remove();
+            }
+        }
+    }
+
+    private void uploadPrepared(boolean inject) {
+        try {
+            uploads += residency.uploadPrepared((slot, payload) -> {
+                Image image = payload.createImage();
+                try { renderer.modifyTexture(atlas, image, slot, 0, 0); }
+                finally {
+                    // modifyTexture consumes client memory before returning;
+                    // this temporary image was never manager-registered.
+                    BufferUtils.destroyDirectBuffer(image.getData(0));
+                }
+                if (inject && !injectedUpload && frame > 20) {
+                    injectedUpload = true;
+                    uploadFailures++;
+                    throw new InjectedUploadFailure();
+                }
+            });
+        } catch (InjectedUploadFailure expected) {
+            // A physical write happened, but its mapping was not published.
+        }
+        Iterator<Map.Entry<PageKey, Integer>> iterator = requestedAt.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<PageKey, Integer> entry = iterator.next();
+            if (residency.ready(entry.getKey()) != null) {
+                publicationLatency.add(frame - entry.getValue());
+                iterator.remove();
+            } else if (frame - entry.getValue() > 200) iterator.remove();
+        }
+    }
+
+    private void beginEdit() {
+        pendingPage = makePage(revision + 1);
+        pendingHierarchy = new HeightfieldHierarchy(pendingPage, PATCH_CELLS, 0);
+        // Admission is retried by schedule(), with this root ahead of ordinary
+        // refinement. The pinned old cover remains visible under queue pressure.
+    }
+
+    private void publishEdit() {
+        if (pendingHierarchy == null || residency.ready(key(pendingHierarchy.getRoot(), revision + 1)) == null) return;
+        require(residency.pin(key(pendingHierarchy.getRoot(), revision + 1)), "new coherent revision root pinned");
+        HeightfieldHierarchy old = hierarchy;
+        long oldRevision = revision;
+        residency.unpin(key(old.getRoot(), oldRevision));
+        hierarchy = pendingHierarchy;
+        page = pendingPage;
+        pendingHierarchy = null;
+        pendingPage = null;
+        revision++;
+        rebuildScene();
+        for (Node node : old.getNodes()) obsolete.add(key(node, oldRevision));
+        // Old completions remain bounded in jobs and are rejected by cancellation.
+        for (Job job : jobs) if (job.revision == oldRevision) residency.cancel(job.request);
+        requestedAt.keySet().removeIf(oldKey -> oldKey.revision == oldRevision);
+        edits++;
+        System.out.println("HEIGHTFIELD_STREAM_EDIT frame=" + frame + " revision=" + revision);
+    }
+
+    private void recreate() {
+        // Storage replacement on the same command stream is a recreation test,
+        // not a simulated or actual device/context-loss proof. Deleting the old
+        // image never aliases new storage. All prior atlas reads are proved done
+        // before replacing it, so whole retired arrays cannot escape our budget.
+        require(residency.stats().frames == 0, "old storage leases drained before replacement");
+        discardAtlas();
+        residency.reset();
+        obsolete.clear();
+        atlas = createAtlas();
+        installRoot(hierarchy, revision);
+        rebuildScene();
+        recreations++;
+        System.out.println("HEIGHTFIELD_STREAM_RECREATE frame=" + frame);
+    }
+
+    private void discardAtlas() {
+        renderer.deleteImage(atlas.getImage());
+        for (ByteBuffer data : atlas.getImage().getData()) BufferUtils.destroyDirectBuffer(data);
+    }
+
+    private double requestedPixels(int f) {
+        return f < 31 || (f >= 210 && f < 270) || (f >= 460 && f < 500) ? 1000 : PIXEL_TARGET;
+    }
+
+    private void syncDrawSet(List<Patch> patches) {
+        Set<Node> next = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (Patch patch : patches) {
+            Node node = patch.getNode();
+            next.add(node);
+            Handle handle = residency.ready(key(node, revision));
+            require(handle != null && residency.isRetained(handle), "draw references a retained slot generation");
+            Material material = geometryByNode.get(node).getMaterial();
+            material.setInt("HeightLayer", handle.getSlot());
+            material.setFloat("InteriorMorph", patch.getMorph());
+            material.setFloat("EdgeMorphWest", patch.getEdgeMorph(0));
+            material.setFloat("EdgeMorphEast", patch.getEdgeMorph(1));
+            material.setFloat("EdgeMorphSouth", patch.getEdgeMorph(2));
+            material.setFloat("EdgeMorphNorth", patch.getEdgeMorph(3));
+            if (!displayed.contains(node)) rootNode.attachChild(geometryByNode.get(node));
+        }
+        for (Node prior : displayed) if (!next.contains(prior)) rootNode.detachChild(geometryByNode.get(prior));
+        displayed.clear();
+        displayed.addAll(next);
+    }
+
+    private void sampleBudgets() {
+        Stats stats = residency.stats();
+        peakRequests = Math.max(peakRequests, stats.requests);
+        peakQueuedBytes = Math.max(peakQueuedBytes, stats.queuedBytes);
+        peakPreparedBytes = Math.max(peakPreparedBytes, stats.preparedBytes);
+        peakReady = Math.max(peakReady, stats.readySlots);
+        peakRetired = Math.max(peakRetired, stats.retiredSlots);
+        peakFrames = Math.max(peakFrames, stats.frames);
+        if (stats.readySlots + stats.retiredSlots == CAPACITY) fullAtlasFrames++;
+        require(stats.requests <= MAX_JOBS && stats.queuedBytes <= MAX_JOBS * PAGE_BYTES
+                && stats.preparedBytes <= 6L * PAGE_BYTES && stats.retiredSlots <= 12
+                && stats.readySlots + stats.retiredSlots <= CAPACITY && stats.frames <= 12
+                && jobs.size() <= MAX_JOBS, "independent residency/preparation/frame budgets hold");
+        require(residency.ready(key(hierarchy.getRoot(), revision)) != null, "root fallback remains ready");
+    }
+
+    private void verifyFrame(List<Patch> patches) {
+        int[] coverage = new int[CELLS * CELLS];
+        for (Patch patch : patches) {
+            Node node = patch.getNode();
+            Handle handle = residency.ready(key(node, revision));
+            require(handle != null, "all cover pages share current ready revision");
+            HeightfieldPage payload = residency.get(handle);
+            for (int z = 0; z <= PATCH_CELLS; z++) for (int x = 0; x <= PATCH_CELLS; x++) {
+                require(payload.getHeight(x, z) == page.getHeight(node.getOriginX() + x * node.getStride(),
+                        node.getOriginZ() + z * node.getStride()), "node payload retains exact canonical samples");
+            }
+            for (int z = node.getOriginZ(); z < node.getOriginZ() + node.getSpan(); z++) {
+                for (int x = node.getOriginX(); x < node.getOriginX() + node.getSpan(); x++) coverage[z * CELLS + x]++;
+            }
+        }
+        for (int count : coverage) require(count == 1, "draw cover owns every cell exactly once");
+    }
+
+    private void printMetrics(List<Patch> patches, double target) {
+        System.out.println("HEIGHTFIELD_STREAM frame=" + frame + " revision=" + revision
+                + " patches=" + patches.size() + " target=" + target
+                + " selectionPixels=" + currentSelection.getMaximumPixels()
+                + " budgetLimited=" + currentSelection.isBudgetLimited()
+                + " readinessLimited=" + currentSelection.isReadinessLimited()
+                + " sourceLimited=" + currentSelection.isSourceLimited()
+                + " ready=" + residency.stats().readySlots
+                + " retired=" + residency.stats().retiredSlots
+                + " pending=" + residency.stats().requests
+                + " prepared=" + residency.stats().preparedPages
+                + " gpuChannels=" + comparedChannels
+                + " gpuError=" + maximumGpuError);
+    }
+
+    private static boolean isCaptureFrame(int f) {
+        return f == 1 || f == 45 || f == 120 || f == 215 || f == 280 || f == 328
+                || f == 350 || f == 499 || f == 500 || f == 530 || f == 650;
+    }
+    private String captureLabel(int f) { return isCaptureFrame(f) ? "stream-f" + String.format("%03d", f) : null; }
+
+    private void finish() {
+        require(preparationFailures == 1 && uploadFailures == 1 && cancellations == 1
+                && staleResults > 0 && edits == 1 && recreations == 1
+                && peakRetired > 0 && peakFrames > 1 && waitingFrames > 0 && fenceSignaled > 0
+                && fullAtlasFrames > 0,
+                "finite control exercised failures, cancellation, stale work, edit and recreation");
+        Collections.sort(publicationLatency);
+        int p50 = percentile(.5), p95 = percentile(.95), maximum = percentile(1);
+        System.out.println("HEIGHTFIELD_STREAM_PASS frames=" + frame + " checks=" + checks
+                + " uploads=" + uploads + " stale=" + staleResults
+                + " preparationFailures=" + preparationFailures + " uploadFailures=" + uploadFailures
+                + " peakRequests=" + peakRequests + " peakQueuedBytes=" + peakQueuedBytes
+                + " peakPreparedBytes=" + peakPreparedBytes + " peakReady=" + peakReady
+                + " peakRetired=" + peakRetired + " peakFrames=" + peakFrames
+                + " publicationFrameLatencyP50=" + p50 + " p95=" + p95 + " max=" + maximum
+                + " gpuChannels=" + comparedChannels + " maxGpuError=" + maximumGpuError
+                + " waitingFrames=" + waitingFrames + " fullAtlasFrames=" + fullAtlasFrames
+                + " nativeFencePolls=" + fencePolls + " nativePending=" + fencePending
+                + " nativeSignaled=" + fenceSignaled);
+        completed.countDown();
+    }
+    private int percentile(double p) {
+        return publicationLatency.isEmpty() ? 0
+                : publicationLatency.get(Math.max(0, (int) Math.ceil(p * publicationLatency.size()) - 1));
+    }
+    private void require(boolean condition, String message) {
+        checks++;
+        if (!condition) throw new IllegalStateException(message + " at frame " + frame);
+    }
+    private void fail(Throwable error) {
+        failure = error;
+        error.printStackTrace();
+        completed.countDown();
+    }
+    private static final class InjectedUploadFailure extends RuntimeException { }
+    private static final class Job {
+        final Request request;
+        final Node node;
+        final long revision;
+        final int due;
+        HeightfieldPage payload;
+        Job(Request request, Node node, long revision, int due) {
+            this.request = request; this.node = node; this.revision = revision; this.due = due;
+        }
+    }
+    private final class Completion implements HeightfieldResidency.Completion {
+        private final GLFence fence = renderer.createFence();
+        private final int release = frame + (frame >= 200 && frame < 280 ? 8 : 3);
+        @Override public boolean isComplete() {
+            if (!retiringStorage && frame < release) return false;
+            fencePolls++;
+            boolean signaled = renderer.isFenceSignaled(fence);
+            if (signaled) fenceSignaled++; else fencePending++;
+            return signaled;
+        }
+        @Override public void close() { renderer.deleteFence(fence); }
+    }
+    private void addLightingAndCapture() {
+        DirectionalLight sun = new DirectionalLight();
+        sun.setDirection(new Vector3f(-.55f, -1f, -.42f).normalizeLocal());
+        sun.setColor(new ColorRGBA(1.25f, 1.18f, 1.03f, 1));
+        rootNode.addLight(sun);
+        AmbientLight sky = new AmbientLight();
+        sky.setColor(new ColorRGBA(.22f, .27f, .34f, 1));
+        rootNode.addLight(sky);
+
+        FilterPostProcessor post = new FilterPostProcessor(assetManager);
+        post.setFrameBufferFormat(Image.Format.RGBA16F);
+        post.setFrameBufferDepthFormat(Image.Format.Depth24);
+        DirectionalLightShadowFilter shadows = new DirectionalLightShadowFilter(assetManager, 1024, 3);
+        shadows.setLight(sun);
+        shadows.setShadowIntensity(.45f);
+        post.addFilter(shadows);
+        post.addFilter(new KHRToneMapFilter());
+        post.addFilter(new FXAAFilter());
+        viewPort.addProcessor(post);
+        if (output != null) {
+            FrameBuffer target = new FrameBuffer(cam.getWidth(), cam.getHeight(), 1);
+            target.addColorTarget(FrameBuffer.FrameBufferTarget.newTarget(Image.Format.RGBA16F));
+            target.setDepthTarget(FrameBuffer.FrameBufferTarget.newTarget(Image.Format.Depth24));
+            captureTarget = target;
+            viewPort.setOutputFrameBuffer(target);
+            viewPort.addProcessor(new Capture(target));
+        } else {
+            viewPort.addProcessor(new Capture(null));
+        }
+    }
+
+    private final class CameraPath {
+        void apply(int f) {
+            float aspect = (float) cam.getWidth() / cam.getHeight();
+            if (f >= 391 && f < 501) {
+                cam.setParallelProjection(true);
+                cam.setFrustum(.1f, 500f, -38f * aspect, 38f * aspect, 38f, -38f);
+                cam.setLocation(new Vector3f(32, 110, 32));
+                cam.lookAt(new Vector3f(32, 1, 32), Vector3f.UNIT_Z);
+                return;
+            }
+            cam.setParallelProjection(false);
+            float fov = f < 31 ? 58f : f < 211 ? 47f + 8f * (float) Math.sin(f * .025)
+                    : f < 291 ? 27f : f < 391 ? 67f : 39f + 8f * (float) Math.sin(f * .02);
+            cam.setFrustumPerspective(fov, aspect, .15f, 500f);
+            if (f < 31) {
+                cam.setLocation(new Vector3f(32, 86, -48));
+                cam.lookAt(new Vector3f(32, 1, 32), Vector3f.UNIT_Y);
+            } else if (f < 211) {
+                float t = Math.min(1, (f - 31) / 180f);
+                Vector3f location = new Vector3f(1 + 2 * t, 5.5f + .8f * (float) Math.sin(f * .035), 3 + 5 * t);
+                Vector3f target = new Vector3f(54 - 5 * t, (float) height(44, 19) + .8f, 18 + 10 * t);
+                cam.setLocation(location);
+                cam.lookAt(target, Vector3f.UNIT_Y);
+            } else if (f < 291) {
+                cam.setLocation(new Vector3f(103, 64, -38));
+                cam.lookAt(new Vector3f(32, 2, 32), Vector3f.UNIT_Y);
+            } else if (f < 391) {
+                cam.setLocation(new Vector3f(3, 7, 5));
+                cam.lookAt(new Vector3f(52, (float) height(48, 19) + 1, 22), Vector3f.UNIT_Y);
+            } else {
+                cam.setLocation(new Vector3f(82, 38, 75));
+                cam.lookAt(new Vector3f(32, 2, 32), Vector3f.UNIT_Y);
+            }
+        }
+    }
+
+    private final class Capture implements SceneProcessor {
+        private final FrameBuffer target;
+        private ByteBuffer captureReadback;
+        private boolean initialized;
+        private Capture(FrameBuffer target) { this.target = target; }
+        @Override public void initialize(RenderManager rm, ViewPort vp) { initialized = true; }
+        @Override public boolean isInitialized() { return initialized; }
+        @Override public void reshape(ViewPort vp, int w, int h) { }
+        @Override public void preFrame(float tpf) { }
+        @Override public void postQueue(RenderQueue queue) { }
+        @Override public void cleanup() {
+            initialized = false;
+            // Discard the physical storage before invalidating its leases.
+            if (atlas != null) discardAtlas();
+            if (residency != null) residency.close();
+            frameLease = null;
+            if (gpuProbe != null) gpuProbe.close();
+            if (target != null) renderer.deleteFrameBuffer(target);
+            if (captureReadback != null) BufferUtils.destroyDirectBuffer(captureReadback);
+            captureReadback = null;
+        }
+        @Override public void setProfiler(AppProfiler profiler) { }
+        @Override public void postFrame(FrameBuffer out) {
+            if (failure != null) return;
+            try {
+                require(frameLease != null, "terrain frame has an acquired lease");
+                require(residency.submit(frameLease, new Completion()), "frame fence submitted once after opaque terrain and shadow reads");
+                frameLease = null;
+                String label = captureLabel(frame);
+                if (output != null && label != null) writeCapture(label);
+                if (output != null && frame >= MAX_FRAMES) finish();
+            } catch (Throwable error) {
+                fail(error);
+            }
+        }
+
+        private void writeCapture(String label) throws Exception {
+            Files.createDirectories(output);
+            int width = target.getWidth(), height = target.getHeight();
+            if (captureReadback == null) {
+                captureReadback = BufferUtils.createByteBuffer(width * height * 16)
+                        .order(ByteOrder.nativeOrder());
+            }
+            ByteBuffer bytes = captureReadback;
+            bytes.clear();
+            // Read the actual post-filter RGBA16F target as float, then apply
+            // one display transfer instead of quantizing an intermediate to 8-bit linear.
+            renderer.readFrameBufferWithFormat(target, bytes, Image.Format.RGBA32F);
+            FloatBuffer linear = bytes.asFloatBuffer();
+            BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+            for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                    int i = ((height - 1 - y) * width + x) * 4;
+                    int r = display(linear.get(i));
+                    int g = display(linear.get(i + 1));
+                    int b = display(linear.get(i + 2));
+                    image.setRGB(x, y, (r << 16) | (g << 8) | b);
+                }
+            }
+            if (!ImageIO.write(image, "png", output.resolve(label + ".png").toFile())) {
+                throw new IllegalStateException("PNG writer unavailable");
+            }
+            System.out.println("HEIGHTFIELD_STREAM_CAPTURE " + label);
+        }
+
+        private int display(float linear) {
+            if (!Float.isFinite(linear)) throw new IllegalStateException("non-finite post-filter HDR pixel");
+            linear = Math.max(0, Math.min(1, linear));
+            float encoded = linear <= .0031308f ? linear * 12.92f
+                    : 1.055f * (float) Math.pow(linear, 1.0 / 2.4) - .055f;
+            return Math.min(255, Math.max(0, Math.round(encoded * 255)));
+        }
+    }
+}
