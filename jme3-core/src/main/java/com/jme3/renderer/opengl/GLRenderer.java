@@ -207,6 +207,7 @@ public final class GLRenderer implements Renderer {
     private final GL2 gl2;
     private final GL3 gl3;
     private final GL4 gl4;
+    private final GLCompute glCompute;
     private final GLExt glext;
     private final GLFbo glfbo;
     private final TextureUtil texUtil;
@@ -219,6 +220,7 @@ public final class GLRenderer implements Renderer {
         this.gl2 = gl instanceof GL2 ? (GL2)gl : null;
         this.gl3 = gl instanceof GL3 ? (GL3)gl : null;
         this.gl4 = gl instanceof GL4 ? (GL4)gl : null;
+        this.glCompute = gl instanceof GLCompute ? (GLCompute)gl : null;
         this.glfbo = glfbo;
         this.glext = glext;
         this.texUtil = new TextureUtil(gl, gl2, glext);
@@ -805,8 +807,6 @@ public final class GLRenderer implements Renderer {
             caps.add(Caps.ShaderStorageBufferObject);
             limits.put(Limits.ShaderStorageBufferObjectMaxBlockSize,
                     getInteger(GL4.GL_MAX_SHADER_STORAGE_BLOCK_SIZE));
-            // Commented out until we support ComputeShaders and the ComputeShader Cap
-            // limits.put(Limits.ShaderStorageBufferObjectMaxComputeBlocks, getInteger(GL4.GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS));
             if (caps.contains(Caps.GeometryShader)) {
                 limits.put(Limits.ShaderStorageBufferObjectMaxGeometryBlocks,
                         getInteger(GL4.GL_MAX_GEOMETRY_SHADER_STORAGE_BLOCKS));
@@ -848,6 +848,8 @@ public final class GLRenderer implements Renderer {
         if (caps.contains(Caps.OpenGL43) || hasExtension("GL_KHR_debug") ) {
             caps.add(Caps.GLDebug);
         }
+
+        loadComputeCapabilities();
 
         // Print context information
         logger.log(Level.INFO, "OpenGL Renderer Information\n" +
@@ -907,6 +909,38 @@ public final class GLRenderer implements Renderer {
     private boolean getBoolean(int en) {
         gl.glGetBoolean(en, nameBuf);
         return nameBuf.get(0) != (byte)0;
+    }
+
+    private void loadComputeCapabilities() {
+        if (glCompute == null || !(caps.contains(Caps.OpenGL43) || caps.contains(Caps.OpenGLES31))) {
+            return;
+        }
+        EnumMap<Limits, Integer> computeLimits = new EnumMap<>(Limits.class);
+        Limits[] counts = {Limits.ComputeWorkGroupCountX, Limits.ComputeWorkGroupCountY, Limits.ComputeWorkGroupCountZ};
+        Limits[] sizes = {Limits.ComputeWorkGroupSizeX, Limits.ComputeWorkGroupSizeY, Limits.ComputeWorkGroupSizeZ};
+        try {
+            for (int axis = 0; axis < 3; axis++) {
+                intBuf1.clear();
+                glCompute.glGetIntegerIndexed(GLCompute.GL_MAX_COMPUTE_WORK_GROUP_COUNT, axis, intBuf1);
+                computeLimits.put(counts[axis], intBuf1.get(0));
+                intBuf1.clear();
+                glCompute.glGetIntegerIndexed(GLCompute.GL_MAX_COMPUTE_WORK_GROUP_SIZE, axis, intBuf1);
+                computeLimits.put(sizes[axis], intBuf1.get(0));
+            }
+        } catch (UnsupportedOperationException unsupportedBackend) {
+            // A third-party GL4 adapter can retain its old implementation while
+            // leaving this managed path unavailable. Ordinary rendering still works.
+            return;
+        }
+        computeLimits.put(Limits.ComputeWorkGroupInvocations, getInteger(GLCompute.GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS));
+        computeLimits.put(Limits.ComputeStorageBufferBindings, getInteger(GLCompute.GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS));
+        computeLimits.put(Limits.ComputeStorageBufferBlockSize, getInteger(GLCompute.GL_MAX_SHADER_STORAGE_BLOCK_SIZE));
+        computeLimits.put(Limits.ShaderStorageBufferObjectMaxComputeBlocks, getInteger(GLCompute.GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS));
+        for (int value : computeLimits.values()) {
+            if (value <= 0) return;
+        }
+        limits.putAll(computeLimits);
+        caps.add(Caps.ComputeShader);
     }
 
     private int getUniformBlockIndex(int program, String uniformBlockName) {
@@ -1872,12 +1906,15 @@ public final class GLRenderer implements Renderer {
                 return GL4.GL_TESS_CONTROL_SHADER;
             case TessellationEvaluation:
                 return GL4.GL_TESS_EVALUATION_SHADER;
+            case Compute:
+                return GLCompute.GL_COMPUTE_SHADER;
             default:
                 throw new UnsupportedOperationException("Unrecognized shader type.");
         }
     }
 
     public void updateShaderSourceData(ShaderSource source) {
+        if (source.getType() == ShaderType.Compute) validateComputeSource(source);
         int id = source.getId();
         if (id == -1) {
             // Create id
@@ -1995,6 +2032,7 @@ public final class GLRenderer implements Renderer {
     }
 
     public void updateShaderData(Shader shader) {
+        validateComputeStages(shader);
         int id = shader.getId();
         boolean needRegister = false;
         if (id == -1) {
@@ -2081,6 +2119,7 @@ public final class GLRenderer implements Renderer {
         // Validate the entire block set before compiling, binding a program or
         // uploading earlier blocks. Unsupported blocks and invalid binding
         // inputs must reject without partially mutating GL.
+        validateComputeStages(shader);
         validateShaderBufferBlocks(shader);
         if (shader.isUpdateNeeded()) {
             updateShaderData(shader);
@@ -2090,6 +2129,102 @@ public final class GLRenderer implements Renderer {
         updateShaderUniforms(shader);
         updateShaderBufferBlocks(shader);
         bindProgram(shader);
+    }
+
+    private boolean validateComputeStages(Shader shader) {
+        if (shader == null) throw new IllegalArgumentException("Shader cannot be null");
+        boolean compute = false;
+        boolean graphics = false;
+        for (ShaderSource source : shader.getSources()) {
+            compute |= source.getType() == ShaderType.Compute;
+            graphics |= source.getType() != ShaderType.Compute;
+        }
+        if (compute) {
+            requireComputeCapability();
+            if (graphics) throw new IllegalArgumentException("Compute and graphics stages cannot share a program");
+            for (ShaderSource source : shader.getSources()) validateComputeSource(source);
+        }
+        return compute;
+    }
+
+    private void validateComputeSource(ShaderSource source) {
+        requireComputeCapability();
+        String language = source.getLanguage();
+        int minimum = caps.contains(Caps.OpenGLES31) ? 310 : 430;
+        int version;
+        try {
+            version = language != null && language.startsWith("GLSL")
+                    ? Integer.parseInt(language.substring(4)) : -1;
+        } catch (NumberFormatException malformedLanguage) {
+            version = -1;
+        }
+        if (version < minimum) {
+            throw new IllegalArgumentException("Compute source requires GLSL" + minimum);
+        }
+    }
+
+    private void requireComputeCapability() {
+        if (glCompute == null || !caps.contains(Caps.ComputeShader)) {
+            throw new UnsupportedOperationException("Renderer does not support managed compute");
+        }
+    }
+
+    @Override
+    public void dispatchCompute(Shader shader, int groupsX, int groupsY, int groupsZ) {
+        requireComputeCapability();
+        if (!validateComputeStages(shader)) {
+            throw new IllegalArgumentException("Dispatch requires a compute-only shader");
+        }
+        validateGroupCount(groupsX, Limits.ComputeWorkGroupCountX);
+        validateGroupCount(groupsY, Limits.ComputeWorkGroupCountY);
+        validateGroupCount(groupsZ, Limits.ComputeWorkGroupCountZ);
+        setShader(shader);
+        glCompute.glDispatchCompute(groupsX, groupsY, groupsZ);
+    }
+
+    private void validateGroupCount(int count, Limits limit) {
+        if (count < 0 || count > limits.get(limit)) {
+            throw new IllegalArgumentException("Compute group count exceeds " + limit + ": " + count);
+        }
+    }
+
+    @Override
+    public void setFixedShaderStorageBufferObject(int bindingPoint, BufferObject buffer) {
+        requireComputeCapability();
+        validateBufferBinding(bindingPoint, buffer, Caps.ComputeShader);
+        if (bindingPoint >= limits.get(Limits.ComputeStorageBufferBindings)) {
+            throw new IllegalArgumentException("Storage binding exceeds the native limit: " + bindingPoint);
+        }
+        int bytes = buffer.getData().remaining();
+        if (bytes <= 0 || bytes > limits.get(Limits.ComputeStorageBufferBlockSize)) {
+            throw new IllegalArgumentException("Storage buffer must be nonempty and within the native block limit");
+        }
+        if (buffer.isUpdateNeeded()) updateBufferData(GL4.GL_SHADER_STORAGE_BUFFER, buffer);
+        if (context.boundSSBO[bindingPoint] == null || context.boundSSBO[bindingPoint].get() != buffer) {
+            bindShaderStorageBufferBase(bindingPoint, buffer.getId());
+            context.boundSSBO[bindingPoint] = buffer.getWeakRef();
+        }
+        // Deliberately do not set BufferObject.binding: its ordinary UBO or
+        // reflected SSBO block may use a different indexed binding.
+    }
+
+    @Override
+    public void memoryBarrier(EnumSet<MemoryBarrier> barriers) {
+        requireComputeCapability();
+        if (barriers == null) throw new IllegalArgumentException("Memory barrier set cannot be null");
+        int bits = 0;
+        for (MemoryBarrier barrier : barriers) {
+            switch (barrier) {
+                case VertexAttribute: bits |= GLCompute.GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT; break;
+                case UniformBuffer: bits |= GLCompute.GL_UNIFORM_BARRIER_BIT; break;
+                case TextureFetch: bits |= GLCompute.GL_TEXTURE_FETCH_BARRIER_BIT; break;
+                case Command: bits |= GLCompute.GL_COMMAND_BARRIER_BIT; break;
+                case BufferUpdate: bits |= GLCompute.GL_BUFFER_UPDATE_BARRIER_BIT; break;
+                case ShaderStorage: bits |= GLCompute.GL_SHADER_STORAGE_BARRIER_BIT; break;
+                default: throw new IllegalArgumentException("Unknown memory barrier: " + barrier);
+            }
+        }
+        if (bits != 0) glCompute.glMemoryBarrier(bits);
     }
 
     private void validateShaderBufferBlocks(Shader shader) {
@@ -2653,9 +2788,6 @@ public final class GLRenderer implements Renderer {
 
     @Override
     public FrameBuffer getCurrentFrameBuffer() {
-        if(mainFbOverride!=null){
-            return mainFbOverride;
-        }
         return context.boundFB;
     }
 

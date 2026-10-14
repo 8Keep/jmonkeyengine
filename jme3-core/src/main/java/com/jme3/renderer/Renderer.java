@@ -192,6 +192,55 @@ public interface Renderer {
     public void setShader(Shader shader);
 
     /**
+     * Compiles/binds a compute-only shader through this renderer's program cache,
+     * uploads its uniforms, then dispatches work on the context thread. Sources
+     * use GLSL430 on desktop or GLSL310 on GLES; the driver validates compile-time
+     * local sizes. Group counts must be nonnegative and within the reported axis
+     * limits. A zero count binds the program but executes no work. The caller owns
+     * buffer bounds, data layout, barriers and resource completion; CPU buffer
+     * copies are not updated by shader writes. Do not share live native objects
+     * between renderers. Deleted objects may be reuploaded and work replayed.
+     *
+     * @param shader a shader containing only compute sources
+     * @param groupsX number of groups in X
+     * @param groupsY number of groups in Y
+     * @param groupsZ number of groups in Z
+     * @throws UnsupportedOperationException if compute is unsupported
+     * @throws IllegalArgumentException for invalid stages or group counts
+     */
+    default void dispatchCompute(Shader shader, int groupsX, int groupsY, int groupsZ) {
+        throw new UnsupportedOperationException("Managed compute is not supported");
+    }
+
+    /**
+     * Uploads if dirty and binds a storage buffer to the binding declared by
+     * {@code layout(binding=...)} in the shader. Does not reflect or rebind shader
+     * blocks, and leaves the buffer's ordinary block-binding metadata unchanged.
+     * Requires {@link Caps#ComputeShader}; indices must fit both the native limit
+     * and {@link RenderContext#maxBufferObjectUnits}. The buffer must have a GPU
+     * access hint, nonempty data and fit {@link Limits#ComputeStorageBufferBlockSize}.
+     * The caller ensures that the shader's declared layout fits this allocation.
+     *
+     * @param bindingPoint shader-declared binding index
+     * @param bufferObject non-null renderer-local buffer
+     */
+    default void setFixedShaderStorageBufferObject(int bindingPoint, BufferObject bufferObject) {
+        throw new UnsupportedOperationException("Fixed storage bindings are not supported");
+    }
+
+    /**
+     * Orders prior shader writes against selected subsequent GPU consumers.
+     * Requires {@link Caps#ComputeShader}. An empty set issues no barrier. Call
+     * between dispatch and draw; a uniform-buffer consumer requires UniformBuffer,
+     * even when the producer wrote through a shader storage block.
+     *
+     * @param barriers non-null set of subsequent access types
+     */
+    default void memoryBarrier(EnumSet<MemoryBarrier> barriers) {
+        throw new UnsupportedOperationException("Shader memory barriers are not supported");
+    }
+
+    /**
      * Deletes a shader. This method also deletes
      * the attached shader sources.
      *
