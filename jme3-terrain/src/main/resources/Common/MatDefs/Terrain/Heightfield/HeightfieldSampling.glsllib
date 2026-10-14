@@ -6,9 +6,125 @@ uniform sampler2DArray m_HeightPages;
 uniform int m_HeightLayer;
 uniform float m_SampleSpacing;
 
+#ifdef HEIGHTFIELD_LOD
+// PageLatticeOrigin is integer-valued and exactly representable in a float.
+// Patch vertices are integer grid coordinates; together these identify source
+// samples independently of the page-local texture coordinates.
+uniform vec2 m_PageLatticeOrigin;
+uniform vec2 m_PatchLatticeOrigin;
+uniform int m_PageCells;
+uniform int m_PatchGridCells;
+uniform int m_SampleStride;
+uniform float m_InteriorMorph;
+// Edge order is West (-X), East (+X), North (+Z), South (-Z).
+uniform float m_EdgeMorphWest;
+uniform float m_EdgeMorphEast;
+uniform float m_EdgeMorphNorth;
+uniform float m_EdgeMorphSouth;
+#endif
+
 float Heightfield_readHeight(ivec2 latticePoint) {
     // Grid vertices address the interior. The added one selects the first
     // vertex sample after the low-side halo; high-side halo lies at cells + 2.
     ivec2 pageTexel = latticePoint + ivec2(1);
     return texelFetch(m_HeightPages, ivec3(pageTexel, m_HeightLayer), 0).r;
 }
+
+#ifdef HEIGHTFIELD_LOD
+ivec2 Heightfield_pageOrigin() {
+    return ivec2(m_PageLatticeOrigin);
+}
+
+ivec2 Heightfield_readablePageGrid(ivec2 globalGrid) {
+    // The page carries a one-sample halo. Clamp to its valid address range so
+    // malformed/misaligned metadata cannot form an out-of-range texelFetch.
+    return clamp(globalGrid - Heightfield_pageOrigin(), ivec2(-1),
+                 ivec2(m_PageCells + 1));
+}
+
+float Heightfield_readGlobalHeight(ivec2 globalGrid) {
+    return Heightfield_readHeight(Heightfield_readablePageGrid(globalGrid));
+}
+
+int Heightfield_floorDiv(int value, int divisor) {
+    // Keep division operands nonnegative. -(value + 1) remains representable
+    // even at INT_MIN, and -1-floor((-value-1)/d) is floor(value/d).
+    return value >= 0 ? value / divisor : -1 - (-(value + 1)) / divisor;
+}
+
+ivec2 Heightfield_parentGrid(ivec2 globalGrid, int parentStride) {
+    return ivec2(Heightfield_floorDiv(globalGrid.x, parentStride),
+                 Heightfield_floorDiv(globalGrid.y, parentStride)) * parentStride;
+}
+
+float Heightfield_mixFinite(float first, float second, float alpha) {
+    // Match the CPU contract: retain exact endpoints/equal values, then clamp
+    // the rounded product-sum back to the finite endpoint hull.
+    if (alpha == 0.0) {
+        return first;
+    }
+    if (alpha == 1.0) {
+        return second;
+    }
+    if (first == second) {
+        return first;
+    }
+    float mixed = first * (1.0 - alpha) + second * alpha;
+    float low = min(first, second);
+    float high = max(first, second);
+    if (mixed < low) {
+        return low;
+    }
+    if (mixed > high) {
+        return high;
+    }
+    return mixed;
+}
+
+float Heightfield_vertexMorph(ivec2 patchVertex) {
+    // Patch corners are shared source vertices and never collapse.
+    if ((patchVertex.x == 0 || patchVertex.x == m_PatchGridCells)
+            && (patchVertex.y == 0 || patchVertex.y == m_PatchGridCells)) {
+        return 0.0;
+    }
+
+    float alpha = m_InteriorMorph;
+    if (patchVertex.x == 0) {
+        alpha = max(alpha, m_EdgeMorphWest);
+    }
+    if (patchVertex.x == m_PatchGridCells) {
+        alpha = max(alpha, m_EdgeMorphEast);
+    }
+    if (patchVertex.y == m_PatchGridCells) {
+        alpha = max(alpha, m_EdgeMorphNorth);
+    }
+    if (patchVertex.y == 0) {
+        alpha = max(alpha, m_EdgeMorphSouth);
+    }
+    return alpha;
+}
+
+vec3 Heightfield_lodPosition(ivec2 patchVertex, out ivec2 globalGrid) {
+    ivec2 pageOrigin = Heightfield_pageOrigin();
+    ivec2 patchOrigin = ivec2(m_PatchLatticeOrigin);
+    int stride = m_SampleStride;
+    globalGrid = pageOrigin + patchOrigin + patchVertex * stride;
+
+    int parentStride = stride * 2;
+    ivec2 parentGlobal = Heightfield_parentGrid(globalGrid, parentStride);
+    // A correctly aligned page + patch origin keeps the parent sample inside
+    // the page. Clamp only as a safety guard for invalid metadata, and use the
+    // same clamped lattice coordinate for position and height.
+    ivec2 safeParentGlobal = clamp(parentGlobal, pageOrigin,
+                                   pageOrigin + ivec2(m_PageCells));
+    float alpha = Heightfield_vertexMorph(patchVertex);
+
+    vec2 localFine = vec2(globalGrid - pageOrigin) * m_SampleSpacing;
+    vec2 localParent = vec2(safeParentGlobal - pageOrigin) * m_SampleSpacing;
+    float fineHeight = Heightfield_readGlobalHeight(globalGrid);
+    float parentHeight = Heightfield_readGlobalHeight(safeParentGlobal);
+    return vec3(Heightfield_mixFinite(localFine.x, localParent.x, alpha),
+                Heightfield_mixFinite(fineHeight, parentHeight, alpha),
+                Heightfield_mixFinite(localFine.y, localParent.y, alpha));
+}
+#endif
