@@ -446,6 +446,34 @@ public interface Renderer {
     public void renderMesh(Mesh mesh, int lod, int count, VertexBuffer[] instanceData);
 
     /**
+     * Draws one indexed indirect command using the current managed shader and
+     * render state. Uploads dirty mesh/command data and uses the ordinary vertex
+     * attribute cache. Validates capability, topology, index type and the aligned
+     * 20-byte command range before GPU mutation. Supports simple primitive modes,
+     * not Hybrid or Patch. Statistics count submissions; GPU instance/triangle
+     * totals are unknown and are not included.
+     *
+     * <p>Commands contain five tightly packed 32-bit words: count, instanceCount,
+     * firstIndex, signed baseVertex, and a final word that must be zero for the
+     * portable GL/GLES route. The caller owns the GPU-written values: index/vertex
+     * and instance accesses must fit their allocations. This method does not
+     * read command contents back to the CPU. After compute writes, issue a Command
+     * barrier plus the barrier for the shader/vertex consumers of instance data.
+     * Supply an explicit record-base uniform/range; gl_InstanceID starts at zero.
+     * Retain resources until GPU completion and replay writes after recreation.
+     *
+     * @param mesh indexed mesh with GPU-accessible vertices and indices
+     * @param lod index-buffer LOD, or zero when no LOD levels exist
+     * @param commands renderer-local GPU command buffer
+     * @param byteOffset four-byte-aligned command offset
+     * @param instanceData optional ordinary instanced vertex attributes
+     */
+    default void renderMeshIndirect(Mesh mesh, int lod, BufferObject commands,
+                                    int byteOffset, VertexBuffer[] instanceData) {
+        throw new UnsupportedOperationException("Indexed indirect draws are not supported");
+    }
+
+    /**
      * Resets all previously used {@link NativeObject Native Objects} on this Renderer.
      * The state of the native objects is reset in such way, that using
      * them again will cause the renderer to reupload them.
