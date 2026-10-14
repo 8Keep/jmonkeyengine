@@ -208,6 +208,7 @@ public final class GLRenderer implements Renderer {
     private final GL3 gl3;
     private final GL4 gl4;
     private final GLCompute glCompute;
+    private final GLIndirect glIndirect;
     private final GLExt glext;
     private final GLFbo glfbo;
     private final TextureUtil texUtil;
@@ -221,6 +222,7 @@ public final class GLRenderer implements Renderer {
         this.gl3 = gl instanceof GL3 ? (GL3)gl : null;
         this.gl4 = gl instanceof GL4 ? (GL4)gl : null;
         this.glCompute = gl instanceof GLCompute ? (GLCompute)gl : null;
+        this.glIndirect = gl instanceof GLIndirect ? (GLIndirect)gl : null;
         this.glfbo = glfbo;
         this.glext = glext;
         this.texUtil = new TextureUtil(gl, gl2, glext);
@@ -850,6 +852,11 @@ public final class GLRenderer implements Renderer {
         }
 
         loadComputeCapabilities();
+        if (glIndirect != null && glIndirect.supportsIndexedIndirectDraw()
+                && caps.contains(Caps.CoreProfile) && caps.contains(Caps.MeshInstancing)
+                && (caps.contains(Caps.OpenGL40) || caps.contains(Caps.OpenGLES31))) {
+            caps.add(Caps.IndexedIndirectDraw);
+        }
 
         // Print context information
         logger.log(Level.INFO, "OpenGL Renderer Information\n" +
@@ -4065,6 +4072,7 @@ public final class GLRenderer implements Renderer {
     private void invalidateBufferBindings(int bufferId, boolean clearAttributes) {
         if (context.boundArrayVBO == bufferId) context.boundArrayVBO = 0;
         if (context.boundElementArrayVBO == bufferId) context.boundElementArrayVBO = 0;
+        if (context.boundDrawIndirectBuffer == bufferId) context.boundDrawIndirectBuffer = 0;
         if (context.boundPixelPackPBO == bufferId) context.boundPixelPackPBO = 0;
         for (int i = 0; i < context.boundBO.length; i++) {
             WeakReference<BufferObject> uniform = context.boundBO[i];
@@ -4408,22 +4416,10 @@ public final class GLRenderer implements Renderer {
         }
     }
 
-    private void renderMeshDefault(Mesh mesh, int lod, int count, VertexBuffer[] instanceData) {
-
-        // Here while count is still passed in.  Can be removed when/if
-        // the method is collapsed again.  -pspeed
-        count = Math.max(mesh.getInstanceCount(), count);
-
+    private void prepareMeshAttributes(Mesh mesh, VertexBuffer[] instanceData) {
         VertexBuffer interleavedData = mesh.getBuffer(Type.InterleavedData);
         if (interleavedData != null && interleavedData.isUpdateNeeded()) {
             updateBufferData(interleavedData);
-        }
-
-        VertexBuffer indices;
-        if (mesh.getNumLodLevels() > 0) {
-            indices = mesh.getLodLevel(lod);
-        } else {
-            indices = mesh.getBuffer(Type.Index);
         }
 
         if (instanceData != null) {
@@ -4449,12 +4445,70 @@ public final class GLRenderer implements Renderer {
         }
 
         clearVertexAttribs();
+    }
 
-        if (indices != null) {
-            drawTriangleList(indices, mesh, count);
-        } else {
-            drawTriangleArray(mesh.getMode(), count, mesh.getVertexCount());
+    private void renderMeshDefault(Mesh mesh, int lod, int count, VertexBuffer[] instanceData) {
+        count = Math.max(mesh.getInstanceCount(), count);
+        VertexBuffer indices = mesh.getNumLodLevels() > 0
+                ? mesh.getLodLevel(lod) : mesh.getBuffer(Type.Index);
+        prepareMeshAttributes(mesh, instanceData);
+        if (indices != null) drawTriangleList(indices, mesh, count);
+        else drawTriangleArray(mesh.getMode(), count, mesh.getVertexCount());
+    }
+
+    @Override
+    public void renderMeshIndirect(Mesh mesh, int lod, BufferObject commands,
+                                   int byteOffset, VertexBuffer[] instanceData) {
+        if (glIndirect == null || !caps.contains(Caps.IndexedIndirectDraw)) {
+            throw new UnsupportedOperationException("Renderer does not support indexed indirect draws");
         }
+        if (mesh == null || mesh.getMode() == Mode.Hybrid || mesh.getMode() == Mode.Patch
+                || lod < 0 || (mesh.getNumLodLevels() == 0 ? lod != 0 : lod >= mesh.getNumLodLevels())) {
+            throw new IllegalArgumentException("A simple indexed mesh and valid LOD are required");
+        }
+        VertexBuffer indices = mesh.getNumLodLevels() > 0 ? mesh.getLodLevel(lod) : mesh.getBuffer(Type.Index);
+        if (indices == null || indices.getUsage() == Usage.CpuOnly
+                || (indices.getFormat() != VertexBuffer.Format.UnsignedByte
+                && indices.getFormat() != VertexBuffer.Format.UnsignedShort
+                && indices.getFormat() != VertexBuffer.Format.UnsignedInt)) {
+            throw new IllegalArgumentException("GPU index data must use an unsigned integer format");
+        }
+        if (indices.getFormat() == VertexBuffer.Format.UnsignedInt && !caps.contains(Caps.IntegerIndexBuffer)) {
+            throw new UnsupportedOperationException("32-bit indices are unsupported");
+        }
+        requireBufferObject(commands);
+        if (commands.getAccessHint() == BufferObject.AccessHint.CpuOnly || byteOffset < 0
+                || byteOffset % 4 != 0 || (long) byteOffset + 20 > commands.getData().remaining()) {
+            throw new IllegalArgumentException("GPU indirect command needs an aligned complete 20-byte range");
+        }
+        if (context.boundShader == null) throw new IllegalStateException("Bind a graphics shader before indirect drawing");
+        for (ShaderSource source : context.boundShader.getSources()) {
+            if (source.getType() == ShaderType.Compute) {
+                throw new IllegalStateException("A compute program cannot draw a mesh");
+            }
+        }
+        if (commands.isUpdateNeeded()) {
+            // The generic upload binds and unbinds this target.
+            context.boundDrawIndirectBuffer = 0;
+            updateBufferData(GLIndirect.GL_DRAW_INDIRECT_BUFFER, commands);
+        }
+        prepareMeshAttributes(mesh, instanceData);
+        if (indices.isUpdateNeeded()) updateBufferData(indices);
+        if (context.boundElementArrayVBO != indices.getId()) {
+            gl.glBindBuffer(GL.GL_ELEMENT_ARRAY_BUFFER, indices.getId());
+            context.boundElementArrayVBO = indices.getId();
+        }
+        if (context.boundDrawIndirectBuffer != commands.getId()) {
+            gl.glBindBuffer(GLIndirect.GL_DRAW_INDIRECT_BUFFER, commands.getId());
+            context.boundDrawIndirectBuffer = commands.getId();
+        }
+        if (mesh.getLineWidth() != 1f && context.lineWidth != mesh.getLineWidth()) {
+            gl.glLineWidth(mesh.getLineWidth());
+            context.lineWidth = mesh.getLineWidth();
+        }
+        glIndirect.glDrawElementsIndirect(convertElementMode(mesh.getMode()),
+                convertFormat(indices.getFormat()), byteOffset);
+        statistics.onMeshDrawn(mesh, lod, 0);
     }
 
     @Override

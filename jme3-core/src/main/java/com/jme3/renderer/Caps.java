@@ -497,6 +497,13 @@ public enum Caps {
     ComputeShader,
 
     /**
+     * Renderer-managed indexed indirect draws in an initialized core-profile
+     * context, with an implemented OpenGL 4.0 or ES 3.1 entry point. Does not
+     * imply multi-draw, draw IDs or base-instance support.
+     */
+    IndexedIndirectDraw,
+
+    /**
      * Supports OpenGL ES 3.0.
      */
     OpenGLES30,
