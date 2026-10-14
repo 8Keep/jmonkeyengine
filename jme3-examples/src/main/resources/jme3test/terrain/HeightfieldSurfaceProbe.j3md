@@ -1,0 +1,39 @@
+MaterialDef Surface Composition Probe {
+    MaterialParameters {
+        TextureArray SurfaceAlbedoPages -LINEAR
+        TextureArray SurfaceNormalPages -LINEAR
+        TextureArray SurfaceSemanticPages -LINEAR
+        Texture2D SurfacePageTable -LINEAR
+        Int SurfacePhysicalSide : 36
+        Int SurfaceGutter : 2
+        Int SurfaceMipCount : 3
+        Vector2 SurfaceRegionOrigin : 0.0 0.0
+        Float SurfaceRegionSize : 64.0
+        Float SurfaceCanonicalSpacing : 0.5
+        TextureArray SurfaceSourceAlbedo -LINEAR
+        TextureArray SurfaceSourceNormal -LINEAR
+        Texture2D SurfaceSourceWeights -LINEAR
+        Vector2 SurfaceSourceOriginFine : -64.0 -64.0
+        Vector2 SurfaceProbeOrigin : 0.0 0.0
+        Vector2 SurfaceProbeExtent : 64.0 64.0
+        Float SurfaceProbeLod : -1.0
+        Int SurfaceProbeOutput : 0
+        Int SurfaceProbeRawLayer : 0
+        Int SurfaceProbeRawSide : 36
+        Boolean SurfaceDirectReference : false
+        Boolean SurfacePreciseFilter : false
+    }
+    Technique {
+        VertexShader GLSL300 GLSL150: jme3test/terrain/HeightfieldSurfaceProbe.vert
+        FragmentShader GLSL300 GLSL150: jme3test/terrain/HeightfieldSurfaceProbe.frag
+        Defines {
+            SURFACE_DIRECT_REFERENCE : SurfaceDirectReference
+            SURFACE_PRECISE_FILTER : SurfacePreciseFilter
+        }
+        RenderState {
+            FaceCull Off
+            DepthTest Off
+            DepthWrite Off
+        }
+    }
+}

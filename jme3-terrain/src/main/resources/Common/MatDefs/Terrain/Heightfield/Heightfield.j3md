@@ -40,6 +40,28 @@ MaterialDef Heightfield {
         Float SnowLine : 120.0
         Float SnowFade : 18.0
 
+        // Optional material pages; geometry and material quality are independent.
+        // Each logical mip has its own array layer, with world-neighbor gutters.
+        Boolean UseHeightfieldSurface : false
+        TextureArray SurfaceAlbedoPages -LINEAR
+        TextureArray SurfaceNormalPages -LINEAR
+        TextureArray SurfaceSemanticPages -LINEAR
+        Texture2D SurfacePageTable -LINEAR
+        Int SurfacePhysicalSide : 36
+        Int SurfaceGutter : 2
+        Int SurfaceMipCount : 3
+        Vector2 SurfaceRegionOrigin : 0.0 0.0
+        Float SurfaceRegionSize : 64.0
+        Float SurfaceCanonicalSpacing : 0.5
+        TextureArray SurfaceSourceAlbedo -LINEAR
+        TextureArray SurfaceSourceNormal -LINEAR
+        Texture2D SurfaceSourceWeights -LINEAR
+        Vector2 SurfaceSourceOriginFine : -64.0 -64.0
+        // Direct composition and exact taps are diagnostic alternatives.
+        Boolean SurfaceDirectReference : false
+        Boolean SurfacePreciseFilter : false
+        Float SurfaceFixedLod : -1.0
+
         // Optional four-cascade directional visibility for one designated sun.
         Boolean UseDirectionalVisibility : false
         Boolean DirectionalHardwareShadows : false
@@ -79,6 +101,9 @@ MaterialDef Heightfield {
 
         Defines {
             HEIGHTFIELD_LOD : UseHeightfieldLod
+            HEIGHTFIELD_SURFACE : UseHeightfieldSurface
+            SURFACE_DIRECT_REFERENCE : SurfaceDirectReference
+            SURFACE_PRECISE_FILTER : SurfacePreciseFilter
             DIRECTIONAL_VISIBILITY : UseDirectionalVisibility
             DIRECTIONAL_HARDWARE_SHADOWS : DirectionalHardwareShadows
         }

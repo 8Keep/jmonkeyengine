@@ -10,6 +10,11 @@
     #define DIRECTIONAL_VISIBILITY_ENABLED 1
 #endif
 
+#ifdef HEIGHTFIELD_SURFACE
+    #import "Common/MatDefs/Terrain/Heightfield/HeightfieldSurfaceSampling.glsllib"
+    uniform float m_SurfaceFixedLod;
+#endif
+
 uniform vec4 g_LightData[NB_LIGHTS];
 uniform int g_LightCount;
 uniform vec3 g_CameraPosition;
@@ -43,30 +48,54 @@ float valueNoise(vec2 p) {
 void main() {
     vec3 worldPosition = PBRLightingUtils_getWorldPosition();
     vec3 normal = normalize(PBRLightingUtils_getWorldNormal());
-    vec2 worldXZ = worldPosition.xz * max(m_TextureScale, 0.00001);
-
-    float broadBreakup = valueNoise(worldXZ * 0.34);
-    float fineBreakup = valueNoise(worldXZ * 2.7);
-    float breakup = (broadBreakup - 0.5) * 0.22 + (fineBreakup - 0.5) * 0.07;
-
-    float steepness = 1.0 - clamp(normal.y, 0.0, 1.0);
-    float rockWeight = smoothstep(0.22, 0.68, steepness + breakup);
-    vec3 groundColor = mix(m_GrassColor.rgb, m_RockColor.rgb, rockWeight);
-    groundColor *= 0.94 + fineBreakup * 0.12;
-
-    float snowFade = max(m_SnowFade, 0.0001);
-    float snowWeight = smoothstep(m_SnowLine - snowFade, m_SnowLine + snowFade,
-                                  worldPosition.y + breakup * snowFade * 0.4);
-    snowWeight *= 1.0 - smoothstep(0.58, 0.88, steepness);
-
     PBRSurface surface = PBRLightingUtils_createPBRSurface(
         normalize(g_CameraPosition - worldPosition));
     surface.position = worldPosition;
     surface.geometryNormal = normal;
     surface.normal = normal;
-    surface.albedo = mix(groundColor, m_SnowColor.rgb, snowWeight);
-    surface.roughness = clamp(m_Roughness, 0.04, 1.0);
     surface.metallic = 0.0;
+
+    #ifdef HEIGHTFIELD_SURFACE
+        // Compute derivatives before dependent page-table lookup.
+        vec2 dxWorld = dFdx(worldPosition.xz);
+        vec2 dyWorld = dFdy(worldPosition.xz);
+        #ifdef SURFACE_DIRECT_REFERENCE
+            HeightfieldSurfaceSample material = HeightfieldSurface_readDirect(
+                    worldPosition.xz, dxWorld, dyWorld, m_SurfaceFixedLod);
+        #else
+            HeightfieldSurfaceSample material = HeightfieldSurface_readCache(
+                    worldPosition.xz, dxWorld, dyWorld, m_SurfaceFixedLod);
+        #endif
+        // Canonical material normals use +Y as the tangent-space up direction.
+        vec3 tangentAxis = abs(normal.x) < 0.99 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 0.0, 1.0);
+        vec3 tangent = normalize(tangentAxis - normal * dot(tangentAxis, normal));
+        vec3 bitangent = cross(tangent, normal);
+        float momentLength = length(material.normalMoment);
+        if (momentLength > 1.0e-8) {
+            surface.normal = normalize(tangent * material.normalMoment.x
+                    + normal * material.normalMoment.y + bitangent * material.normalMoment.z);
+        }
+        surface.albedo = material.albedo;
+        // Bounded variance broadening suppresses unresolved normal sparkle.
+        // This is a filtering heuristic, not a calibrated microfacet fit.
+        float variance = clamp(1.0 - momentLength, 0.0, 1.0);
+        surface.roughness = clamp(sqrt(max(material.roughnessSquared + variance, 0.0)), 0.04, 1.0);
+    #else
+        vec2 worldXZ = worldPosition.xz * max(m_TextureScale, 0.00001);
+        float broadBreakup = valueNoise(worldXZ * 0.34);
+        float fineBreakup = valueNoise(worldXZ * 2.7);
+        float breakup = (broadBreakup - 0.5) * 0.22 + (fineBreakup - 0.5) * 0.07;
+        float steepness = 1.0 - clamp(normal.y, 0.0, 1.0);
+        float rockWeight = smoothstep(0.22, 0.68, steepness + breakup);
+        vec3 groundColor = mix(m_GrassColor.rgb, m_RockColor.rgb, rockWeight);
+        groundColor *= 0.94 + fineBreakup * 0.12;
+        float snowFade = max(m_SnowFade, 0.0001);
+        float snowWeight = smoothstep(m_SnowLine - snowFade, m_SnowLine + snowFade,
+                                      worldPosition.y + breakup * snowFade * 0.4);
+        snowWeight *= 1.0 - smoothstep(0.58, 0.88, steepness);
+        surface.albedo = mix(groundColor, m_SnowColor.rgb, snowWeight);
+        surface.roughness = clamp(m_Roughness, 0.04, 1.0);
+    #endif
 
     PBRLightingUtils_calculatePreLightingValues(surface);
 
