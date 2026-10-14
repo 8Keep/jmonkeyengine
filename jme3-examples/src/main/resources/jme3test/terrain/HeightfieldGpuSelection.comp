@@ -1,0 +1,168 @@
+layout(local_size_x=1) in;
+struct Node {
+    ivec4 children;  // child indices; -1 for a leaf
+    ivec4 meta;      // level, ready, unused, unused
+    vec4 rect;       // originX, originZ, span, stride
+    vec4 errors;     // conservative stable and morph pixels, rounded upward
+    vec4 boundsMin;
+    vec4 boundsMax;
+};
+layout(std430, binding=0) readonly buffer NodeInput {
+    Node nodes[85];
+    vec4 planes[6];
+    vec4 sourceInfo; // revision, requested pixels, leaf budget, node count
+};
+layout(std430, binding=1) buffer SelectionOutput {
+    vec4 header;     // visible count, saturation bits, total leaf count, source revision
+    vec4 records[340]; // cover[85] then compact visible[85], two vec4 per record
+};
+uniform int m_NodeCount;
+uniform int m_MaxLeaves;
+uniform float m_TargetPixels;
+
+bool touchesNode(int a, int b) {
+    vec4 x = nodes[a].rect;
+    vec4 y = nodes[b].rect;
+    return x.x <= y.x + y.z && y.x <= x.x + x.z
+        && x.y <= y.y + y.z && y.y <= x.y + x.z;
+}
+bool hasCoarserNeighbor(bool cover[85], int n) {
+    for (int j=0; j<85; ++j) {
+        if (j != n && cover[j] && nodes[j].meta.x < nodes[n].meta.x && touchesNode(n,j)) return true;
+    }
+    return false;
+}
+float coverError(bool cover[85], int n) {
+    return hasCoarserNeighbor(cover, n) ? nodes[n].errors.y : nodes[n].errors.x;
+}
+int firstCoarserNeighbor(bool cover[85], int n) {
+    for (int j=0; j<85; ++j) {
+        if (j != n && cover[j] && nodes[j].meta.x < nodes[n].meta.x && touchesNode(n,j)) return j;
+    }
+    return -1;
+}
+bool allChildrenReady(int n) {
+    if (nodes[n].children.x < 0) return false;
+    for (int k=0; k<4; ++k) if (nodes[nodes[n].children[k]].meta.y == 0) return false;
+    return true;
+}
+void splitCover(inout bool cover[85], int n) {
+    cover[n] = false;
+    for (int k=0; k<4; ++k) cover[nodes[n].children[k]] = true;
+}
+bool outsideFrustum(int n) {
+    vec3 lo = nodes[n].boundsMin.xyz;
+    vec3 hi = nodes[n].boundsMax.xyz;
+    vec3 c = (lo + hi) * 0.5;
+    vec3 e = (hi - lo) * 0.5;
+    for (int p=0; p<6; ++p) {
+        vec4 plane = planes[p];
+        float maxDistance = dot(plane.xyz, c) + plane.w + dot(abs(plane.xyz), e);
+        float pad = 1e-5 * (1.0 + abs(plane.w) + dot(abs(plane.xyz), abs(c) + e));
+        if (isnan(maxDistance) || isinf(maxDistance) || isnan(pad) || isinf(pad)) continue;
+        if (maxDistance < -pad) return true;
+    }
+    return false;
+}
+void main() {
+    bool cover[85];
+    bool attempted[85];
+    for (int i=0; i<85; ++i) { cover[i] = false; attempted[i] = false; }
+    cover[0] = true; // pinned root fallback
+    int leafCount = 1;
+    int flags = nodes[0].meta.y == 0 ? 8 : 0;
+
+    bool finished = false;
+    // At most 21 successful leaf splits fit a 64-leaf budget; each successful
+    // split can be preceded by at most 85 failed candidate attempts.
+    for (int pass=0; pass<1870; ++pass) {
+        int candidate = -1;
+        float worst = m_TargetPixels;
+        for (int i=0; i<85; ++i) {
+            if (!cover[i] || attempted[i]) continue;
+            float error = coverError(cover, i);
+            if (error > worst) { worst = error; candidate = i; }
+        }
+        if (candidate < 0) { finished = true; break; }
+        attempted[candidate] = true;
+        int split = candidate;
+        if (nodes[split].children.x < 0) {
+            split = firstCoarserNeighbor(cover, candidate);
+            if (split < 0) { flags |= 4; continue; }
+        }
+        if (!allChildrenReady(split)) { flags |= 2; continue; }
+        if (leafCount + 3 > m_MaxLeaves) { flags |= 1; continue; }
+
+        bool proposal[85];
+        for (int i=0; i<85; ++i) proposal[i] = cover[i];
+        splitCover(proposal, split);
+        bool accepted = true;
+        int proposedLeaves = leafCount + 3;
+        for (int balance=0; balance<85; ++balance) {
+            int coarse = -1;
+            for (int a=0; a<85 && coarse < 0; ++a) {
+                if (!proposal[a]) continue;
+                for (int b=0; b<85; ++b) {
+                    if (!proposal[b] || !touchesNode(a,b)) continue;
+                    if (nodes[a].meta.x + 1 < nodes[b].meta.x) { coarse = a; break; }
+                }
+            }
+            if (coarse < 0) break;
+            if (!allChildrenReady(coarse)) { flags |= 2; accepted = false; break; }
+            if (proposedLeaves + 3 > m_MaxLeaves) { flags |= 1; accepted = false; break; }
+            splitCover(proposal, coarse);
+            proposedLeaves += 3;
+            if (balance == 84) accepted = false;
+        }
+        if (accepted) {
+            for (int i=0; i<85; ++i) { cover[i] = proposal[i]; attempted[i] = false; }
+            leafCount = proposedLeaves;
+        }
+    }
+    if (!finished) {
+        for (int i=0; i<85; ++i) {
+            if (cover[i] && !attempted[i] && coverError(cover, i) > m_TargetPixels) flags |= 16;
+        }
+    }
+
+    float remainingError = 0.0;
+    for (int i=0; i<85; ++i) if (cover[i]) {
+        bool morph = hasCoarserNeighbor(cover, i);
+        remainingError = max(remainingError, morph ? nodes[i].errors.y : nodes[i].errors.x);
+    }
+    if (remainingError <= m_TargetPixels) flags &= ~7;
+
+    int visibleCount = 0;
+    for (int i=0; i<85; ++i) {
+        if (!cover[i]) continue;
+        int edgeMask = 0;
+        for (int j=0; j<85; ++j) {
+            if (i == j || !cover[j] || nodes[j].meta.x >= nodes[i].meta.x) continue;
+            if (!touchesNode(i,j)) continue;
+            vec4 a = nodes[i].rect, b = nodes[j].rect;
+            bool zOverlap = max(a.y,b.y) < min(a.y+a.z,b.y+b.z);
+            bool xOverlap = max(a.x,b.x) < min(a.x+a.z,b.x+b.z);
+            if (zOverlap && a.x == b.x+b.z) edgeMask |= 1;
+            else if (zOverlap && a.x+a.z == b.x) edgeMask |= 2;
+            else if (xOverlap && a.y == b.y+b.z) edgeMask |= 4;
+            else if (xOverlap && a.y+a.z == b.y) edgeMask |= 8;
+        }
+        bool morph = hasCoarserNeighbor(cover, i);
+        int edgeData = edgeMask | (morph ? 16 : 0);
+        int record = 0;
+        for (int j=0; j<i; ++j) if (cover[j]) ++record;
+        float error = morph ? nodes[i].errors.y : nodes[i].errors.x;
+        records[record*2] = vec4(float(i), nodes[i].rect.x, nodes[i].rect.y, nodes[i].rect.w);
+        records[record*2+1] = vec4(nodes[i].rect.z, float(edgeData), error, sourceInfo.x);
+    }
+    // A second deterministic pass compacts the complete balanced cover after edge decisions.
+    for (int i=0; i<85; ++i) {
+        if (!cover[i] || outsideFrustum(i)) continue;
+        int sourceRecord = 0;
+        for (int j=0; j<i; ++j) if (cover[j]) ++sourceRecord;
+        records[170 + visibleCount*2] = records[sourceRecord*2];
+        records[170 + visibleCount*2+1] = records[sourceRecord*2+1];
+        ++visibleCount;
+    }
+    header = vec4(float(visibleCount), float(flags), float(leafCount), sourceInfo.x);
+}

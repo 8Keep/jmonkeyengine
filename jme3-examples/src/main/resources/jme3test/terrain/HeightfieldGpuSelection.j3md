@@ -1,0 +1,9 @@
+MaterialDef HeightfieldGpuSelection {
+    MaterialParameters {
+        UniformBufferObject Result
+    }
+    Technique {
+        VertexShader GLSL300 GLSL150 : jme3test/terrain/HeightfieldGpuSelection.vert
+        FragmentShader GLSL300 GLSL150 : jme3test/terrain/HeightfieldGpuSelection.frag
+    }
+}
