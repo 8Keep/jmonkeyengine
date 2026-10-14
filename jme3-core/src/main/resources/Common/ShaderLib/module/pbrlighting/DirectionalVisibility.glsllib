@@ -1,0 +1,121 @@
+#ifndef __DIRECTIONAL_VISIBILITY_MODULE__
+#define __DIRECTIONAL_VISIBILITY_MODULE__
+
+// This module is included only for GLSL 1.50 / ES 3.00 feature variants.
+#ifdef DIRECTIONAL_VISIBILITY
+uniform mat4 g_ViewMatrix;
+uniform int m_DirectionalCascadeCount;
+uniform float m_DirectionalShadowMapSize;
+uniform float m_DirectionalShadowBias;
+uniform float m_DirectionalShadowStrength;
+uniform vec4 m_DirectionalShadowSplits;
+uniform vec3 m_DirectionalShadowLightDir;
+uniform vec2 m_DirectionalShadowFade;
+uniform mat4 m_DirectionalLightViewProjectionMatrix0;
+uniform mat4 m_DirectionalLightViewProjectionMatrix1;
+uniform mat4 m_DirectionalLightViewProjectionMatrix2;
+uniform mat4 m_DirectionalLightViewProjectionMatrix3;
+
+#ifdef DIRECTIONAL_HARDWARE_SHADOWS
+uniform sampler2DShadow m_DirectionalShadowMap0;
+uniform sampler2DShadow m_DirectionalShadowMap1;
+uniform sampler2DShadow m_DirectionalShadowMap2;
+uniform sampler2DShadow m_DirectionalShadowMap3;
+float DirectionalVisibilityCompare(sampler2DShadow shadowMap, vec2 uv, float depth) {
+    return texture(shadowMap, vec3(uv, depth));
+}
+#else
+uniform sampler2D m_DirectionalShadowMap0;
+uniform sampler2D m_DirectionalShadowMap1;
+uniform sampler2D m_DirectionalShadowMap2;
+uniform sampler2D m_DirectionalShadowMap3;
+float DirectionalVisibilityCompare(sampler2D shadowMap, vec2 uv, float depth) {
+    return step(depth, texture(shadowMap, uv).r);
+}
+#endif
+
+float DirectionalVisibilityTap(
+        #ifdef DIRECTIONAL_HARDWARE_SHADOWS
+        sampler2DShadow shadowMap,
+        #else
+        sampler2D shadowMap,
+        #endif
+        vec2 uv, float depth) {
+    // Out-of-map taps contribute lit visibility; sampler edge clamping must not
+    // extend occluders beyond a cascade's projected bounds.
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) {
+        return 1.0;
+    }
+    return DirectionalVisibilityCompare(shadowMap, uv, depth);
+}
+
+float DirectionalVisibilitySample(
+        #ifdef DIRECTIONAL_HARDWARE_SHADOWS
+        sampler2DShadow shadowMap,
+        #else
+        sampler2D shadowMap,
+        #endif
+        mat4 lightViewProjection, vec3 worldPosition) {
+    vec4 lightClip = lightViewProjection * vec4(worldPosition, 1.0);
+    if (lightClip.w <= 0.0) {
+        return 1.0;
+    }
+    vec3 ndc = lightClip.xyz / lightClip.w;
+    vec2 uv = ndc.xy * 0.5 + 0.5;
+    float depth = ndc.z * 0.5 + 0.5;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))
+            || depth < 0.0 || depth > 1.0) {
+        return 1.0;
+    }
+
+    // Bias is subtracted from normalized depth; its world-space equivalent depends
+    // on the projection depth range.
+    depth -= m_DirectionalShadowBias;
+    vec2 texel = vec2(1.0 / max(m_DirectionalShadowMapSize, 1.0));
+    float visibility = 0.0;
+    visibility += DirectionalVisibilityTap(shadowMap, uv + texel * vec2(-0.5, -0.5), depth);
+    visibility += DirectionalVisibilityTap(shadowMap, uv + texel * vec2( 0.5, -0.5), depth);
+    visibility += DirectionalVisibilityTap(shadowMap, uv + texel * vec2(-0.5,  0.5), depth);
+    visibility += DirectionalVisibilityTap(shadowMap, uv + texel * vec2( 0.5,  0.5), depth);
+    return visibility * 0.25;
+}
+
+float DirectionalVisibilityForCascade(int cascade, vec3 worldPosition) {
+    if (cascade == 0) return DirectionalVisibilitySample(m_DirectionalShadowMap0, m_DirectionalLightViewProjectionMatrix0, worldPosition);
+    if (cascade == 1) return DirectionalVisibilitySample(m_DirectionalShadowMap1, m_DirectionalLightViewProjectionMatrix1, worldPosition);
+    if (cascade == 2) return DirectionalVisibilitySample(m_DirectionalShadowMap2, m_DirectionalLightViewProjectionMatrix2, worldPosition);
+    return DirectionalVisibilitySample(m_DirectionalShadowMap3, m_DirectionalLightViewProjectionMatrix3, worldPosition);
+}
+
+bool DirectionalVisibilityMatchesLight(vec4 lightData0, vec4 lightData1) {
+    // jME light type 0 is Directional. Both direction vectors are travel
+    // directions in world space; direction matching is the available identity.
+    if (lightData0.w != 0.0) return false;
+    return dot(normalize(lightData1.xyz), normalize(m_DirectionalShadowLightDir)) > 0.999999;
+}
+
+float DirectionalVisibilityForPosition(vec3 worldPosition, float positiveViewDepth) {
+    int count = clamp(m_DirectionalCascadeCount, 1, 4);
+    float lastSplit = m_DirectionalShadowSplits.x;
+    if (count == 2) lastSplit = m_DirectionalShadowSplits.y;
+    if (count == 3) lastSplit = m_DirectionalShadowSplits.z;
+    if (count == 4) lastSplit = m_DirectionalShadowSplits.w;
+    if (positiveViewDepth > lastSplit) return 1.0;
+
+    int cascade = 0;
+    if (count > 1 && positiveViewDepth > m_DirectionalShadowSplits.x) cascade = 1;
+    if (count > 2 && positiveViewDepth > m_DirectionalShadowSplits.y) cascade = 2;
+    if (count > 3 && positiveViewDepth > m_DirectionalShadowSplits.z) cascade = 3;
+
+    float visibility = DirectionalVisibilityForCascade(cascade, worldPosition);
+    // Fade optional shadowing to fully lit starting at x over a 1/inverseRange
+    // distance. The caller may set inverseRange to zero to disable the fade.
+    if (m_DirectionalShadowFade.y > 0.0) {
+        float fade = clamp((positiveViewDepth - m_DirectionalShadowFade.x)
+                           * m_DirectionalShadowFade.y, 0.0, 1.0);
+        visibility = mix(visibility, 1.0, fade);
+    }
+    return mix(1.0, visibility, clamp(m_DirectionalShadowStrength, 0.0, 1.0));
+}
+#endif
+#endif
