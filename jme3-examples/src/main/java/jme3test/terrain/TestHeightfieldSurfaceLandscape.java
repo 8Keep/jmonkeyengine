@@ -481,7 +481,6 @@ public final class TestHeightfieldSurfaceLandscape extends SimpleApplication {
             material.setTexture("HeightPages", heightPages);
             material.setInt("HeightLayer", 0);
             material.setFloat("SampleSpacing", SPACING);
-            material.setBoolean("UseHeightfieldSurface", true);
             bindSurface(material, revision);
             patch.setMaterial(material);
             materials.add(material);
@@ -507,20 +506,12 @@ public final class TestHeightfieldSurfaceLandscape extends SimpleApplication {
 
     private void bindSurface(Material material, HeightfieldSurfacePage.Revision revision) {
         LayeredSurfaceSource source = sources.get(sources.size() - 1);
-        material.setTexture("SurfaceAlbedoPages", albedoPages);
-        material.setTexture("SurfaceNormalPages", normalPages);
-        material.setTexture("SurfaceSemanticPages", semanticPages);
-        material.setTexture("SurfacePageTable", pageTable);
+        HeightfieldSurfaceBindings.bind(material, albedoPages, normalPages, semanticPages,
+                pageTable, SIDE, GUTTER, MIPS, new Vector2f(0, 0), 64, SPACING);
         material.setTexture("SurfaceSourceAlbedo", source.albedoTexture);
         material.setTexture("SurfaceSourceNormal", source.normalTexture);
         material.setTexture("SurfaceSourceWeights", source.weightTexture);
         material.setVector2("SurfaceSourceOriginFine", new Vector2f(-64, -64));
-        material.setInt("SurfacePhysicalSide", SIDE);
-        material.setInt("SurfaceGutter", GUTTER);
-        material.setInt("SurfaceMipCount", MIPS);
-        material.setVector2("SurfaceRegionOrigin", new Vector2f(0, 0));
-        material.setFloat("SurfaceRegionSize", 64);
-        material.setFloat("SurfaceCanonicalSpacing", SPACING);
         material.setBoolean("SurfaceDirectReference", false);
         material.setBoolean("SurfacePreciseFilter", false);
         material.setFloat("SurfaceFixedLod", -1);
