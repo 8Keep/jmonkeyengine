@@ -29,23 +29,18 @@
 package jme3test.terrain;
 
 import com.jme3.app.SimpleApplication;
-import com.jme3.asset.AssetInfo;
-import com.jme3.asset.AssetKey;
 import com.jme3.bounding.BoundingBox;
 import com.jme3.material.Material;
 import com.jme3.math.ColorRGBA;
-import com.jme3.math.Matrix4f;
 import com.jme3.math.Vector3f;
 import com.jme3.renderer.Camera;
 import com.jme3.renderer.Caps;
 import com.jme3.renderer.Limits;
-import com.jme3.renderer.MemoryBarrier;
 import com.jme3.renderer.Renderer;
-import com.jme3.shader.Shader;
-import com.jme3.shader.VarType;
 import com.jme3.shader.bufferobject.BufferObject;
 import com.jme3.system.AppSettings;
 import com.jme3.terrain.heightfield.HeightfieldHierarchy;
+import com.jme3.terrain.heightfield.HeightfieldGpuSelection;
 import com.jme3.terrain.heightfield.HeightfieldLod;
 import com.jme3.terrain.heightfield.HeightfieldPage;
 import com.jme3.terrain.heightfield.HeightfieldProjection;
@@ -54,18 +49,13 @@ import com.jme3.texture.Image;
 import com.jme3.scene.Geometry;
 import com.jme3.scene.shape.Quad;
 import com.jme3.util.BufferUtils;
-import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
-import java.nio.IntBuffer;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
-import java.util.EnumSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
@@ -76,7 +66,6 @@ import java.util.concurrent.TimeUnit;
 public final class TestHeightfieldGpuSelection extends SimpleApplication {
     private static final int CELLS = 128, PATCH_CELLS = 16;
     private static final int NODE_COUNT = 85, MAX_LEAVES = 64;
-    private static final int NODE_VECS = 6, PLANE_COUNT = 6;
     private static final int OUTPUT_VECS = 1 + NODE_COUNT * 4;
     private static final float SPACING = .5f;
     private final CountDownLatch finished = new CountDownLatch(1);
@@ -140,7 +129,6 @@ public final class TestHeightfieldGpuSelection extends SimpleApplication {
             throw new UnsupportedOperationException("Managed compute and UBO support required");
         }
         boolean gles = renderer.getCaps().contains(Caps.OpenGLES30);
-        int inputBytes = (NODE_COUNT * NODE_VECS + PLANE_COUNT + 1) * 16;
         int outputBytes = OUTPUT_VECS * 16;
         require(renderer.getLimits().get(Limits.ComputeStorageBufferBindings) >= 2, "two storage bindings");
         require(renderer.getLimits().get(Limits.ComputeStorageBufferBlockSize) >= outputBytes, "output SSBO size");
@@ -156,17 +144,8 @@ public final class TestHeightfieldGpuSelection extends SimpleApplication {
         indices = new IdentityHashMap<>();
         for (int i = 0; i < nodes.size(); i++) indices.put(nodes.get(i), i);
 
-        BufferObject input = new BufferObject();
-        input.setData(BufferUtils.createByteBuffer(inputBytes).order(ByteOrder.nativeOrder()));
-        input.setBinding(2);
-        BufferObject result = new BufferObject();
-        result.setData(BufferUtils.createByteBuffer(outputBytes).order(ByteOrder.nativeOrder()));
-        result.setUpdateNeeded();
-        result.setBinding(3); // Material assigns its ordinary UBO binding independently.
-
-        Shader compute = new Shader();
-        compute.addSource(Shader.ShaderType.Compute, "HeightfieldGpuSelection.comp",
-                readAsset("jme3test/terrain/HeightfieldGpuSelection.comp"), "", gles ? "GLSL310" : "GLSL430");
+        HeightfieldGpuSelection selection = new HeightfieldGpuSelection(assetManager, renderer, hierarchy);
+        BufferObject result = selection.getPatchRecords();
         Material readback = new Material(assetManager, "jme3test/terrain/HeightfieldGpuSelection.j3md");
         readback.setUniformBufferObject("Result", result);
         Geometry quad = new Geometry("gpu-selection-result", new Quad(2, 2));
@@ -196,26 +175,22 @@ public final class TestHeightfieldGpuSelection extends SimpleApplication {
         summary.add("GPU hierarchy selection; projected errors prepared by HeightfieldProjection and rounded upward to float.");
         summary.add("Readiness is synthetic metadata in this proof; no HeightfieldResidency acceptance is claimed.");
         for (Scenario scenario : scenarios) {
-            runScenario(renderer, input, result, compute, quad, target, scenario, gles);
+            runScenario(renderer, selection, quad, target, scenario, gles);
             summary.add(scenario.name + " checks=" + checks);
         }
+        verifyPaddedHierarchy(renderer, quad, target, scenarios.get(0).camera);
         summary.add("renderer=" + renderer.getCaps());
         summary.add("limits=" + renderer.getLimits());
         Files.write(output.resolve("summary.txt"), summary);
+        selection.close();
         renderer.setFrameBuffer(null);
     }
 
-    private void runScenario(Renderer renderer, BufferObject input, BufferObject result,
-            Shader compute, Geometry quad, FrameBuffer target, Scenario scenario, boolean gles) {
+    private void runScenario(Renderer renderer, HeightfieldGpuSelection selection,
+            Geometry quad, FrameBuffer target, Scenario scenario, boolean gles) {
         boolean[] ready = readiness(scenario.readiness);
-        packInput(input, scenario, ready);
-        compute.getUniform("m_NodeCount").setValue(VarType.Int, NODE_COUNT);
-        compute.getUniform("m_MaxLeaves").setValue(VarType.Int, scenario.maxLeaves);
-        compute.getUniform("m_TargetPixels").setValue(VarType.Float, (float) scenario.targetPixels);
-        renderer.setFixedShaderStorageBufferObject(0, input);
-        renderer.setFixedShaderStorageBufferObject(1, result);
-        renderer.dispatchCompute(compute, 1, 1, 1);
-        renderer.memoryBarrier(EnumSet.of(MemoryBarrier.UniformBuffer, MemoryBarrier.ShaderStorage));
+        selection.dispatch(scenario.camera, scenario.targetPixels, scenario.revision,
+                scenario.maxLeaves, node -> ready[indices.get(node)]);
 
         renderer.setFrameBuffer(target);
         renderer.setBackgroundColor(ColorRGBA.Black);
@@ -231,6 +206,46 @@ public final class TestHeightfieldGpuSelection extends SimpleApplication {
     }
 
     private int lastLeafCount, lastVisibleCount, lastSaturation;
+
+    private void verifyPaddedHierarchy(Renderer renderer, Geometry quad, FrameBuffer target, Camera camera)
+            throws Exception {
+        HeightfieldGpuSelection padded = new HeightfieldGpuSelection(assetManager, renderer,
+                new HeightfieldHierarchy(page, CELLS, 0));
+        try {
+            padded.dispatch(camera, 1000, 4, 1, node -> true);
+            quad.getMaterial().setUniformBufferObject("Result", padded.getPatchRecords());
+            renderer.setFrameBuffer(target);
+            renderManager.renderGeometry(quad);
+            ByteBuffer bytes = BufferUtils.createByteBuffer(NODE_COUNT * 5 * 16).order(ByteOrder.nativeOrder());
+            renderer.readFrameBufferWithFormat(target, bytes, Image.Format.RGBA32F);
+            FloatBuffer values = bytes.asFloatBuffer();
+            require(pixel(values, 0, 0, 0) == 1 && pixel(values, 0, 0, 1) == 0
+                    && pixel(values, 0, 0, 2) == 1 && pixel(values, 0, 0, 3) == 4,
+                    "one-node hierarchy produces one ready leaf without selecting padding");
+            for (int row : new int[]{1, 3}) {
+                require(pixel(values, 0, row, 0) == 0 && pixel(values, 0, row, 1) == 0
+                        && pixel(values, 0, row, 2) == 0 && pixel(values, 0, row, 3) == 1,
+                        "padded hierarchy root and compact record retain their coordinates");
+                require(pixel(values, 0, row + 1, 0) == CELLS && pixel(values, 0, row + 1, 1) == 0
+                        && pixel(values, 0, row + 1, 3) == 4, "padded hierarchy metadata remains bounded");
+            }
+            boolean rejected = false;
+            try { padded.dispatch(camera, 1, 4, 1, node -> false); }
+            catch (IllegalStateException expected) { rejected = true; }
+            require(rejected, "unready fallback root is rejected before dispatch");
+            rejected = false;
+            try { padded.dispatch(camera, 1, 16777217, 1, node -> true); }
+            catch (IllegalArgumentException expected) { rejected = true; }
+            require(rejected, "revision labels that lose integer precision are rejected");
+        } finally {
+            padded.close();
+        }
+        boolean rejected = false;
+        try { padded.getCommand(); }
+        catch (IllegalStateException expected) { rejected = true; }
+        require(rejected, "closed selector cannot expose retired commands");
+        System.out.println("HEIGHTFIELD_GPU_PADDED_PASS nodes=1 checks=" + checks);
+    }
 
     private void verify(Scenario scenario, boolean[] ready, FloatBuffer pixels) {
         float visibleCountF = pixel(pixels, 0, 0, 0);
@@ -380,56 +395,6 @@ public final class TestHeightfieldGpuSelection extends SimpleApplication {
                 "cold root scenario remains on pinned root");
     }
 
-    private void packInput(BufferObject input, Scenario scenario, boolean[] ready) {
-        ByteBuffer data = input.getData().order(ByteOrder.nativeOrder());
-        data.clear();
-        FloatBuffer f = data.asFloatBuffer();
-        IntBuffer ints = data.asIntBuffer();
-        for (int i = 0; i < NODE_COUNT; i++) {
-            HeightfieldHierarchy.Node node = nodes.get(i);
-            int base = i * NODE_VECS * 4;
-            List<HeightfieldHierarchy.Node> children = node.getChildren();
-            for (int q = 0; q < 4; q++) ints.put(base + q, q < children.size() ? indices.get(children.get(q)) : -1);
-            ints.put(base + 4, node.getLevel());
-            ints.put(base + 5, ready[i] ? 1 : 0);
-            ints.put(base + 6, 0);
-            ints.put(base + 7, 0);
-            f.put(base + 8, node.getOriginX());
-            f.put(base + 9, node.getOriginZ());
-            f.put(base + 10, node.getSpan());
-            f.put(base + 11, node.getStride());
-            double stable = HeightfieldProjection.pixels(scenario.camera, node.getBound(), node.getStableError());
-            double morph = HeightfieldProjection.pixels(scenario.camera, node.getBound(), node.getMorphError());
-            f.put(base + 12, ceilFloat(stable));
-            f.put(base + 13, ceilFloat(morph));
-            f.put(base + 14, 0);
-            f.put(base + 15, 0);
-            BoundingBox b = node.getBound();
-            Vector3f c = b.getCenter();
-            f.put(base + 16, c.x - b.getXExtent());
-            f.put(base + 17, c.y - b.getYExtent());
-            f.put(base + 18, c.z - b.getZExtent());
-            f.put(base + 19, 0);
-            f.put(base + 20, c.x + b.getXExtent());
-            f.put(base + 21, c.y + b.getYExtent());
-            f.put(base + 22, c.z + b.getZExtent());
-            f.put(base + 23, 0);
-        }
-        int planeBase = NODE_COUNT * NODE_VECS * 4;
-        float[][] planes = planes(scenario.camera.getViewProjectionMatrix());
-        for (int p = 0; p < PLANE_COUNT; p++) {
-            int base = planeBase + p * 4;
-            for (int j = 0; j < 4; j++) f.put(base + j, planes[p][j]);
-        }
-        int info = planeBase + PLANE_COUNT * 4;
-        f.put(info, scenario.revision);
-        f.put(info + 1, (float) scenario.targetPixels);
-        f.put(info + 2, scenario.maxLeaves);
-        f.put(info + 3, NODE_COUNT);
-        input.setUpdateNeeded();
-        input.getData().position(0).limit(input.getData().capacity());
-    }
-
     private boolean[] readiness(Readiness mode) {
         boolean[] ready = new boolean[NODE_COUNT];
         ready[0] = true; // pinned root is always the fallback
@@ -448,21 +413,6 @@ public final class TestHeightfieldGpuSelection extends SimpleApplication {
         } finally {
             camera.setPlaneState(savedPlaneState);
         }
-    }
-
-    private static float[][] planes(Matrix4f m) {
-        float[][] rows = {{m.m00,m.m01,m.m02,m.m03}, {m.m10,m.m11,m.m12,m.m13},
-            {m.m20,m.m21,m.m22,m.m23}, {m.m30,m.m31,m.m32,m.m33}};
-        float[][] p = new float[6][4];
-        for (int i = 0; i < 4; i++) {
-            p[0][i] = rows[3][i] + rows[0][i];
-            p[1][i] = rows[3][i] - rows[0][i];
-            p[2][i] = rows[3][i] + rows[1][i];
-            p[3][i] = rows[3][i] - rows[1][i];
-            p[4][i] = rows[3][i] + rows[2][i];
-            p[5][i] = rows[3][i] - rows[2][i];
-        }
-        return p;
     }
 
     private static float ceilFloat(double value) {
@@ -507,16 +457,6 @@ public final class TestHeightfieldGpuSelection extends SimpleApplication {
     private void require(boolean ok, String message) {
         if (!ok) throw new IllegalStateException("GPU heightfield selection check failed: " + message);
         checks++;
-    }
-
-    private String readAsset(String path) throws Exception {
-        AssetInfo asset = assetManager.locateAsset(new AssetKey<>(path));
-        if (asset == null) throw new IllegalStateException("Missing shader asset " + path);
-        try (InputStream in = asset.openStream(); ByteArrayOutputStream bytes = new ByteArrayOutputStream()) {
-            byte[] block = new byte[4096]; int n;
-            while ((n = in.read(block)) >= 0) bytes.write(block, 0, n);
-            return new String(bytes.toByteArray(), StandardCharsets.UTF_8);
-        }
     }
 
     private static HeightfieldPage makePage() {
