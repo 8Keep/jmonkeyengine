@@ -202,9 +202,27 @@ public final class HeightfieldLodGpuProbe implements AutoCloseable {
             com.jme3.shader.bufferobject.BufferObject command, int recordBase,
             com.jme3.shader.bufferobject.BufferObject pageBindings, TextureArray atlas,
             FrameBuffer resumeTarget) {
+        return verifyPageRecords(patches, records, command, recordBase, pageBindings, atlas, resumeTarget, false);
+    }
+
+    /** Check four-vec4 temporal records against the CPU oracle using node pages. */
+    public Verification verifyPageMorphRecords(List<Patch> patches,
+            com.jme3.shader.bufferobject.BufferObject records,
+            com.jme3.shader.bufferobject.BufferObject command, int recordBase,
+            com.jme3.shader.bufferobject.BufferObject pageBindings, TextureArray atlas,
+            FrameBuffer resumeTarget) {
+        return verifyPageRecords(patches, records, command, recordBase, pageBindings, atlas, resumeTarget, true);
+    }
+
+    private Verification verifyPageRecords(List<Patch> patches,
+            com.jme3.shader.bufferobject.BufferObject records,
+            com.jme3.shader.bufferobject.BufferObject command, int recordBase,
+            com.jme3.shader.bufferobject.BufferObject pageBindings, TextureArray atlas,
+            FrameBuffer resumeTarget, boolean morphs) {
+        int stride = morphs ? 4 : 2;
         requireOpen();
         if (patches == null || patches.isEmpty() || records == null || command == null || pageBindings == null || atlas == null
-                || recordBase < 0 || (long) recordBase + patches.size() * 2L > 340
+                || recordBase < 0 || (long) recordBase + patches.size() * (long) stride > 340
                 || records.getData() == null || records.getData().limit() < 341 * 16
                 || pageBindings.getData() == null || pageBindings.getData().limit() < 85 * 16
                 || command.getData() == null || command.getData().limit() < 32) {
@@ -218,19 +236,20 @@ public final class HeightfieldLodGpuProbe implements AutoCloseable {
             throw new IllegalArgumentException("complete GPU cover records must start at record zero");
         }
         requireFloatReadbackSupport();
-        verifyCompleteCover(patches, records, command, resumeTarget);
+        verifyCompleteCover(patches, records, command, resumeTarget, morphs);
         material.setBoolean("UseHeightfieldInstances", true);
-        material.setBoolean("UseHeightfieldInstanceMorphs", false);
+        material.setBoolean("UseHeightfieldInstanceMorphs", morphs);
         material.setBoolean("UseHeightfieldNodePages", true);
         material.setUniformBufferObject("PatchRecords", records);
         material.setUniformBufferObject("HeightfieldPageBindings", pageBindings);
         material.setTexture("HeightPages", atlas);
         try {
-            return verifyPatches(patches, resumeTarget, recordBase, 2);
+            return verifyPatches(patches, resumeTarget, recordBase, stride);
         } finally {
             material.setTexture("HeightPages", heightPages);
             material.setBoolean("UseHeightfieldInstances", false);
             material.setBoolean("UseHeightfieldNodePages", false);
+            material.setBoolean("UseHeightfieldInstanceMorphs", false);
             material.clearParam("PatchRecords");
             material.clearParam("HeightfieldPageBindings");
             material.setInt("PatchRecordBase", 0);
@@ -324,7 +343,7 @@ public final class HeightfieldLodGpuProbe implements AutoCloseable {
 
     private void verifyCompleteCover(List<Patch> patches,
             com.jme3.shader.bufferobject.BufferObject records,
-            com.jme3.shader.bufferobject.BufferObject command, FrameBuffer resumeTarget) {
+            com.jme3.shader.bufferobject.BufferObject command, FrameBuffer resumeTarget, boolean morphs) {
         if (patches.isEmpty()) {
             throw new IllegalArgumentException("a complete heightfield cover must include its root");
         }
@@ -347,17 +366,18 @@ public final class HeightfieldLodGpuProbe implements AutoCloseable {
                 throw new IllegalArgumentException("CPU patches must follow hierarchy node order");
             }
             Patch patch = expected.get(i);
-            if (patch.getMorph() != 0f) {
+            if (!morphs && patch.getMorph() != 0f) {
                 throw new IllegalArgumentException("complete-cover record check requires stable interior morphs");
             }
             for (int edge = 0; edge < 4; edge++) {
                 float weight = patch.getEdgeMorph(edge);
-                if (weight != 0f && weight != 1f) {
+                if (!morphs && weight != 0f && weight != 1f) {
                     throw new IllegalArgumentException("complete-cover record check requires stable edge morphs");
                 }
             }
         }
 
+        coverDecoderMaterial.setBoolean("InspectMorphRecords", morphs);
         coverDecoderMaterial.setUniformBufferObject("Result", records);
         coverDecoderMaterial.setUniformBufferObject("Command", command);
         Camera previousCamera = renderManager.getCurrentCamera();
@@ -416,7 +436,23 @@ public final class HeightfieldLodGpuProbe implements AutoCloseable {
             requireRecordValue(actual, originOffset + 2, node.getOriginZ(), "origin z", i);
             requireRecordValue(actual, originOffset + 3, node.getStride(), "stride", i);
             requireRecordValue(actual, detailOffset, node.getSpan(), "span", i);
-            requireRecordValue(actual, detailOffset + 1, coverEdgeFlags(patch, expected), "edge flags", i);
+            int edgeFlags = coverEdgeFlags(patch, expected);
+            if (morphs) {
+                boolean moved = patch.getMorph() > 0f;
+                for (int edge = 0; edge < 4; edge++) moved |= patch.getEdgeMorph(edge) > 0f;
+                edgeFlags = (edgeFlags & 15) | (moved ? 16 : 0);
+                int morphOffset = (255 + i) * 4;
+                int northOffset = (340 + i) * 4;
+                requireRecordValue(actual, morphOffset, patch.getMorph(), "interior morph", i);
+                for (int edge = 0; edge < 3; edge++) {
+                    requireRecordValue(actual, morphOffset + edge + 1, patch.getEdgeMorph(edge), "edge morph", i);
+                }
+                requireRecordValue(actual, northOffset, patch.getEdgeMorph(3), "north morph", i);
+                for (int reserved = 1; reserved < 4; reserved++) {
+                    requireRecordValue(actual, northOffset + reserved, 0f, "reserved morph", i);
+                }
+            }
+            requireRecordValue(actual, detailOffset + 1, edgeFlags, "edge flags", i);
             float label = actual.get(detailOffset + 3);
             if (!Float.isFinite(label) || label != sourceLabel) {
                 throw new IllegalStateException("GPU source label differs at complete-cover record " + i
