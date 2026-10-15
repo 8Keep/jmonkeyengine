@@ -164,6 +164,7 @@ public final class HeightfieldMorphRenderProbe implements AutoCloseable {
         float[] gpuColor = null;
         float[] referenceColor = null;
         float[] gpuDepth = null;
+        float[] mainDepth = null;
         float[] referenceDepth = null;
         try {
             scene.detachAllChildren();
@@ -181,6 +182,7 @@ public final class HeightfieldMorphRenderProbe implements AutoCloseable {
             scene.updateGeometricState();
             renderScene(camera, gpuTarget, false);
             gpuColor = readColor(gpuTarget);
+            mainDepth = readDepth(gpuTarget);
 
             scene.detachAllChildren();
             for (int i = 0; i < reference.size(); i++) {
@@ -223,6 +225,15 @@ public final class HeightfieldMorphRenderProbe implements AutoCloseable {
             writePng(output.resolve(name + "-gpu.png"), gpuColor);
             writePng(output.resolve(name + "-reference.png"), referenceColor);
             Verification result = compare(gpuColor, referenceColor, gpuDepth, referenceDepth);
+            float maximumMainCaster = 0;
+            for (int i = 0; i < mainDepth.length; i++) {
+                float difference = Math.abs(mainDepth[i] - gpuDepth[i]);
+                if (!Float.isFinite(difference) || difference > DEPTH_TOLERANCE) {
+                    throw new IllegalStateException("main/caster depth differs at " + i + ": " + difference);
+                }
+                maximumMainCaster = Math.max(maximumMainCaster, difference);
+            }
+            System.out.println("HEIGHTFIELD_MORPH_MAIN_CASTER phase=" + name + " maxDepthDifference=" + maximumMainCaster);
             System.out.println("HEIGHTFIELD_MORPH_RENDER phase=" + name + " " + result);
             return result;
         } finally {
@@ -290,7 +301,8 @@ public final class HeightfieldMorphRenderProbe implements AutoCloseable {
                 unbiased.setColorWrite(false);
                 unbiased.setDepthTest(true);
                 unbiased.setDepthWrite(true);
-                unbiased.setFaceCullMode(RenderState.FaceCullMode.Off);
+                unbiased.setPolyOffset(0, 0);
+                unbiased.setFaceCullMode(RenderState.FaceCullMode.Back);
                 renderManager.setForcedRenderState(unbiased);
             }
             renderManager.renderViewPort(viewPort, 0f);

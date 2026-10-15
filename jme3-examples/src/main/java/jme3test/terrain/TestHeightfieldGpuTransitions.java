@@ -65,6 +65,7 @@ public final class TestHeightfieldGpuTransitions extends SimpleApplication {
     private static final int CELLS = 128, PATCH_CELLS = 16, NODES = 85;
     private final CountDownLatch finished = new CountDownLatch(1);
     private final Path output;
+    private final boolean checkShading;
     private final Map<HeightfieldHierarchy.Node, Integer> indices = new IdentityHashMap<>();
     private final List<String> rows = new ArrayList<>();
     private volatile Throwable failure;
@@ -80,11 +81,15 @@ public final class TestHeightfieldGpuTransitions extends SimpleApplication {
     private Camera decoderCamera;
     private ByteBuffer bytes;
 
-    private TestHeightfieldGpuTransitions(Path output) { this.output = output; }
+    private TestHeightfieldGpuTransitions(Path output, boolean checkShading) {
+        this.output = output;
+        this.checkShading = checkShading;
+    }
 
     public static void main(String[] args) throws Exception {
         TestHeightfieldGpuTransitions app = new TestHeightfieldGpuTransitions(Paths.get(
-                args.length > 1 ? args[1] : "build/heightfield-gpu-transitions"));
+                args.length > 1 ? args[1] : "build/heightfield-gpu-transitions"),
+                args.length > 2 && "--check-shading".equals(args[2]));
         AppSettings settings = new AppSettings(true);
         settings.setRenderer(args.length > 0 ? args[0] : AppSettings.LWJGL_OPENGL45);
         settings.setResolution(320, 240);
@@ -159,6 +164,15 @@ public final class TestHeightfieldGpuTransitions extends SimpleApplication {
             Camera normal = camera(new Vector3f(32, 30, 72), new Vector3f(32, 0, 32));
             Camera cut = camera(new Vector3f(-42, 25, 9), new Vector3f(10, 0, 55));
             Predicate<HeightfieldHierarchy.Node> all = node -> true;
+            if (checkShading) {
+                phase("parent-endpoint", normal, 10000, 64, 1, all, 1, 0);
+                images.verify(normal, reference.getPatches(), "parent-endpoint", output);
+                phase("child-endpoint", normal, .8, 64, 1, all, 1, 0);
+                images.verify(normal, reference.getPatches(), "child-endpoint", output);
+                verifyShadingEndpoint();
+                gpu.reset();
+                reference = new HeightfieldLod.Transition(hierarchy);
+            }
             phase("refine", normal, .8, 64, 1, all, 110, .25f);
             phase("coarsen", normal, 10000, 64, 1, all, 110, .25f);
             require(reference.getPatches().size() == 1 && !reference.isTransitioning(), "coarse convergence");
@@ -199,6 +213,25 @@ public final class TestHeightfieldGpuTransitions extends SimpleApplication {
                 primaryFailure.addSuppressed(cleanupFailure);
             }
         }
+    }
+
+    private void verifyShadingEndpoint() throws Exception {
+        java.awt.image.BufferedImage parent = javax.imageio.ImageIO.read(output.resolve("parent-endpoint-gpu.png").toFile());
+        java.awt.image.BufferedImage children = javax.imageio.ImageIO.read(output.resolve("child-endpoint-gpu.png").toFile());
+        int maximum = 0, changed = 0;
+        for (int y = 0; y < parent.getHeight(); y++) for (int x = 0; x < parent.getWidth(); x++) {
+            int a = parent.getRGB(x, y), b = children.getRGB(x, y);
+            require((a >>> 24) == (b >>> 24), "collapsed split preserves raster coverage");
+            boolean differs = false;
+            for (int shift : new int[]{0, 8, 16}) {
+                int delta = Math.abs(((a >>> shift) & 255) - ((b >>> shift) & 255));
+                maximum = Math.max(maximum, delta);
+                differs |= delta > 1;
+            }
+            if (differs) changed++;
+        }
+        System.out.println("HEIGHTFIELD_MORPH_SHADING_ENDPOINT maxByteDifference=" + maximum + " changedOverOneByte=" + changed);
+        require(maximum <= 1, "fully collapsed children preserve parent shading within one display byte");
     }
 
     private void phase(String name, Camera camera, double pixels, int budget, int revision,
