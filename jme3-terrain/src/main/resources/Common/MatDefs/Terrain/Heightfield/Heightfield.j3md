@@ -12,6 +12,16 @@ MaterialDef Heightfield {
         // Optional CPU-selected patch LOD. When enabled, the vertex grid uses
         // integer patch coordinates and samples the global source lattice.
         Boolean UseHeightfieldLod : false
+        // GPU instance records are pairs of vec4 values after a vec4 header.
+        // The caller owns the record range and indirect count, and must keep
+        // PageCells, PatchGridCells, page origin, and layer uniform per batch.
+        Boolean UseHeightfieldInstances : false
+        UniformBufferObject PatchRecords
+        // Offset in vec4 record units (the header is outside this array).
+        Int PatchRecordBase : 0
+        // Compile-time UBO capacity. The native selector's cover + visible
+        // records need 340 vec4s; this does not stream independent pages.
+        Int PatchRecordVectors : 340
         // Fine-lattice cell dimensions of the page layer and this draw patch.
         Int PageCells : 0
         Int PatchGridCells : 0
@@ -101,6 +111,8 @@ MaterialDef Heightfield {
 
         Defines {
             HEIGHTFIELD_LOD : UseHeightfieldLod
+            HEIGHTFIELD_INSTANCES : UseHeightfieldInstances
+            HEIGHTFIELD_PATCH_RECORD_VECS : PatchRecordVectors
             HEIGHTFIELD_SURFACE : UseHeightfieldSurface
             SURFACE_DIRECT_REFERENCE : SurfaceDirectReference
             SURFACE_PRECISE_FILTER : SurfacePreciseFilter
@@ -121,6 +133,8 @@ MaterialDef Heightfield {
 
         Defines {
             HEIGHTFIELD_LOD : UseHeightfieldLod
+            HEIGHTFIELD_INSTANCES : UseHeightfieldInstances
+            HEIGHTFIELD_PATCH_RECORD_VECS : PatchRecordVectors
         }
 
         ForcedRenderState {

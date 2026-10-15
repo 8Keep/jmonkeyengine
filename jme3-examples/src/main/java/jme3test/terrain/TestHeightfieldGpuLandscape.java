@@ -34,6 +34,10 @@ import com.jme3.app.SimpleApplication;
 import com.jme3.asset.AssetInfo;
 import com.jme3.asset.AssetKey;
 import com.jme3.bounding.BoundingBox;
+import com.jme3.light.AmbientLight;
+import com.jme3.light.DirectionalLight;
+import com.jme3.light.LightList;
+import com.jme3.material.Material;
 import com.jme3.material.RenderState;
 import com.jme3.math.ColorRGBA;
 import com.jme3.math.Matrix4f;
@@ -45,6 +49,9 @@ import com.jme3.renderer.Limits;
 import com.jme3.renderer.MemoryBarrier;
 import com.jme3.renderer.Renderer;
 import com.jme3.scene.Mesh;
+import com.jme3.scene.Geometry;
+import com.jme3.scene.instancing.IndirectGeometry;
+import com.jme3.scene.instancing.InstancedGeometry;
 import com.jme3.shader.Shader;
 import com.jme3.shader.ShaderBufferBlock.BufferType;
 import com.jme3.shader.VarType;
@@ -60,6 +67,7 @@ import com.jme3.texture.FrameBuffer;
 import com.jme3.texture.Image;
 import com.jme3.texture.Texture;
 import com.jme3.texture.TextureArray;
+import com.jme3.texture.Texture2D;
 import com.jme3.util.BufferUtils;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
@@ -88,6 +96,7 @@ public final class TestHeightfieldGpuLandscape extends SimpleApplication {
     private static final float SPACING = .5f;
     private final CountDownLatch finished = new CountDownLatch(1);
     private final Path output;
+    private final boolean materialMode;
     private volatile Throwable failure;
     private HeightfieldPage page;
     private HeightfieldHierarchy hierarchy;
@@ -99,11 +108,15 @@ public final class TestHeightfieldGpuLandscape extends SimpleApplication {
     private HeightfieldResidency.PageKey residentKey;
     private HeightfieldResidency.Handle rootHandle;
 
-    private TestHeightfieldGpuLandscape(Path output) { this.output = output; }
+    private TestHeightfieldGpuLandscape(Path output, boolean materialMode) {
+        this.output = output;
+        this.materialMode = materialMode;
+    }
 
     public static void main(String[] args) throws Exception {
         TestHeightfieldGpuLandscape app = new TestHeightfieldGpuLandscape(Paths.get(
-                args.length > 1 ? args[1] : "build/heightfield-gpu-landscape"));
+                args.length > 1 ? args[1] : "build/heightfield-gpu-landscape"),
+                args.length > 2 && "--materials".equals(args[2]));
         AppSettings settings = new AppSettings(true);
         settings.setRenderer(args.length > 0 ? args[0] : AppSettings.LWJGL_OPENGL45);
         settings.setResolution(WIDTH, HEIGHT);
@@ -217,6 +230,7 @@ public final class TestHeightfieldGpuLandscape extends SimpleApplication {
                 .append("One live HeightfieldResidency pool slot (key revision=1,x=0,z=0,stride=1) uploads the shared fine source texture; every candidate patch uses that same page. Scenario revision labels are metadata echoes, not height edits.\n")
                 .append("RGBA32F linear readback; PNG uses clamp-to-[0,1] then IEC sRGB transfer; no tone mapper.\n")
                 .append("GPU hierarchy selector -> compact records -> compute indirect command -> indexed draw; CPU oracle uses ordinary instancing.\n");
+        summary.append("shading=").append(materialMode ? "ordinary Heightfield PBR material, two direct lights and ambient fill" : "diagnostic fine-gradient diffuse").append('\n');
         for (Scenario scenario : scenarios) {
             Capture result = capture(renderer, scenario, input, gpuRecords, cpuRecords,
                     command, select, buildCommand, gpuDraw, cpuDraw, grid, heights, state, es);
@@ -284,9 +298,18 @@ public final class TestHeightfieldGpuLandscape extends SimpleApplication {
         gpuDraw.getBufferBlock("m_Selection").setBufferObject(BufferType.UniformBufferObject, gpuRecords);
         FrameBuffer gpuTarget = target(WIDTH, HEIGHT);
         FrameBuffer cpuTarget = target(WIDTH, HEIGHT);
+        FrameBuffer gpuShadow = materialMode ? target(WIDTH, HEIGHT) : null;
+        FrameBuffer cpuShadow = materialMode ? target(WIDTH, HEIGHT) : null;
         require(residency.isRetained(frameRoot), scenario.name + " page generation remains retained before drawing");
-        drawGpu(renderer, scenario, gpuDraw, gpuRecords, grid, heights, state, gpuTarget, 0, true, command, frameRoot.getSlot());
-        drawGpu(renderer, scenario, cpuDraw, cpuRecords, grid, heights, state, cpuTarget, cpuVisible, false, command, frameRoot.getSlot());
+        if (materialMode) {
+            drawMaterial(renderer, scenario, gpuRecords, grid, heights, gpuTarget, 0, command, frameRoot.getSlot(), false);
+            drawMaterial(renderer, scenario, cpuRecords, grid, heights, cpuTarget, cpuVisible, null, frameRoot.getSlot(), false);
+            drawMaterial(renderer, scenario, gpuRecords, grid, heights, gpuShadow, 0, command, frameRoot.getSlot(), true);
+            drawMaterial(renderer, scenario, cpuRecords, grid, heights, cpuShadow, cpuVisible, null, frameRoot.getSlot(), true);
+        } else {
+            drawGpu(renderer, scenario, gpuDraw, gpuRecords, grid, heights, state, gpuTarget, 0, true, command, frameRoot.getSlot());
+            drawGpu(renderer, scenario, cpuDraw, cpuRecords, grid, heights, state, cpuTarget, cpuVisible, false, command, frameRoot.getSlot());
+        }
         submitFrame(renderer, lease);
         submitted = true;
         waitForFrames();
@@ -294,6 +317,7 @@ public final class TestHeightfieldGpuLandscape extends SimpleApplication {
         int gpuVisible = decodeCommand(renderer, command, es);
         require(gpuVisible == cpuVisible, scenario.name + " GPU command count matches CPU visible cover count");
         double gpuError = verifyGpuCover(renderer, scenario, gpuRecords, cpuCover, es);
+        if (materialMode) verifyDepth(renderer, scenario, gpuTarget, cpuTarget, gpuShadow, cpuShadow, es);
         FloatBuffer gpuPixels = read(renderer, gpuTarget);
         FloatBuffer cpuPixels = read(renderer, cpuTarget);
         Comparison comparison = compare(scenario, gpuPixels, cpuPixels);
@@ -352,6 +376,118 @@ public final class TestHeightfieldGpuLandscape extends SimpleApplication {
             renderer.deleteFence(fence);
             throw new IllegalStateException("could not register renderer fence for page lease");
         }
+    }
+
+    private void drawMaterial(Renderer renderer, Scenario scenario, BufferObject records,
+            Mesh grid, TextureArray heights, FrameBuffer target, int cpuInstances,
+            BufferObject command, int heightLayer, boolean depthOnly) {
+        Geometry batch;
+        if (command != null) {
+            batch = new IndirectGeometry("GPU terrain", grid, command, 0, hierarchy.getRoot().getBound());
+        } else {
+            // Exercise the unchanged ordinary instancing/material path as the oracle.
+            InstancedGeometry ordinary = new InstancedGeometry("CPU terrain");
+            ordinary.setMesh(grid);
+            ordinary.setMaxNumInstances(Math.max(1, cpuInstances));
+            for (int i = 0; i < cpuInstances; i++) {
+                Geometry instance = new Geometry("reference patch", grid);
+                instance.updateGeometricState();
+                ordinary.addInstance(instance);
+            }
+            ordinary.updateInstances(null);
+            batch = ordinary;
+        }
+        Material material = new Material(assetManager, "Common/MatDefs/Terrain/Heightfield/Heightfield.j3md");
+        material.setTexture("HeightPages", heights);
+        material.setInt("HeightLayer", heightLayer);
+        material.setFloat("SampleSpacing", SPACING);
+        material.setBoolean("UseHeightfieldInstances", true);
+        material.setUniformBufferObject("PatchRecords", records);
+        material.setInt("PatchRecordBase", NODES * 2);
+        material.setInt("PatchRecordVectors", NODES * 4);
+        material.setInt("PageCells", CELLS);
+        material.setInt("PatchGridCells", PATCH_CELLS);
+        material.setFloat("SnowLine", 6.8f);
+        material.setFloat("SnowFade", .8f);
+        material.setFloat("TextureScale", .2f);
+        if (depthOnly) material.selectTechnique("PreShadow", renderManager);
+        batch.setMaterial(material);
+        batch.updateGeometricState();
+        require(batch.getWorldBound().contains(hierarchy.getRoot().getBound().getCenter()),
+                "material batch retains its source bound");
+
+        LightList lights = new LightList(batch);
+        AmbientLight ambient = new AmbientLight();
+        ambient.setColor(new ColorRGBA(.28f, .34f, .43f, 1));
+        lights.add(ambient);
+        DirectionalLight sun = new DirectionalLight();
+        sun.setDirection(new Vector3f(-.55f, -.8f, -.35f).normalizeLocal());
+        sun.setColor(new ColorRGBA(1.7f, 1.55f, 1.35f, 1));
+        lights.add(sun);
+        DirectionalLight fill = new DirectionalLight();
+        fill.setDirection(new Vector3f(.7f, -.5f, .4f).normalizeLocal());
+        fill.setColor(new ColorRGBA(.15f, .22f, .35f, 1));
+        lights.add(fill);
+        renderManager.setCamera(scenario.camera, false);
+        renderManager.setMaxSinglePassLightBatchSize(1);
+        renderer.setFrameBuffer(target);
+        renderer.setViewPort(0, 0, WIDTH, HEIGHT);
+        renderer.setBackgroundColor(new ColorRGBA(.025f, .04f, .065f, 1));
+        renderer.clearBuffers(true, true, false);
+        RenderState previous = renderManager.getForcedRenderState();
+        try {
+            if (depthOnly) {
+                // Compare caster geometry without raster bias obscuring position equality.
+                RenderState unbiasedDepth = new RenderState();
+                unbiasedDepth.setColorWrite(false);
+                unbiasedDepth.setDepthTest(true);
+                unbiasedDepth.setDepthWrite(true);
+                unbiasedDepth.setFaceCullMode(RenderState.FaceCullMode.Back);
+                renderManager.setForcedRenderState(unbiasedDepth);
+            }
+            renderManager.renderGeometry(batch, lights);
+        } finally {
+            renderManager.setForcedRenderState(previous);
+        }
+    }
+
+    private void verifyDepth(Renderer renderer, Scenario scenario, FrameBuffer gpu,
+            FrameBuffer cpu, FrameBuffer gpuShadow, FrameBuffer cpuShadow, boolean es) throws Exception {
+        FloatBuffer[] depth = {readDepth(renderer, gpu, es), readDepth(renderer, cpu, es),
+            readDepth(renderer, gpuShadow, es), readDepth(renderer, cpuShadow, es)};
+        float maximum = 0;
+        for (int pixel = 0; pixel < WIDTH * HEIGHT; pixel++) {
+            float expected = depth[0].get(pixel * 4);
+            for (int pass = 1; pass < depth.length; pass++) {
+                float value = depth[pass].get(pixel * 4);
+                require(Float.isFinite(value) && value >= 0 && value <= 1, "finite native depth sample");
+                maximum = Math.max(maximum, Math.abs(value - expected));
+            }
+        }
+        require(maximum <= 2f / 16777215f, scenario.name + " material and unbiased caster depth match");
+        System.out.println("HEIGHTFIELD_GPU_MATERIAL_DEPTH scenario=" + scenario.name + " maxError=" + maximum);
+    }
+
+    private FloatBuffer readDepth(Renderer renderer, FrameBuffer source, boolean es) throws Exception {
+        Shader decoder = new Shader();
+        String language = es ? "GLSL300" : "GLSL150";
+        String precision = es ? "precision highp float; precision highp int;\n" : "";
+        decoder.addSource(Shader.ShaderType.Vertex, "terrain-depth-read.vert", precision
+                + "in vec3 inPosition; void main(){gl_Position=vec4(inPosition.xy-vec2(1),0,1);}", "", language);
+        decoder.addSource(Shader.ShaderType.Fragment, "terrain-depth-read.frag", precision
+                + "uniform sampler2D m_Depth; out vec4 fragColor;"
+                + "void main(){fragColor=vec4(texelFetch(m_Depth,ivec2(gl_FragCoord.xy),0).r);}", "", language);
+        decoder.getUniform("m_Depth").setValue(VarType.Int, 0);
+        FrameBuffer target = new FrameBuffer(WIDTH, HEIGHT, 1);
+        target.addColorTarget(FrameBuffer.FrameBufferTarget.newTarget(Image.Format.RGBA32F));
+        RenderState state = new RenderState();
+        state.setDepthTest(false); state.setDepthWrite(false); state.setFaceCullMode(RenderState.FaceCullMode.Off);
+        renderer.setFrameBuffer(target); renderer.setViewPort(0, 0, WIDTH, HEIGHT);
+        renderer.applyRenderState(state);
+        renderer.setTexture(0, source.getDepthTarget().getTexture());
+        renderer.setShader(decoder);
+        renderer.renderMesh(new com.jme3.scene.shape.Quad(2, 2), 0, 1, null);
+        return read(renderer, target);
     }
 
     private void waitForFrames() throws InterruptedException {
@@ -606,7 +742,11 @@ public final class TestHeightfieldGpuLandscape extends SimpleApplication {
     private FrameBuffer target(int width, int height) {
         FrameBuffer target = new FrameBuffer(width,height,1);
         target.addColorTarget(FrameBuffer.FrameBufferTarget.newTarget(Image.Format.RGBA32F));
-        target.setDepthTarget(FrameBuffer.FrameBufferTarget.newTarget(Image.Format.Depth24));
+        if (materialMode) {
+            target.setDepthTarget(FrameBuffer.FrameBufferTarget.newTarget(new Texture2D(width, height, Image.Format.Depth24)));
+        } else {
+            target.setDepthTarget(FrameBuffer.FrameBufferTarget.newTarget(Image.Format.Depth24));
+        }
         return target;
     }
 

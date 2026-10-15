@@ -2,6 +2,20 @@
 precision highp sampler2DArray;
 #endif
 
+// Instance records use the same page uniforms and LOD reconstruction as the
+// ordinary path. The caller supplies the matching page/patch uniforms, record
+// range, and indirect instance count for each batch.
+#ifdef HEIGHTFIELD_INSTANCES
+#ifndef HEIGHTFIELD_LOD
+#define HEIGHTFIELD_LOD
+#endif
+layout(std140) uniform m_PatchRecords {
+    vec4 heightfieldRecordHeader;
+    vec4 heightfieldRecords[HEIGHTFIELD_PATCH_RECORD_VECS];
+};
+uniform int m_PatchRecordBase;
+#endif
+
 uniform sampler2DArray m_HeightPages;
 uniform int m_HeightLayer;
 uniform float m_SampleSpacing;
@@ -137,8 +151,23 @@ vec3 Heightfield_lodPosition(ivec2 patchVertex, ivec2 patchOrigin, int stride,
 }
 
 vec3 Heightfield_lodPosition(ivec2 patchVertex, out ivec2 globalGrid) {
+#ifdef HEIGHTFIELD_INSTANCES
+    int firstRecord = m_PatchRecordBase + 2 * gl_InstanceID;
+    // Pair layout: id/originX/originZ/stride, then span/edgeBits/error/revision.
+    vec4 patchData = heightfieldRecords[firstRecord];
+    vec4 details = heightfieldRecords[firstRecord + 1];
+    int edgeBits = int(details.y);
+    vec4 edgeMorph = vec4(
+            (edgeBits & 1) != 0 ? 1.0 : 0.0,
+            (edgeBits & 2) != 0 ? 1.0 : 0.0,
+            (edgeBits & 4) != 0 ? 1.0 : 0.0,
+            (edgeBits & 8) != 0 ? 1.0 : 0.0);
+    return Heightfield_lodPosition(patchVertex, ivec2(patchData.y, patchData.z), int(patchData.w),
+            m_PatchGridCells, 0.0, edgeMorph, globalGrid);
+#else
     return Heightfield_lodPosition(patchVertex, ivec2(m_PatchLatticeOrigin), m_SampleStride,
             m_PatchGridCells, m_InteriorMorph,
             vec4(m_EdgeMorphWest, m_EdgeMorphEast, m_EdgeMorphSouth, m_EdgeMorphNorth), globalGrid);
+#endif
 }
 #endif
