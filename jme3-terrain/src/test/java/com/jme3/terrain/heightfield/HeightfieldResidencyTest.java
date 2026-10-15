@@ -279,6 +279,38 @@ class HeightfieldResidencyTest {
         assertEquals(1, byBytes.stats().preparedPages);
     }
 
+    @Test void explicitPerPageBudgetAccountsForOptionalGradientPayload() {
+        long heightBytes = 25 * Float.BYTES;
+        long pairedBytes = heightBytes * 3;
+        HeightfieldResidency paired = new HeightfieldResidency(2, pairedBytes,
+                limits(2, 2, pairedBytes * 2, pairedBytes * 2, 2, pairedBytes * 2, 2, 1));
+        assertEquals(pairedBytes, paired.getPageBytes());
+        assertEquals(pairedBytes * 2, paired.stats().residentPayloadBytes);
+        float[] samples = new float[25];
+        float[] gradients = new float[50];
+        HeightfieldPage page = new HeightfieldPage(2, 1, samples, gradients);
+        HeightfieldResidency.Request request = paired.request(key(7));
+        assertNotNull(request);
+        assertTrue(paired.complete(request, page));
+        assertEquals(pairedBytes, paired.stats().preparedBytes);
+        assertEquals(1, paired.uploadPrepared((slot, uploaded) -> {
+            assertTrue(uploaded.hasSourceGradients());
+            assertEquals(pairedBytes, uploaded.getPayloadBytes());
+        }));
+
+        long tooSmallForPair = pairedBytes - 1;
+        HeightfieldResidency bounded = new HeightfieldResidency(2, tooSmallForPair,
+                limits(1, 1, tooSmallForPair, tooSmallForPair, 1, tooSmallForPair, 1, 1));
+        HeightfieldResidency.Request oversized = bounded.request(key(8));
+        assertNotNull(oversized);
+        assertThrows(IllegalArgumentException.class, () -> bounded.complete(oversized, page));
+        assertTrue(bounded.isPending(oversized));
+        assertThrows(IllegalArgumentException.class, () -> new HeightfieldResidency(2,
+                heightBytes - 1, limits(1, 1, heightBytes, heightBytes, 1, heightBytes, 1, 1)));
+        assertEquals(heightBytes, new HeightfieldResidency(2,
+                limits(1, 1, heightBytes, heightBytes, 1, heightBytes, 1, 1)).getPageBytes());
+    }
+
     @Test void completionCloseFailureKeepsLeaseUntilReset() {
         HeightfieldResidency owner = manager(1);
         HeightfieldResidency.Handle handle = publish(owner, key(0), 5);
