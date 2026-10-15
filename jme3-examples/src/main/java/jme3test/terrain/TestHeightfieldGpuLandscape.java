@@ -40,13 +40,11 @@ import com.jme3.light.LightList;
 import com.jme3.material.Material;
 import com.jme3.material.RenderState;
 import com.jme3.math.ColorRGBA;
-import com.jme3.math.Matrix4f;
 import com.jme3.math.Vector3f;
 import com.jme3.renderer.Camera;
 import com.jme3.renderer.Caps;
 import com.jme3.renderer.opengl.GLFence;
 import com.jme3.renderer.Limits;
-import com.jme3.renderer.MemoryBarrier;
 import com.jme3.renderer.Renderer;
 import com.jme3.scene.Mesh;
 import com.jme3.scene.Geometry;
@@ -58,6 +56,7 @@ import com.jme3.shader.VarType;
 import com.jme3.shader.bufferobject.BufferObject;
 import com.jme3.system.AppSettings;
 import com.jme3.terrain.heightfield.HeightfieldGrid;
+import com.jme3.terrain.heightfield.HeightfieldGpuSelection;
 import com.jme3.terrain.heightfield.HeightfieldHierarchy;
 import com.jme3.terrain.heightfield.HeightfieldLod;
 import com.jme3.terrain.heightfield.HeightfieldPage;
@@ -75,12 +74,10 @@ import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
-import java.nio.IntBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
-import java.util.EnumSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
@@ -91,7 +88,7 @@ import javax.imageio.ImageIO;
 /** Finite GPU-selected indexed-indirect heightfield landscape and CPU image oracle. */
 public final class TestHeightfieldGpuLandscape extends SimpleApplication {
     private static final int CELLS = 128, PATCH_CELLS = 16, NODES = 85, LEAF_LIMIT = 64;
-    private static final int NODE_VECS = 6, RECORD_VECS = 1 + NODES * 4;
+    private static final int RECORD_VECS = 1 + NODES * 4;
     private static final int WIDTH = 400, HEIGHT = 300;
     private static final float SPACING = .5f;
     private final CountDownLatch finished = new CountDownLatch(1);
@@ -104,6 +101,7 @@ public final class TestHeightfieldGpuLandscape extends SimpleApplication {
     private List<HeightfieldHierarchy.Node> nodes;
     private Map<HeightfieldHierarchy.Node, Integer> indices;
     private int checks;
+    private HeightfieldGpuSelection selection;
     private HeightfieldResidency residency;
     private HeightfieldResidency.PageKey residentKey;
     private HeightfieldResidency.Handle rootHandle;
@@ -201,14 +199,11 @@ public final class TestHeightfieldGpuLandscape extends SimpleApplication {
                 "canonical page has a current slot-zero generation");
         require(residency.pin(residentKey), "pin the canonical root page for the probe");
 
-        BufferObject input = buffer((NODES * NODE_VECS + 7) * 16, 0);
-        BufferObject gpuRecords = buffer(RECORD_VECS * 16, 0);
+        selection = new HeightfieldGpuSelection(assetManager, renderer, hierarchy);
+        BufferObject gpuRecords = selection.getPatchRecords();
         BufferObject cpuRecords = buffer(RECORD_VECS * 16, 0);
-        BufferObject command = buffer(32, 2);
+        BufferObject command = selection.getCommand();
 
-        Shader select = compute("jme3test/terrain/HeightfieldGpuSelection.comp", es);
-        Shader buildCommand = compute("jme3test/terrain/HeightfieldGpuLandscape.comp", es);
-        buildCommand.getUniform("m_IndexCount").setValue(VarType.Int, PATCH_CELLS * PATCH_CELLS * 6);
         Mesh grid = new HeightfieldGrid(PATCH_CELLS).createLodPatchMesh(hierarchy.getRoot());
         grid.setStatic();
 
@@ -232,8 +227,8 @@ public final class TestHeightfieldGpuLandscape extends SimpleApplication {
                 .append("GPU hierarchy selector -> compact records -> compute indirect command -> indexed draw; CPU oracle uses ordinary instancing.\n");
         summary.append("shading=").append(materialMode ? "ordinary Heightfield PBR material, two direct lights and ambient fill" : "diagnostic fine-gradient diffuse").append('\n');
         for (Scenario scenario : scenarios) {
-            Capture result = capture(renderer, scenario, input, gpuRecords, cpuRecords,
-                    command, select, buildCommand, gpuDraw, cpuDraw, grid, heights, state, es);
+            Capture result = capture(renderer, scenario, gpuRecords, cpuRecords,
+                    command, gpuDraw, cpuDraw, grid, heights, state, es);
             summary.append(scenario.name).append(" leaves=").append(result.leaves)
                     .append(" gpuVisible=").append(result.gpuVisible)
                     .append(" cpuVisible=").append(result.cpuVisible)
@@ -254,14 +249,14 @@ public final class TestHeightfieldGpuLandscape extends SimpleApplication {
         require(residency.evict(residentKey), "evict canonical page after its GPU fence completed");
         require(!residency.isRetained(rootHandle) && residency.stats().getReadySlots() == 0,
                 "eviction retired the exact root generation after lease release");
+        selection.close();
         renderer.deleteImage(heights.getImage());
         residency.close();
         renderer.setFrameBuffer(null);
     }
 
-    private Capture capture(Renderer renderer, Scenario scenario, BufferObject input,
-            BufferObject gpuRecords, BufferObject cpuRecords, BufferObject command,
-            Shader select, Shader buildCommand, Shader gpuDraw, Shader cpuDraw,
+    private Capture capture(Renderer renderer, Scenario scenario, BufferObject gpuRecords, BufferObject cpuRecords, BufferObject command,
+            Shader gpuDraw, Shader cpuDraw,
             Mesh grid, TextureArray heights, RenderState state, boolean es) throws Exception {
         HeightfieldResidency.Frame lease = residency.acquire(java.util.Collections.singleton(residentKey));
         require(lease != null, scenario.name + " acquires the canonical source-page lease");
@@ -272,75 +267,62 @@ public final class TestHeightfieldGpuLandscape extends SimpleApplication {
                 scenario.name + " retains the exact current root key and generation");
         boolean submitted = false;
         try {
-        HeightfieldLod.Selection cpu = oracle.select(scenario.camera, scenario.targetPixels,
-                LEAF_LIMIT, node -> true);
-        List<HeightfieldHierarchy.Node> cpuCover = cpu.getLeaves();
-        require(!cpuCover.isEmpty() && cpuCover.size() <= LEAF_LIMIT, scenario.name + " CPU cover bounded");
-        boolean[] ready = new boolean[NODES];
-        java.util.Arrays.fill(ready, true);
-        packInput(input, scenario, ready);
-        select.getUniform("m_MaxLeaves").setValue(VarType.Int, LEAF_LIMIT);
-        select.getUniform("m_TargetPixels").setValue(VarType.Float, (float) scenario.targetPixels);
-        renderer.setFixedShaderStorageBufferObject(0, input);
-        renderer.setFixedShaderStorageBufferObject(1, gpuRecords);
-        renderer.dispatchCompute(select, 1, 1, 1);
-        renderer.memoryBarrier(EnumSet.of(MemoryBarrier.ShaderStorage));
+            HeightfieldLod.Selection cpu = oracle.select(scenario.camera, scenario.targetPixels,
+                    LEAF_LIMIT, node -> true);
+            List<HeightfieldHierarchy.Node> cpuCover = cpu.getLeaves();
+            require(!cpuCover.isEmpty() && cpuCover.size() <= LEAF_LIMIT, scenario.name + " CPU cover bounded");
+            selection.dispatch(scenario.camera, scenario.targetPixels, scenario.revision,
+                    LEAF_LIMIT, node -> residency.isCurrent(frameRoot));
 
-        renderer.setFixedShaderStorageBufferObject(1, gpuRecords);
-        renderer.setFixedShaderStorageBufferObject(2, command);
-        renderer.dispatchCompute(buildCommand, 1, 1, 1);
-        renderer.memoryBarrier(EnumSet.of(MemoryBarrier.Command, MemoryBarrier.UniformBuffer,
-                MemoryBarrier.ShaderStorage));
+            int cpuVisible = countVisible(scenario, cpuCover);
+            packCpuRecords(scenario, cpuCover, cpuRecords);
+            cpuDraw.getBufferBlock("m_Selection").setBufferObject(BufferType.UniformBufferObject, cpuRecords);
+            gpuDraw.getBufferBlock("m_Selection").setBufferObject(BufferType.UniformBufferObject, gpuRecords);
+            FrameBuffer gpuTarget = target(WIDTH, HEIGHT);
+            FrameBuffer cpuTarget = target(WIDTH, HEIGHT);
+            FrameBuffer gpuShadow = materialMode ? target(WIDTH, HEIGHT) : null;
+            FrameBuffer cpuShadow = materialMode ? target(WIDTH, HEIGHT) : null;
+            require(residency.isRetained(frameRoot), scenario.name + " page generation remains retained before drawing");
+            if (materialMode) {
+                drawMaterial(renderer, scenario, gpuRecords, grid, heights, gpuTarget, 0, command, frameRoot.getSlot(), false);
+                drawMaterial(renderer, scenario, cpuRecords, grid, heights, cpuTarget, cpuVisible, null, frameRoot.getSlot(), false);
+                drawMaterial(renderer, scenario, gpuRecords, grid, heights, gpuShadow, 0, command, frameRoot.getSlot(), true);
+                drawMaterial(renderer, scenario, cpuRecords, grid, heights, cpuShadow, cpuVisible, null, frameRoot.getSlot(), true);
+            } else {
+                drawGpu(renderer, scenario, gpuDraw, gpuRecords, grid, heights, state, gpuTarget, 0, true, command, frameRoot.getSlot());
+                drawGpu(renderer, scenario, cpuDraw, cpuRecords, grid, heights, state, cpuTarget, cpuVisible, false, command, frameRoot.getSlot());
+            }
+            submitFrame(renderer, lease);
+            submitted = true;
+            waitForFrames();
+            // Diagnostic readback follows submission; drawing never needs a CPU count.
+            int gpuVisible = decodeCommand(renderer, command, es);
+            require(gpuVisible == cpuVisible, scenario.name + " GPU command count matches CPU visible cover count");
+            double gpuError = verifyGpuCover(renderer, scenario, gpuRecords, cpuCover, es);
+            if (materialMode) verifyDepth(renderer, scenario, gpuTarget, cpuTarget, gpuShadow, cpuShadow, es);
+            FloatBuffer gpuPixels = read(renderer, gpuTarget);
+            FloatBuffer cpuPixels = read(renderer, cpuTarget);
+            Comparison comparison = compare(scenario, gpuPixels, cpuPixels);
+            writePng(output.resolve(scenario.name + "-gpu.png"), gpuPixels);
+            writePng(output.resolve(scenario.name + "-cpu.png"), cpuPixels);
+            System.out.println("HEIGHTFIELD_GPU_LANDSCAPE_COMPARE scenario=" + scenario.name
+                    + " gpuVisible=" + gpuVisible + " cpuVisible=" + cpuVisible
+                    + " imageMaxError=" + comparison.maxError + " differingPixels=" + comparison.differingPixels
+                    + " terrainPixels=" + comparison.terrainPixels);
+            require(comparison.terrainPixels > WIDTH * HEIGHT / 12,
+                    scenario.name + " native image contains substantial terrain pixels");
+            require(comparison.maxError <= 2e-5f, scenario.name + " indirect GPU landscape matches CPU-instanced oracle");
 
-        int cpuVisible = countVisible(scenario, cpuCover);
-        packCpuRecords(scenario, cpuCover, cpuRecords);
-        cpuDraw.getBufferBlock("m_Selection").setBufferObject(BufferType.UniformBufferObject, cpuRecords);
-        gpuDraw.getBufferBlock("m_Selection").setBufferObject(BufferType.UniformBufferObject, gpuRecords);
-        FrameBuffer gpuTarget = target(WIDTH, HEIGHT);
-        FrameBuffer cpuTarget = target(WIDTH, HEIGHT);
-        FrameBuffer gpuShadow = materialMode ? target(WIDTH, HEIGHT) : null;
-        FrameBuffer cpuShadow = materialMode ? target(WIDTH, HEIGHT) : null;
-        require(residency.isRetained(frameRoot), scenario.name + " page generation remains retained before drawing");
-        if (materialMode) {
-            drawMaterial(renderer, scenario, gpuRecords, grid, heights, gpuTarget, 0, command, frameRoot.getSlot(), false);
-            drawMaterial(renderer, scenario, cpuRecords, grid, heights, cpuTarget, cpuVisible, null, frameRoot.getSlot(), false);
-            drawMaterial(renderer, scenario, gpuRecords, grid, heights, gpuShadow, 0, command, frameRoot.getSlot(), true);
-            drawMaterial(renderer, scenario, cpuRecords, grid, heights, cpuShadow, cpuVisible, null, frameRoot.getSlot(), true);
-        } else {
-            drawGpu(renderer, scenario, gpuDraw, gpuRecords, grid, heights, state, gpuTarget, 0, true, command, frameRoot.getSlot());
-            drawGpu(renderer, scenario, cpuDraw, cpuRecords, grid, heights, state, cpuTarget, cpuVisible, false, command, frameRoot.getSlot());
-        }
-        submitFrame(renderer, lease);
-        submitted = true;
-        waitForFrames();
-        // Diagnostic readback follows submission; drawing never needs a CPU count.
-        int gpuVisible = decodeCommand(renderer, command, es);
-        require(gpuVisible == cpuVisible, scenario.name + " GPU command count matches CPU visible cover count");
-        double gpuError = verifyGpuCover(renderer, scenario, gpuRecords, cpuCover, es);
-        if (materialMode) verifyDepth(renderer, scenario, gpuTarget, cpuTarget, gpuShadow, cpuShadow, es);
-        FloatBuffer gpuPixels = read(renderer, gpuTarget);
-        FloatBuffer cpuPixels = read(renderer, cpuTarget);
-        Comparison comparison = compare(scenario, gpuPixels, cpuPixels);
-        writePng(output.resolve(scenario.name + "-gpu.png"), gpuPixels);
-        writePng(output.resolve(scenario.name + "-cpu.png"), cpuPixels);
-        System.out.println("HEIGHTFIELD_GPU_LANDSCAPE_COMPARE scenario=" + scenario.name
-                + " gpuVisible=" + gpuVisible + " cpuVisible=" + cpuVisible
-                + " imageMaxError=" + comparison.maxError + " differingPixels=" + comparison.differingPixels
-                + " terrainPixels=" + comparison.terrainPixels);
-        require(comparison.terrainPixels > WIDTH * HEIGHT / 12,
-                scenario.name + " native image contains substantial terrain pixels");
-        require(comparison.maxError <= 2e-5f, scenario.name + " indirect GPU landscape matches CPU-instanced oracle");
-
-        require(gpuError <= scenario.targetPixels + 4.0 * Math.ulp((float) scenario.targetPixels),
-                scenario.name + " decoded GPU cover meets target");
-        require(gpuVisible > 1 && cpuVisible > 1, scenario.name + " actual GPU and CPU draws use multiple patch instances");
-        checks += comparison.compared;
-        System.out.println("HEIGHTFIELD_GPU_LANDSCAPE scenario=" + scenario.name + " leaves=" + cpuCover.size()
-                + " visible=" + gpuVisible + " terrainPixels=" + comparison.terrainPixels
-                + " imageMaxError=" + comparison.maxError + " checks=" + checks + " gles=" + es);
-        return new Capture(cpuCover.size(), gpuVisible, cpuVisible, gpuError, cpu.getMaximumPixels(),
-                comparison.maxError, comparison.differingPixels, comparison.terrainPixels,
-                frameRoot.getSlot(), frameRoot.getGeneration(), true);
+            require(gpuError <= scenario.targetPixels + 4.0 * Math.ulp((float) scenario.targetPixels),
+                    scenario.name + " decoded GPU cover meets target");
+            require(gpuVisible > 1 && cpuVisible > 1, scenario.name + " actual GPU and CPU draws use multiple patch instances");
+            checks += comparison.compared;
+            System.out.println("HEIGHTFIELD_GPU_LANDSCAPE scenario=" + scenario.name + " leaves=" + cpuCover.size()
+                    + " visible=" + gpuVisible + " terrainPixels=" + comparison.terrainPixels
+                    + " imageMaxError=" + comparison.maxError + " checks=" + checks + " gles=" + es);
+            return new Capture(cpuCover.size(), gpuVisible, cpuVisible, gpuError, cpu.getMaximumPixels(),
+                    comparison.maxError, comparison.differingPixels, comparison.terrainPixels,
+                    frameRoot.getSlot(), frameRoot.getGeneration(), true);
         } finally {
             if (!submitted) require(residency.abort(lease), scenario.name + " aborts an unused page lease");
         }
@@ -401,12 +383,16 @@ public final class TestHeightfieldGpuLandscape extends SimpleApplication {
         material.setTexture("HeightPages", heights);
         material.setInt("HeightLayer", heightLayer);
         material.setFloat("SampleSpacing", SPACING);
-        material.setBoolean("UseHeightfieldInstances", true);
-        material.setUniformBufferObject("PatchRecords", records);
-        material.setInt("PatchRecordBase", NODES * 2);
-        material.setInt("PatchRecordVectors", NODES * 4);
-        material.setInt("PageCells", CELLS);
-        material.setInt("PatchGridCells", PATCH_CELLS);
+        if (records == selection.getPatchRecords()) {
+            selection.configureMaterial(material);
+        } else {
+            material.setBoolean("UseHeightfieldInstances", true);
+            material.setUniformBufferObject("PatchRecords", records);
+            material.setInt("PatchRecordBase", NODES * 2);
+            material.setInt("PatchRecordVectors", NODES * 4);
+            material.setInt("PageCells", CELLS);
+            material.setInt("PatchGridCells", PATCH_CELLS);
+        }
         material.setFloat("SnowLine", 6.8f);
         material.setFloat("SnowFade", .8f);
         material.setFloat("TextureScale", .2f);
@@ -509,40 +495,6 @@ public final class TestHeightfieldGpuLandscape extends SimpleApplication {
                 readAsset("jme3test/terrain/HeightfieldGpuLandscape.frag"), "", language);
         shader.getBufferBlock("m_Selection").setBufferObject(BufferType.UniformBufferObject, result);
         return shader;
-    }
-
-    private Shader compute(String path, boolean es) throws Exception {
-        Shader shader = new Shader();
-        shader.addSource(Shader.ShaderType.Compute, path, readAsset(path), "", es ? "GLSL310" : "GLSL430");
-        return shader;
-    }
-
-    private void packInput(BufferObject input, Scenario scenario, boolean[] ready) {
-        ByteBuffer bytes = input.getData().order(ByteOrder.nativeOrder());
-        FloatBuffer floats = bytes.asFloatBuffer();
-        IntBuffer ints = bytes.asIntBuffer();
-        for (int i = 0; i < NODES; i++) {
-            HeightfieldHierarchy.Node node = nodes.get(i);
-            int base = i * NODE_VECS * 4;
-            List<HeightfieldHierarchy.Node> children = node.getChildren();
-            for (int k = 0; k < 4; k++) ints.put(base + k, k < children.size() ? indices.get(children.get(k)) : -1);
-            ints.put(base + 4, node.getLevel()); ints.put(base + 5, ready[i] ? 1 : 0);
-            floats.put(base + 8, node.getOriginX()); floats.put(base + 9, node.getOriginZ());
-            floats.put(base + 10, node.getSpan()); floats.put(base + 11, node.getStride());
-            floats.put(base + 12, ceilFloat(HeightfieldProjection.pixels(scenario.camera, node.getBound(), node.getStableError())));
-            floats.put(base + 13, ceilFloat(HeightfieldProjection.pixels(scenario.camera, node.getBound(), node.getMorphError())));
-            BoundingBox b = node.getBound(); Vector3f c = b.getCenter();
-            floats.put(base + 16, c.x-b.getXExtent()); floats.put(base + 17, c.y-b.getYExtent());
-            floats.put(base + 18, c.z-b.getZExtent()); floats.put(base + 20, c.x+b.getXExtent());
-            floats.put(base + 21, c.y+b.getYExtent()); floats.put(base + 22, c.z+b.getZExtent());
-        }
-        int p = NODES * NODE_VECS * 4;
-        float[][] planes = planes(scenario.camera.getViewProjectionMatrix());
-        for (int i = 0; i < 6; i++) for (int j = 0; j < 4; j++) floats.put(p + i*4 + j, planes[i][j]);
-        int info = p + 24;
-        floats.put(info, scenario.revision); floats.put(info + 1, (float) scenario.targetPixels);
-        floats.put(info + 2, LEAF_LIMIT); floats.put(info + 3, NODES);
-        input.setUpdateNeeded();
     }
 
     private void packCpuRecords(Scenario scenario, List<HeightfieldHierarchy.Node> cover,
@@ -772,16 +724,6 @@ public final class TestHeightfieldGpuLandscape extends SimpleApplication {
     private static Camera camera(Vector3f location, Vector3f target) {
         Camera camera=new Camera(WIDTH,HEIGHT); camera.setFrustumPerspective(45,WIDTH/(float)HEIGHT,.1f,1000);
         camera.setLocation(location); camera.lookAt(target,Vector3f.UNIT_Y); camera.update(); return camera;
-    }
-
-    private static float[][] planes(Matrix4f m) {
-        float[][] rows={{m.m00,m.m01,m.m02,m.m03},{m.m10,m.m11,m.m12,m.m13},
-            {m.m20,m.m21,m.m22,m.m23},{m.m30,m.m31,m.m32,m.m33}};
-        float[][] p=new float[6][4];
-        for(int i=0;i<4;i++){p[0][i]=rows[3][i]+rows[0][i];p[1][i]=rows[3][i]-rows[0][i];
-            p[2][i]=rows[3][i]+rows[1][i];p[3][i]=rows[3][i]-rows[1][i];
-            p[4][i]=rows[3][i]+rows[2][i];p[5][i]=rows[3][i]-rows[2][i];}
-        return p;
     }
 
     private static float ceilFloat(double value) {
