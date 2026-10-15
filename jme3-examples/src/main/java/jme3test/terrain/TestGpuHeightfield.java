@@ -32,6 +32,7 @@ package jme3test.terrain;
 
 import com.jme3.app.SimpleApplication;
 import com.jme3.app.state.ScreenshotAppState;
+import com.jme3.bounding.BoundingBox;
 import com.jme3.input.KeyInput;
 import com.jme3.input.controls.ActionListener;
 import com.jme3.input.controls.KeyTrigger;
@@ -45,7 +46,9 @@ import com.jme3.post.filters.FXAAFilter;
 import com.jme3.post.filters.KHRToneMapFilter;
 import com.jme3.renderer.Caps;
 import com.jme3.renderer.queue.RenderQueue.ShadowMode;
+import com.jme3.renderer.opengl.GLFence;
 import com.jme3.scene.Geometry;
+import com.jme3.scene.VertexBuffer;
 import com.jme3.scene.instancing.IndirectGeometry;
 import com.jme3.shadow.DirectionalLightVisibilityRenderer;
 import com.jme3.system.AppSettings;
@@ -62,6 +65,9 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import javax.imageio.ImageIO;
@@ -77,7 +83,8 @@ import javax.imageio.ImageIO;
  * finite frame timings before screenshots; --no-shadows disables sun visibility
  * while retaining shadow-map rendering for a color-only comparison. Combine
  * --profile and --static-selection to measure unchanged draws with selection
- * dispatched only once per camera preset.
+ * dispatched only once per camera preset. --edit-tour captures one valley hill
+ * edit and restore; it cannot be combined with profiling.
  */
 public final class TestGpuHeightfield extends SimpleApplication {
     private static final int CELLS = 256;
@@ -88,14 +95,22 @@ public final class TestGpuHeightfield extends SimpleApplication {
     private static final int PROFILE_WARMUP = 60;
     private static final int PROFILE_FRAMES_PER_VIEW = 120;
     private static final String[] CAPTURE_NAMES = {"overview", "valley", "close"};
+    private static final String[] EDIT_CAPTURE_NAMES = {"before-edit", "after-edit", "restored"};
+    private static final int MAX_RETIRED_REVISIONS = 2;
+    private static final int EDIT_SETTLED_FRAMES = 5;
 
     private final Path output;
     private final boolean finiteRun;
     private final boolean profileRun;
     private final boolean staticSelection;
+    private final boolean editTour;
     private final CountDownLatch capturesFinished = new CountDownLatch(1);
     private volatile Throwable failure;
-    private HeightfieldGpuSelection selection;
+    private TerrainRevision activeRevision;
+    private final Deque<RetiredRevision> retiredRevisions = new ArrayDeque<>();
+    private boolean requestedEdit;
+    private boolean revisionChangeRequested;
+    private int nextRevision = 2;
     private DirectionalLightVisibilityRenderer visibility;
     private boolean shadowsEnabled;
     private FrameBuffer captureTarget;
@@ -110,28 +125,35 @@ public final class TestGpuHeightfield extends SimpleApplication {
     private int drainFrames;
     private boolean profileWritten;
     private int profilePose = -1;
+    private int editTourStage;
+    private int editTourSettledFrames;
 
     private TestGpuHeightfield(boolean finiteRun, Path output, boolean shadowsEnabled,
-            boolean profileRun, boolean staticSelection) {
+            boolean profileRun, boolean staticSelection, boolean editTour) {
         this.finiteRun = finiteRun;
         this.output = output;
         this.shadowsEnabled = shadowsEnabled;
         this.profileRun = profileRun;
         this.staticSelection = staticSelection;
+        this.editTour = editTour;
     }
 
     public static void main(String[] args) throws Exception {
-        boolean shadows = true, profile = false, staticSelection = false;
+        boolean shadows = true, profile = false, staticSelection = false, editTour = false;
         for (int i = 2; i < args.length; i++) {
             if ("--no-shadows".equals(args[i])) shadows = false;
             else if ("--profile".equals(args[i])) profile = true;
             else if ("--static-selection".equals(args[i])) staticSelection = true;
-            else throw new IllegalArgumentException("Usage: TestGpuHeightfield [<renderer> [<output-directory> [--no-shadows] [--profile [--static-selection]]]]");
+            else if ("--edit-tour".equals(args[i])) editTour = true;
+            else throw new IllegalArgumentException("Usage: TestGpuHeightfield [<renderer> [<output-directory> [--no-shadows] [--profile [--static-selection]] [--edit-tour]]]");
         }
         if (staticSelection && !profile) throw new IllegalArgumentException("--static-selection requires --profile");
         boolean finite = args.length >= 2;
+        if (editTour && (!finite || profile || staticSelection)) {
+            throw new IllegalArgumentException("--edit-tour requires an output directory and cannot be combined with --profile or --static-selection");
+        }
         TestGpuHeightfield app = new TestGpuHeightfield(finite, finite ? Paths.get(args[1]) : null,
-                shadows, profile, staticSelection);
+                shadows, profile, staticSelection, editTour);
         AppSettings settings = new AppSettings(true);
         settings.setRenderer(args.length > 0 ? args[0] : AppSettings.ANGLE_GLES3);
         settings.setResolution(WIDTH, HEIGHT);
@@ -151,7 +173,11 @@ public final class TestGpuHeightfield extends SimpleApplication {
             if (app.failure != null) {
                 throw new IllegalStateException("GPU heightfield capture failed", app.failure);
             }
-            System.out.println("GPU_HEIGHTFIELD_CAPTURE_PASS views=3 pageCells=256 spacing=0.5m");
+            if (app.editTour) {
+                System.out.println("GPU_HEIGHTFIELD_EDIT_TOUR_PASS captures=before-edit:r1,after-edit:r2,restored:r3");
+            } else {
+                System.out.println("GPU_HEIGHTFIELD_CAPTURE_PASS views=3 pageCells=256 spacing=0.5m");
+            }
         }
     }
 
@@ -182,33 +208,8 @@ public final class TestGpuHeightfield extends SimpleApplication {
             cam.setFrustumPerspective(55f, (float) WIDTH / HEIGHT, .1f, 600f);
             viewPort.setBackgroundColor(new ColorRGBA(.42f, .59f, .76f, 1));
 
-            HeightfieldPage page = createPage();
-            HeightfieldHierarchy hierarchy = new HeightfieldHierarchy(page, PATCH_CELLS, 0);
-            // A complete cover keeps off-camera casters in the sun's views.
-            // Primary-camera quality still controls this bounded shared cover.
-            selection = new HeightfieldGpuSelection(assetManager, renderer, hierarchy,
-                    HeightfieldGpuSelection.DrawCover.Complete);
-
-            TextureArray heightPages = new TextureArray(java.util.Collections.singletonList(page.createImage()));
-            heightPages.setMinFilter(Texture.MinFilter.NearestNoMipMaps);
-            heightPages.setMagFilter(Texture.MagFilter.Nearest);
-            heightPages.setWrap(Texture.WrapMode.EdgeClamp);
-            HeightfieldGrid grid = new HeightfieldGrid(PATCH_CELLS);
-            Geometry terrain = new IndirectGeometry("GPU selected terrain",
-                    grid.createLodPatchMesh(hierarchy.getRoot()), selection.getCommand(), 0,
-                    hierarchy.getRoot().getBound());
-            terrain.setShadowMode(ShadowMode.CastAndReceive);
-            Material material = new Material(assetManager,
-                    "Common/MatDefs/Terrain/Heightfield/Heightfield.j3md");
-            material.setTexture("HeightPages", heightPages);
-            material.setInt("HeightLayer", 0);
-            selection.configureMaterial(material);
-            material.setFloat("SnowLine", 26f);
-            material.setFloat("SnowFade", 4f);
-            material.setColor("GrassColor", new ColorRGBA(.16f, .24f, .085f, 1));
-            material.setColor("RockColor", new ColorRGBA(.28f, .255f, .22f, 1));
-            terrain.setMaterial(material);
-            rootNode.attachChild(terrain);
+            activeRevision = createRevision(false, 1);
+            rootNode.attachChild(activeRevision.geometry);
 
             DirectionalLight sun = new DirectionalLight();
             sun.setDirection(new Vector3f(-.55f, -.8f, -.35f).normalizeLocal());
@@ -224,7 +225,7 @@ public final class TestGpuHeightfield extends SimpleApplication {
             visibility.setLight(sun);
             visibility.setShadowIntensity(shadowsEnabled ? 1 : 0);
             visibility.setShadowZExtend(220);
-            visibility.addReceiver(material);
+            visibility.addReceiver(activeRevision.material);
             viewPort.addProcessor(visibility);
 
             FilterPostProcessor post = new FilterPostProcessor(assetManager);
@@ -239,7 +240,7 @@ public final class TestGpuHeightfield extends SimpleApplication {
                 viewPort.addProcessor(timings);
             }
 
-            setCameraPose(0);
+            setCameraPose(editTour ? 1 : 0);
             if (!finiteRun) {
                 installControls();
                 installHud();
@@ -270,27 +271,70 @@ public final class TestGpuHeightfield extends SimpleApplication {
         }
     }
 
-    private HeightfieldPage createPage() {
+    private HeightfieldPage createPage(boolean edited) {
         int side = CELLS + 3;
         float[] heights = new float[side * side];
         for (int z = -1; z <= CELLS + 1; z++) {
             for (int x = -1; x <= CELLS + 1; x++) {
                 double worldX = x * (double) SPACING;
                 double worldZ = z * (double) SPACING;
-                heights[(z + 1) * side + x + 1] = ScenicHeightField.height(worldX * 8.0,
-                        worldZ * 8.0) / 8f;
+                float height = ScenicHeightField.height(worldX * 8.0, worldZ * 8.0) / 8f;
+                if (edited) {
+                    double dx = worldX - 66.0;
+                    double dz = worldZ - 72.0;
+                    height += (float) (10.0 * Math.exp(-.5 * (dx * dx + dz * dz) / 100.0));
+                }
+                heights[(z + 1) * side + x + 1] = height;
             }
         }
         return new HeightfieldPage(CELLS, SPACING, heights);
+    }
+
+    private TerrainRevision createRevision(boolean edited, int label) {
+        HeightfieldGpuSelection nextSelection = null;
+        TextureArray nextHeights = null;
+        try {
+            HeightfieldPage page = createPage(edited);
+            HeightfieldHierarchy hierarchy = new HeightfieldHierarchy(page, PATCH_CELLS, 0);
+            nextSelection = new HeightfieldGpuSelection(assetManager, renderer, hierarchy,
+                    HeightfieldGpuSelection.DrawCover.Complete);
+            nextHeights = new TextureArray(java.util.Collections.singletonList(page.createImage()));
+            nextHeights.setMinFilter(Texture.MinFilter.NearestNoMipMaps);
+            nextHeights.setMagFilter(Texture.MagFilter.Nearest);
+            nextHeights.setWrap(Texture.WrapMode.EdgeClamp);
+            HeightfieldGrid revisionGrid = new HeightfieldGrid(PATCH_CELLS);
+            Geometry geometry = new IndirectGeometry("GPU selected terrain r" + label,
+                    revisionGrid.createLodPatchMesh(hierarchy.getRoot()), nextSelection.getCommand(), 0,
+                    hierarchy.getRoot().getBound());
+            geometry.setShadowMode(ShadowMode.CastAndReceive);
+            Material material = new Material(assetManager,
+                    "Common/MatDefs/Terrain/Heightfield/Heightfield.j3md");
+            material.setTexture("HeightPages", nextHeights);
+            material.setInt("HeightLayer", 0);
+            nextSelection.configureMaterial(material);
+            material.setFloat("SnowLine", 26f);
+            material.setFloat("SnowFade", 4f);
+            material.setColor("GrassColor", new ColorRGBA(.16f, .24f, .085f, 1));
+            material.setColor("RockColor", new ColorRGBA(.28f, .255f, .22f, 1));
+            geometry.setMaterial(material);
+            return new TerrainRevision(edited, label, page, nextSelection, nextHeights, geometry, material);
+        } catch (Throwable error) {
+            if (nextSelection != null) nextSelection.close();
+            if (nextHeights != null) renderer.deleteImage(nextHeights.getImage());
+            if (error instanceof RuntimeException) throw (RuntimeException) error;
+            if (error instanceof Error) throw (Error) error;
+            throw new IllegalStateException("Could not create terrain revision " + label, error);
+        }
     }
 
     private void installControls() {
         inputManager.addMapping("HeightfieldOverview", new KeyTrigger(KeyInput.KEY_1));
         inputManager.addMapping("HeightfieldValley", new KeyTrigger(KeyInput.KEY_2));
         inputManager.addMapping("HeightfieldClose", new KeyTrigger(KeyInput.KEY_3));
+        inputManager.addMapping("HeightfieldEdit", new KeyTrigger(KeyInput.KEY_E));
         inputManager.addMapping("HeightfieldShadows", new KeyTrigger(KeyInput.KEY_H));
         inputManager.addListener(cameraControls, "HeightfieldOverview", "HeightfieldValley",
-                "HeightfieldClose", "HeightfieldShadows");
+                "HeightfieldClose", "HeightfieldEdit", "HeightfieldShadows");
     }
 
     private final ActionListener cameraControls = new ActionListener() {
@@ -300,6 +344,10 @@ public final class TestGpuHeightfield extends SimpleApplication {
             if ("HeightfieldOverview".equals(name)) setCameraPose(0);
             else if ("HeightfieldValley".equals(name)) setCameraPose(1);
             else if ("HeightfieldClose".equals(name)) setCameraPose(2);
+            else if ("HeightfieldEdit".equals(name)) {
+                requestedEdit = !requestedEdit;
+                revisionChangeRequested = requestedEdit != activeRevision.edited;
+            }
             else if ("HeightfieldShadows".equals(name)) {
                 shadowsEnabled = !shadowsEnabled;
                 visibility.setShadowIntensity(shadowsEnabled ? 1 : 0);
@@ -310,9 +358,9 @@ public final class TestGpuHeightfield extends SimpleApplication {
     private void installHud() {
         com.jme3.font.BitmapText text = new com.jme3.font.BitmapText(guiFont);
         text.setSize(16f);
-        text.setText("GPU HEIGHTFIELD  |  1 overview  2 valley  3 close\n"
-                + "WASD/QZ move  |  hold left mouse and drag to look  |  H sun shadows\n"
-                + "One immutable 128 m page from fixed source samples; no streaming.");
+        text.setText("GPU HEIGHTFIELD  |  1 overview  2 valley  3 close  |  E toggle valley hill  |  H sun shadows\n"
+                + "WASD/QZ move  |  hold left mouse and drag to look\n"
+                + "One resident 128 m page; E rebuilds a 10 m hill revision. No streaming.");
         text.setLocalTranslation(16, cam.getHeight() - 16, 0);
         guiNode.attachChild(text);
     }
@@ -334,8 +382,10 @@ public final class TestGpuHeightfield extends SimpleApplication {
 
     @Override
     public void simpleUpdate(float tpf) {
-        if (selection == null || failure != null) return;
+        if (activeRevision == null || failure != null) return;
         try {
+            retireSignaledRevisions();
+            applyRequestedRevision();
             if (profileRun && !profileWritten) {
                 if (profileFrame < PROFILE_WARMUP + PROFILE_FRAMES_PER_VIEW * CAPTURE_NAMES.length) {
                     int pose = Math.max(0, (profileFrame - PROFILE_WARMUP) / PROFILE_FRAMES_PER_VIEW);
@@ -343,7 +393,7 @@ public final class TestGpuHeightfield extends SimpleApplication {
                     setCameraPose(pose);
                     profileFrame++;
                     if (!staticSelection || profilePose != pose) {
-                        selection.dispatch(cam, 1.25, 1, 64, node -> true);
+                        activeRevision.selection.dispatch(cam, 1.25, activeRevision.label, 64, node -> true);
                         profilePose = pose;
                     }
                     if (profileFrame == PROFILE_WARMUP + PROFILE_FRAMES_PER_VIEW * CAPTURE_NAMES.length) {
@@ -355,7 +405,7 @@ public final class TestGpuHeightfield extends SimpleApplication {
                 // until all queries retire, then write outside measured frames.
                 if (!timings.isDrained()) {
                     if (++drainFrames > 300) throw new IllegalStateException("GPU timing queries did not retire");
-                    selection.dispatch(cam, 1.25, 1, 64, node -> true);
+                    activeRevision.selection.dispatch(cam, 1.25, activeRevision.label, 64, node -> true);
                     return;
                 }
                 timings.write(output);
@@ -365,13 +415,17 @@ public final class TestGpuHeightfield extends SimpleApplication {
                         + PROFILE_FRAMES_PER_VIEW * CAPTURE_NAMES.length + " warmup=" + PROFILE_WARMUP
                         + " selection=" + (staticSelection ? "once-per-view" : "every-frame"));
             }
-            selection.dispatch(cam, 1.25, 1, 64, node -> true);
+            activeRevision.selection.dispatch(cam, 1.25, activeRevision.label, 64, node -> true);
             if (!finiteRun) return;
+            if (editTour) {
+                updateEditTour();
+                return;
+            }
             if (verifyCaptures) {
-                if (writtenCaptures != CAPTURE_NAMES.length) {
+                if (writtenCaptures != captureNames().length) {
                     throw new IOException("Not all screenshots were written during this run");
                 }
-                for (String name : CAPTURE_NAMES) {
+                for (String name : captureNames()) {
                     if (!Files.isRegularFile(output.resolve(name + ".png"))) {
                         throw new IOException("Screenshot was not written: " + name + ".png");
                     }
@@ -398,11 +452,185 @@ public final class TestGpuHeightfield extends SimpleApplication {
         }
     }
 
+    private String[] captureNames() {
+        return editTour ? EDIT_CAPTURE_NAMES : CAPTURE_NAMES;
+    }
+
+    private void updateEditTour() {
+        if (verifyCaptures) {
+            if (writtenCaptures != EDIT_CAPTURE_NAMES.length) {
+                throw new IllegalStateException("Not all edit-tour screenshots were written");
+            }
+            for (String name : EDIT_CAPTURE_NAMES) {
+                if (!Files.isRegularFile(output.resolve(name + ".png"))) {
+                    throw new IllegalStateException("Edit-tour screenshot was not written: " + name + ".png");
+                }
+            }
+            capturesFinished.countDown();
+            verifyCaptures = false;
+            return;
+        }
+        if (editTourStage >= EDIT_CAPTURE_NAMES.length) return;
+        int expectedRevision = editTourStage + 1;
+        boolean expectedEdited = editTourStage == 1;
+        if (activeRevision.label != expectedRevision || activeRevision.edited != expectedEdited
+                || revisionChangeRequested) {
+            editTourSettledFrames = 0;
+            return;
+        }
+        if (++editTourSettledFrames < EDIT_SETTLED_FRAMES) return;
+        String name = EDIT_CAPTURE_NAMES[editTourStage];
+        screenshots.setFileName(name);
+        screenshots.takeScreenshot();
+        System.out.println("GPU_HEIGHTFIELD_EDIT_TOUR_CAPTURE name=" + name
+                + " revision=" + activeRevision.label + " edited=" + activeRevision.edited
+                + " settledFrames=" + EDIT_SETTLED_FRAMES);
+        editTourStage++;
+        editTourSettledFrames = 0;
+        if (editTourStage == 1) {
+            requestedEdit = true;
+            revisionChangeRequested = true;
+        } else if (editTourStage == 2) {
+            requestedEdit = false;
+            revisionChangeRequested = true;
+        } else {
+            verifyCaptures = true;
+        }
+    }
+
+    private void applyRequestedRevision() {
+        if (!revisionChangeRequested || requestedEdit == activeRevision.edited
+                || retiredRevisions.size() >= MAX_RETIRED_REVISIONS) return;
+        TerrainRevision candidate = null;
+        GLFence retirementFence = null;
+        boolean candidateGpuWorkStarted = false;
+        try {
+            candidate = createRevision(requestedEdit, nextRevision);
+            candidateGpuWorkStarted = true;
+            candidate.selection.dispatch(cam, 1.25, candidate.label, 64, node -> true);
+            // Force the new one-layer array upload while the old revision is still active.
+            renderer.setTexture(0, candidate.heightPages);
+            retirementFence = renderer.createFence();
+            visibility.addReceiver(candidate.material);
+
+            TerrainRevision old = activeRevision;
+            rootNode.attachChild(candidate.geometry);
+            rootNode.detachChild(old.geometry);
+            visibility.removeReceiver(old.material);
+            activeRevision = candidate;
+            candidate = null;
+            retiredRevisions.addLast(new RetiredRevision(old, retirementFence));
+            retirementFence = null;
+            nextRevision++;
+            if (nextRevision > 16777216) nextRevision = 1;
+            requestedEdit = activeRevision.edited;
+            revisionChangeRequested = false;
+            BoundingBox bound = (BoundingBox) activeRevision.geometry.getModelBound();
+            System.out.printf(Locale.ROOT,
+                    "GPU_HEIGHTFIELD_REVISION revision=%d edited=%s hillRiseM=%.1f minY=%.3f maxY=%.3f retired=%d\n",
+                    activeRevision.label, activeRevision.edited,
+                    activeRevision.edited ? 10f : 0f,
+                    bound.getCenter().y - bound.getYExtent(),
+                    bound.getCenter().y + bound.getYExtent(), retiredRevisions.size());
+        } catch (Throwable error) {
+            if (candidate != null) visibility.removeReceiver(candidate.material);
+            if (candidateGpuWorkStarted && candidate != null) {
+                if (retirementFence != null) renderer.deleteFence(retirementFence);
+                retirementFence = null;
+                try {
+                    retirementFence = renderer.createFence();
+                } catch (Throwable fenceError) {
+                    System.err.println("GPU_HEIGHTFIELD_CANDIDATE_FENCE_UNAVAILABLE revision="
+                            + candidate.label + " reason=" + fenceError);
+                }
+                retiredRevisions.addLast(new RetiredRevision(candidate, retirementFence));
+                System.err.println("GPU_HEIGHTFIELD_REVISION_REJECTED active=" + activeRevision.label
+                        + " retainedCandidate=" + candidate.label + " fence=" + (retirementFence != null)
+                        + " retired=" + retiredRevisions.size() + " reason=" + error);
+                candidate = null;
+                retirementFence = null;
+            }
+            if (retirementFence != null) renderer.deleteFence(retirementFence);
+            if (candidate != null) candidate.release(renderer);
+            revisionChangeRequested = false;
+            requestedEdit = activeRevision.edited;
+            if (finiteRun) {
+                fail(error);
+            } else if (!candidateGpuWorkStarted) {
+                System.err.println("GPU_HEIGHTFIELD_REVISION_REJECTED active=" + activeRevision.label
+                        + " reason=" + error);
+            }
+        }
+    }
+
+    private static final class TerrainRevision {
+        private final boolean edited;
+        private final int label;
+        private final HeightfieldPage page;
+        private final HeightfieldGpuSelection selection;
+        private final TextureArray heightPages;
+        private final Geometry geometry;
+        private final Material material;
+        private boolean released;
+
+        private TerrainRevision(boolean edited, int label, HeightfieldPage page,
+                HeightfieldGpuSelection selection, TextureArray heightPages,
+                Geometry geometry, Material material) {
+            this.edited = edited;
+            this.label = label;
+            this.page = page;
+            this.selection = selection;
+            this.heightPages = heightPages;
+            this.geometry = geometry;
+            this.material = material;
+        }
+
+        private void release(com.jme3.renderer.Renderer renderer) {
+            if (released) return;
+            selection.close();
+            renderer.deleteImage(heightPages.getImage());
+            for (VertexBuffer buffer : geometry.getMesh().getBufferList().getArray()) {
+                renderer.deleteBuffer(buffer);
+            }
+            released = true;
+        }
+    }
+
+    private static final class RetiredRevision {
+        private final TerrainRevision revision;
+        private final GLFence fence;
+
+        private RetiredRevision(TerrainRevision revision, GLFence fence) {
+            this.revision = revision;
+            this.fence = fence;
+        }
+    }
+
+    private void retireSignaledRevisions() {
+        java.util.Iterator<RetiredRevision> iterator = retiredRevisions.iterator();
+        while (iterator.hasNext()) {
+            RetiredRevision retired = iterator.next();
+            if (retired.fence != null && renderer.isFenceSignaled(retired.fence)) {
+                renderer.deleteFence(retired.fence);
+                retired.revision.release(renderer);
+                iterator.remove();
+                System.out.println("GPU_HEIGHTFIELD_REVISION_RELEASED revision=" + retired.revision.label
+                        + " remaining=" + retiredRevisions.size());
+            }
+        }
+    }
+
     @Override
     public void destroy() {
-        if (selection != null) {
-            selection.close();
-            selection = null;
+        if (activeRevision != null) {
+            if (visibility != null) visibility.removeReceiver(activeRevision.material);
+            activeRevision.release(renderer);
+            activeRevision = null;
+        }
+        while (!retiredRevisions.isEmpty()) {
+            RetiredRevision retired = retiredRevisions.removeFirst();
+            if (retired.fence != null) renderer.deleteFence(retired.fence);
+            retired.revision.release(renderer);
         }
         if (captureTarget != null) {
             viewPort.setOutputFrameBuffer(null);
