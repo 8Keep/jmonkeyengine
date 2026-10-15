@@ -43,6 +43,7 @@ import com.jme3.post.filters.FXAAFilter;
 import com.jme3.post.filters.KHRToneMapFilter;
 import com.jme3.profile.AppProfiler;
 import com.jme3.renderer.RenderManager;
+import com.jme3.renderer.Renderer;
 import com.jme3.renderer.ViewPort;
 import com.jme3.renderer.queue.RenderQueue;
 import com.jme3.scene.Geometry;
@@ -244,7 +245,7 @@ public final class TestModernHeightfield extends SimpleApplication {
     }
 
     // Original artistic directional sky, kept separate from a future transport/LUT system.
-    private static TextureCubeMap sky() {
+    static TextureCubeMap sky() {
         int side = 64;
         ArrayList<ByteBuffer> faces = new ArrayList<>();
         for (int face = 0; face < 6; face++) {
@@ -273,6 +274,42 @@ public final class TestModernHeightfield extends SimpleApplication {
             faces.add(data);
         }
         return new TextureCubeMap(new Image(Image.Format.RGB8, side, side, 0, faces, ColorSpace.Linear));
+    }
+
+    static BufferedImage readDisplay(Renderer renderer, FrameBuffer target, int width, int height) {
+        // The target contains linear, post-filter color. Preserve its precision
+        // through readback and encode to sRGB exactly once for the PNG.
+        ByteBuffer pixels = BufferUtils.createByteBuffer(width * height * 16)
+                .order(ByteOrder.nativeOrder());
+        FrameBuffer previous = renderer.getCurrentFrameBuffer();
+        try {
+            renderer.readFrameBufferWithFormat(target, pixels, Image.Format.RGBA32F);
+            FloatBuffer linear = pixels.asFloatBuffer();
+            BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+            for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                    int i = ((height - 1 - y) * width + x) * 4;
+                    int red = display(linear.get(i));
+                    int green = display(linear.get(i + 1));
+                    int blue = display(linear.get(i + 2));
+                    image.setRGB(x, y, (red << 16) | (green << 8) | blue);
+                }
+            }
+            return image;
+        } finally {
+            renderer.setFrameBuffer(previous);
+            BufferUtils.destroyDirectBuffer(pixels);
+        }
+    }
+
+    private static int display(float linear) {
+        if (!Float.isFinite(linear)) {
+            throw new IllegalStateException("Non-finite post-filter output");
+        }
+        linear = Math.max(0f, Math.min(1f, linear));
+        float encoded = linear <= .0031308f ? linear * 12.92f
+                : 1.055f * (float) Math.pow(linear, 1.0 / 2.4) - .055f;
+        return Math.min(255, Math.max(0, Math.round(encoded * 255)));
     }
 
     private final class Capture implements SceneProcessor {
@@ -353,25 +390,7 @@ public final class TestModernHeightfield extends SimpleApplication {
         }
 
         private BufferedImage readDisplay(FrameBuffer target) {
-            int width = cam.getWidth(), height = cam.getHeight();
-            // The viewport's `out` names the pre-tone-map scene buffer. FPP
-            // restores our linear RGBA16F output before this processor. Encode
-            // the post-filter float values to display exactly once.
-            ByteBuffer pixels = BufferUtils.createByteBuffer(width * height * 16)
-                    .order(ByteOrder.nativeOrder());
-            renderer.readFrameBufferWithFormat(target, pixels, Image.Format.RGBA32F);
-            FloatBuffer linear = pixels.asFloatBuffer();
-            BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
-            for (int y = 0; y < height; y++) {
-                for (int x = 0; x < width; x++) {
-                    int i = ((height - 1 - y) * width + x) * 4;
-                    int red = display(linear.get(i));
-                    int green = display(linear.get(i + 1));
-                    int blue = display(linear.get(i + 2));
-                    image.setRGB(x, y, (red << 16) | (green << 8) | blue);
-                }
-            }
-            return image;
+            return TestModernHeightfield.readDisplay(renderer, target, cam.getWidth(), cam.getHeight());
         }
 
         private FloatBuffer readHdr(FrameBuffer scene, FrameBuffer outputTarget) {
@@ -418,16 +437,6 @@ public final class TestModernHeightfield extends SimpleApplication {
                 }
             }
             return maximum;
-        }
-
-        private int display(float linear) {
-            if (!Float.isFinite(linear)) {
-                throw new IllegalStateException("Non-finite post-filter output");
-            }
-            linear = Math.max(0f, Math.min(1f, linear));
-            float encoded = linear <= .0031308f ? linear * 12.92f
-                    : 1.055f * (float) Math.pow(linear, 1.0 / 2.4) - .055f;
-            return Math.min(255, Math.max(0, Math.round(encoded * 255)));
         }
     }
 }
