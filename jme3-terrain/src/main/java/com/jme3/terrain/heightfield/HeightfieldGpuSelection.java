@@ -379,7 +379,9 @@ public final class HeightfieldGpuSelection implements AutoCloseable {
         }
         if (renderer.getLimits().get(Limits.ComputeStorageBufferBindings) < 3
                 || renderer.getLimits().get(Limits.ComputeStorageBufferBlockSize) < INPUT_BYTES
-                || renderer.getLimits().get(Limits.UniformBufferObjectMaxBlockSize) < RECORD_BYTES) {
+                || renderer.getLimits().get(Limits.UniformBufferObjectMaxBlockSize) < RECORD_BYTES
+                || renderer.getLimits().get(Limits.ComputeWorkGroupSizeX) < 128
+                || renderer.getLimits().get(Limits.ComputeWorkGroupInvocations) < 128) {
             throw new IllegalStateException("renderer storage or uniform buffer limits are below the heightfield selection ABI");
         }
     }
