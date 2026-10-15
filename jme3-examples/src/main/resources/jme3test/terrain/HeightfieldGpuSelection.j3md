@@ -2,6 +2,7 @@ MaterialDef HeightfieldGpuSelection {
     MaterialParameters {
         UniformBufferObject Result
         Boolean InspectCommand : false
+        Boolean InspectMorphRecords : false
         UniformBufferObject Command
     }
     Technique {
@@ -9,6 +10,7 @@ MaterialDef HeightfieldGpuSelection {
         FragmentShader GLSL300 GLSL150 : jme3test/terrain/HeightfieldGpuSelection.frag
         Defines {
             HEIGHTFIELD_COMMAND_CHECK : InspectCommand
+            HEIGHTFIELD_MORPH_CHECK : InspectMorphRecords
         }
     }
 }

@@ -22,8 +22,12 @@ void main() {
     else
 #endif
     if (row == 0) fragColor = header;
+#ifdef HEIGHTFIELD_MORPH_CHECK
+    else fragColor = records[x*4+row-1];
+#else
     else if (row == 1) fragColor = records[x*2];
     else if (row == 2) fragColor = records[x*2+1];
     else if (row == 3) fragColor = records[170+x*2];
     else fragColor = records[170+x*2+1];
+#endif
 }

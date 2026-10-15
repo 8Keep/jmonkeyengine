@@ -1,0 +1,57 @@
+layout(local_size_x=1) in;
+
+layout(std430, binding=0) readonly buffer CoverRecords {
+    vec4 header;
+    vec4 records[340];
+};
+
+layout(std430, binding=1) writeonly buffer CoverFeedback {
+    ivec4 resultHeader; // sequence, revision, leaf count, valid
+    uvec4 nodeBits;     // four words cover node indices 0..127
+};
+
+uniform int m_NodeCount;
+uniform int m_RecordStride;
+uniform int m_Sequence;
+
+void main() {
+    uvec4 bits = uvec4(0u);
+
+    float rawCount = header.z;
+    float rawRevision = header.w;
+    bool valid = !isnan(rawCount) && !isinf(rawCount)
+            && rawCount >= 1.0 && rawCount <= 64.0
+            && floor(rawCount) == rawCount
+            && !isnan(rawRevision) && !isinf(rawRevision)
+            && rawRevision >= 0.0 && rawRevision <= 16777216.0
+            && floor(rawRevision) == rawRevision
+            && (m_RecordStride == 2 || m_RecordStride == 4)
+            && m_NodeCount >= 1 && m_NodeCount <= 85
+            && m_Sequence >= 0;
+
+    int count = valid ? int(rawCount) : 0;
+    int revision = valid ? int(rawRevision) : -1;
+    for (int record = 0; record < count; ++record) {
+        float rawNode = records[record * m_RecordStride].x;
+        if (isnan(rawNode) || isinf(rawNode) || floor(rawNode) != rawNode
+                || rawNode < 0.0 || rawNode >= float(m_NodeCount)) {
+            valid = false;
+        } else {
+            uint node = uint(rawNode);
+            uint word = node >> 5u;
+            uint bit = 1u << (node & 31u);
+            if ((bits[word] & bit) != 0u) {
+                valid = false;
+            }
+            bits[word] |= bit;
+        }
+    }
+
+    if (!valid) {
+        nodeBits = uvec4(0u);
+        resultHeader = ivec4(m_Sequence, revision, 0, 0);
+    } else {
+        nodeBits = bits;
+        resultHeader = ivec4(m_Sequence, revision, count, 1);
+    }
+}

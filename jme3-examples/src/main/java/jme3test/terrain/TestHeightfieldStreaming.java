@@ -56,6 +56,8 @@ import com.jme3.system.AppSettings;
 import com.jme3.terrain.heightfield.HeightfieldGrid;
 import com.jme3.terrain.heightfield.HeightfieldGpuPageBindings;
 import com.jme3.terrain.heightfield.HeightfieldGpuSelection;
+import com.jme3.terrain.heightfield.HeightfieldGpuTransitions;
+import com.jme3.terrain.heightfield.HeightfieldGpuCoverFeedback;
 import com.jme3.terrain.heightfield.HeightfieldHierarchy;
 import com.jme3.terrain.heightfield.HeightfieldHierarchy.Node;
 import com.jme3.terrain.heightfield.HeightfieldLod;
@@ -106,7 +108,8 @@ import javax.imageio.ImageIO;
  * thread; real worker scheduling and device loss remain separate acceptance.
  * Pass --gpu-selection for an immediate GPU cover using actual node pages and
  * conservative all-ready-page frame leases. That mode keeps one source revision;
- * the default CPU mode also exercises gradual transitions, edits and recreation.
+ * pass --gpu-transitions to add persistent GPU morph state with readback feedback.
+ * The default CPU mode also exercises gradual transitions, edits and recreation.
  */
 public final class TestHeightfieldStreaming extends SimpleApplication {
     private static final int CELLS = 128, PATCH_CELLS = 16, CAPACITY = 32;
@@ -116,6 +119,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     private static final double PIXEL_TARGET = 1.5;
     private final Path output;
     private final boolean gpuSelectionMode;
+    private final boolean gpuTransitionsMode;
     private final CountDownLatch completed = new CountDownLatch(1);
     private final Map<Node, Geometry> geometryByNode = new IdentityHashMap<>();
     private final Set<Node> displayed = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -133,6 +137,8 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     private HeightfieldLodGpuProbe gpuProbe;
     private HeightfieldGpuPageBindings gpuPageBindings;
     private HeightfieldGpuSelection gpuSelection;
+    private HeightfieldGpuTransitions gpuTransitions;
+    private HeightfieldGpuCoverFeedback gpuFeedback;
     private Geometry gpuGeometry;
     private Mesh gpuPatchMesh;
     private Material gpuMaterial;
@@ -148,10 +154,16 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     private float maximumGpuError;
     private boolean injectedPreparation, injectedUpload, injectedCancellation;
     private boolean retiringStorage;
+    private final Set<Node> gpuCurrentCover = Collections.newSetFromMap(new IdentityHashMap<>());
+    private boolean gpuFeedbackPending;
+    private int gpuDispatchSequence, pendingFeedbackSequence = -1, feedbackNotBeforeFrame;
+    private int feedbackReads, feedbackSkippedDispatches, feedbackNativePendingPolls, artificialFeedbackDelaySkipped;
+    private List<Node> pendingOracleNodes = Collections.emptyList();
 
-    private TestHeightfieldStreaming(Path output, boolean gpuSelectionMode) {
+    private TestHeightfieldStreaming(Path output, boolean gpuSelectionMode, boolean gpuTransitionsMode) {
         this.output = output;
         this.gpuSelectionMode = gpuSelectionMode;
+        this.gpuTransitionsMode = gpuTransitionsMode;
     }
 
     public static void main(String[] args) throws Exception {
@@ -159,16 +171,19 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         assert assertions = true;
         List<String> positional = new ArrayList<>();
         boolean gpuSelectionMode = false;
+        boolean gpuTransitionsMode = false;
         for (String arg : args) {
             if ("--gpu-selection".equals(arg)) gpuSelectionMode = true;
+            else if ("--gpu-transitions".equals(arg)) gpuTransitionsMode = true;
             else if (arg.startsWith("--")) throw new IllegalArgumentException("Unknown option: " + arg);
             else positional.add(arg);
         }
+        if (gpuTransitionsMode) gpuSelectionMode = true;
         if (positional.size() > 2) throw new IllegalArgumentException("Expected renderer and optional output directory");
         String rendererName = positional.isEmpty() ? AppSettings.ANGLE_GLES3 : positional.get(0);
         Path output = positional.size() > 1 ? Paths.get(positional.get(1)) : null;
         if (!assertions) throw new IllegalStateException("Streaming control requires -ea");
-        TestHeightfieldStreaming app = new TestHeightfieldStreaming(output, gpuSelectionMode);
+        TestHeightfieldStreaming app = new TestHeightfieldStreaming(output, gpuSelectionMode, gpuTransitionsMode);
         AppSettings settings = new AppSettings(true);
         settings.setRenderer(rendererName);
         settings.setResolution(960, 640);
@@ -317,17 +332,25 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
 
     private void initializeGpuSelection() throws java.io.IOException {
         gpuPageBindings = new HeightfieldGpuPageBindings(renderer, hierarchy, CAPACITY);
-        gpuSelection = new HeightfieldGpuSelection(assetManager, renderer, hierarchy,
-                HeightfieldGpuSelection.DrawCover.Complete);
+        if (gpuTransitionsMode) {
+            gpuTransitions = new HeightfieldGpuTransitions(assetManager, renderer, hierarchy);
+            gpuFeedback = new HeightfieldGpuCoverFeedback(assetManager, renderer, hierarchy);
+            gpuCurrentCover.add(hierarchy.getRoot());
+        } else {
+            gpuSelection = new HeightfieldGpuSelection(assetManager, renderer, hierarchy,
+                    HeightfieldGpuSelection.DrawCover.Complete);
+        }
         gpuPatchMesh = new HeightfieldGrid(PATCH_CELLS).createLodPatchMesh(hierarchy.getRoot());
         gpuPatchMesh.setStatic();
         gpuGeometry = new IndirectGeometry("stream-GPU-selection", gpuPatchMesh,
-                gpuSelection.getCommand(), 0, hierarchy.getRoot().getBound());
+                gpuTransitionsMode ? gpuTransitions.getCommand() : gpuSelection.getCommand(),
+                0, hierarchy.getRoot().getBound());
         gpuGeometry.setCullHint(Spatial.CullHint.Never);
         gpuGeometry.setQueueBucket(RenderQueue.Bucket.Opaque);
         gpuGeometry.setShadowMode(ShadowMode.CastAndReceive);
         gpuMaterial = new Material(assetManager, "Common/MatDefs/Terrain/Heightfield/Heightfield.j3md");
-        gpuSelection.configureMaterial(gpuMaterial);
+        if (gpuTransitionsMode) gpuTransitions.configureMaterial(gpuMaterial);
+        else gpuSelection.configureMaterial(gpuMaterial);
         gpuPageBindings.configureMaterial(gpuMaterial);
         gpuMaterial.setTexture("HeightPages", atlas);
         gpuMaterial.setFloat("SnowLine", 7.8f);
@@ -353,6 +376,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             require(frameLease == null, "preceding opaque terrain and shadow reads fenced");
             if (frame == 500 && !gpuSelectionMode) retiringStorage = true;
             residency.poll();
+            if (gpuTransitionsMode) pollGpuFeedback();
             Iterator<PageKey> oldKeys = obsolete.iterator();
             while (oldKeys.hasNext()) {
                 PageKey old = oldKeys.next();
@@ -372,7 +396,18 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             double target = output == null ? PIXEL_TARGET : requestedPixels(frame);
             Selection ideal = lod.select(cam, target, PATCH_BUDGET, node -> true);
             Set<PageKey> retained = new LinkedHashSet<>();
-            for (Patch patch : transition.getPatches()) addAncestors(retained, patch.getNode(), revision);
+            if (gpuTransitionsMode) {
+                if (gpuFeedbackPending) {
+                    for (Node node : hierarchy.getNodes()) {
+                        PageKey ready = key(node, revision);
+                        if (residency.ready(ready) != null) retained.add(ready);
+                    }
+                } else {
+                    for (Node node : gpuCurrentCover) addAncestors(retained, node, revision);
+                }
+            } else {
+                for (Patch patch : transition.getPatches()) addAncestors(retained, patch.getNode(), revision);
+            }
             Set<PageKey> wanted = new LinkedHashSet<>();
             if (pendingHierarchy != null) wanted.add(key(pendingHierarchy.getRoot(), revision + 1));
             wanted.add(key(hierarchy.getRoot(), revision));
@@ -417,8 +452,29 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                         node -> residency.ready(key(node, revision)) != null);
             }
             if (currentSelection.isReadinessLimited()) waitingFrames++;
-            if (gpuSelectionMode) convergeOracle(currentSelection);
-            else transition.advance(currentSelection, TRANSITION_STEP);
+            if (gpuTransitionsMode) {
+                if (!gpuFeedbackPending && frame < MAX_FRAMES) {
+                    gpuTransitions.dispatch(cam, target, (int) revision, PATCH_BUDGET,
+                            TRANSITION_STEP, gpuPageBindings::isReady);
+                    transition.advance(currentSelection, TRANSITION_STEP);
+                    pendingOracleNodes = oracleNodes(transition.getPatches());
+                    gpuFeedbackPending = true;
+                    pendingFeedbackSequence = ++gpuDispatchSequence;
+                    gpuFeedback.submit(gpuTransitions.getPatchRecords(), 4,
+                            pendingFeedbackSequence, (int) revision);
+                    if (frame >= 200 && frame < 280) feedbackNotBeforeFrame = frame + 3;
+                    else feedbackNotBeforeFrame = frame;
+                } else if (gpuFeedbackPending) {
+                    feedbackSkippedDispatches++;
+                    // This is a synthetic CPU-side delay; native query readiness
+                    // is reported independently by the pending counter above.
+                    if (frame < feedbackNotBeforeFrame) artificialFeedbackDelaySkipped++;
+                }
+            } else if (gpuSelectionMode) {
+                convergeOracle(currentSelection);
+            } else {
+                transition.advance(currentSelection, TRANSITION_STEP);
+            }
             List<Patch> patches = transition.getPatches();
             verifyFrame(patches);
             List<PageKey> drawKeys = new ArrayList<>();
@@ -434,14 +490,18 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             }
             frameLease = residency.acquire(drawKeys);
             require(frameLease != null, "whole draw cover acquired atomically");
-            if (gpuSelectionMode) {
+            if (gpuTransitionsMode) {
+                // The temporal helper owns the indirect command and dispatch.
+            } else if (gpuSelectionMode) {
                 gpuSelection.dispatch(cam, target, (int) revision, PATCH_BUDGET, gpuPageBindings::isReady);
             } else {
                 syncDrawSet(patches);
             }
             sampleBudgets();
             if (output != null && isCaptureFrame(frame)) {
-                if (gpuSelectionMode) {
+                if (gpuTransitionsMode) {
+                    verifyGpuTransitionRecords(patches);
+                } else if (gpuSelectionMode) {
                     verifyGpuPageRecords(patches);
                 } else {
                     for (Patch patch : patches) {
@@ -628,6 +688,54 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         return expected.isEmpty();
     }
 
+    private List<Node> oracleNodes(List<Patch> patches) {
+        List<Node> result = new ArrayList<>(patches.size());
+        for (Patch patch : patches) result.add(patch.getNode());
+        List<Node> hierarchyNodes = hierarchy.getNodes();
+        Map<Node, Integer> order = new IdentityHashMap<>();
+        for (int i = 0; i < hierarchyNodes.size(); i++) order.put(hierarchyNodes.get(i), i);
+        Collections.sort(result, (a, b) -> Integer.compare(order.get(a), order.get(b)));
+        return result;
+    }
+
+    private void pollGpuFeedback() {
+        if (!gpuFeedbackPending || frame < feedbackNotBeforeFrame) return;
+        HeightfieldGpuCoverFeedback.Snapshot snapshot = gpuFeedback.poll();
+        if (snapshot == null) {
+            feedbackNativePendingPolls++;
+            return;
+        }
+        require(snapshot.getSequence() == pendingFeedbackSequence,
+                "GPU feedback sequence matches the submitted transition dispatch");
+        require(snapshot.getRevisionLabel() == (int) revision,
+                "GPU feedback source revision matches the immutable hierarchy");
+        require(snapshot.getLeafCount() == pendingOracleNodes.size(),
+                "GPU feedback leaf count matches the CPU transition oracle");
+        Set<Node> expected = Collections.newSetFromMap(new IdentityHashMap<>());
+        expected.addAll(pendingOracleNodes);
+        gpuCurrentCover.clear();
+        for (Node node : snapshot.getNodes()) {
+            require(expected.remove(node), "GPU feedback leaf matches CPU transition oracle");
+            gpuCurrentCover.add(node);
+        }
+        require(expected.isEmpty(), "GPU feedback contains the complete CPU oracle cover");
+        gpuFeedbackPending = false;
+        feedbackReads++;
+    }
+
+    private void verifyGpuTransitionRecords(List<Patch> patches) {
+        List<Node> nodes = hierarchy.getNodes();
+        Map<Node, Integer> order = new IdentityHashMap<>();
+        for (int i = 0; i < nodes.size(); i++) order.put(nodes.get(i), i);
+        List<Patch> ordered = new ArrayList<>(patches);
+        Collections.sort(ordered, (a, b) -> Integer.compare(order.get(a.getNode()), order.get(b.getNode())));
+        HeightfieldLodGpuProbe.Verification result = gpuProbe.verifyPageMorphRecords(ordered,
+                gpuTransitions.getPatchRecords(), gpuTransitions.getCommand(), 0,
+                gpuPageBindings.getBuffer(), atlas, captureTarget);
+        comparedChannels += result.getComparedChannels();
+        maximumGpuError = Math.max(maximumGpuError, result.getMaximumAbsoluteError());
+    }
+
     private void verifyGpuPageRecords(List<Patch> patches) {
         List<Node> nodes = hierarchy.getNodes();
         Map<Node, Integer> order = new IdentityHashMap<>();
@@ -675,8 +783,9 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     }
 
     private void printMetrics(List<Patch> patches, double target) {
+        String mode = gpuTransitionsMode ? "gpu-transitions" : gpuSelectionMode ? "gpu-selection" : "cpu";
         System.out.println("HEIGHTFIELD_STREAM frame=" + frame + " revision=" + revision
-                + " mode=" + (gpuSelectionMode ? "gpu-selection" : "cpu")
+                + " mode=" + mode
                 + " cpuOraclePatches=" + patches.size() + " target=" + target
                 + " cpuOraclePixels=" + currentSelection.getMaximumPixels()
                 + (gpuSelectionMode ? " gpuInstanceCount=GPU-owned" : "")
@@ -704,12 +813,14 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         require(preparationFailures == 1 && uploadFailures == 1 && cancellations == 1
                 && staleResults > 0 && sourceLifecyclePassed
                 && peakRetired > 0 && peakFrames > 1 && waitingFrames > 0 && fenceSignaled > 0
-                && fullAtlasFrames > 0,
+                && fullAtlasFrames > 0 && (!gpuTransitionsMode || feedbackReads > 0 && !gpuFeedbackPending),
                 "finite control exercised failures, cancellation, stale work, pressure and fences");
         Collections.sort(publicationLatency);
         int p50 = percentile(.5), p95 = percentile(.95), maximum = percentile(1);
-        System.out.println((gpuSelectionMode ? "HEIGHTFIELD_STREAM_GPU_SELECTION_PASS" : "HEIGHTFIELD_STREAM_PASS")
-                + " mode=" + (gpuSelectionMode ? "gpu-selection" : "cpu")
+        String mode = gpuTransitionsMode ? "gpu-transitions" : gpuSelectionMode ? "gpu-selection" : "cpu";
+        System.out.println((gpuTransitionsMode ? "HEIGHTFIELD_STREAM_GPU_TRANSITIONS_PASS"
+                : gpuSelectionMode ? "HEIGHTFIELD_STREAM_GPU_SELECTION_PASS" : "HEIGHTFIELD_STREAM_PASS")
+                + " mode=" + mode
                 + " frames=" + frame + " checks=" + checks
                 + " uploads=" + uploads + " stale=" + staleResults
                 + " preparationFailures=" + preparationFailures + " uploadFailures=" + uploadFailures
@@ -721,7 +832,11 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                 + " gpuChannels=" + comparedChannels + " maxGpuError=" + maximumGpuError
                 + " waitingFrames=" + waitingFrames + " fullAtlasFrames=" + fullAtlasFrames
                 + " nativeFencePolls=" + fencePolls + " nativePending=" + fencePending
-                + " nativeSignaled=" + fenceSignaled);
+                + " nativeSignaled=" + fenceSignaled
+                + (gpuTransitionsMode ? " feedbackReads=" + feedbackReads
+                + " feedbackNativePendingPolls=" + feedbackNativePendingPolls
+                + " feedbackSkippedDispatches=" + feedbackSkippedDispatches
+                + " feedbackArtificialDelaySkipped=" + artificialFeedbackDelaySkipped : ""));
         completed.countDown();
     }
     private int percentile(double p) {
@@ -858,17 +973,28 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                 frameLease = null;
                 String label = captureLabel(frame);
                 if (output != null && label != null) writeCapture(label);
-                if (output != null && frame >= MAX_FRAMES) finish();
+                if (output != null && frame >= MAX_FRAMES
+                        && (!gpuTransitionsMode || !gpuFeedbackPending)) finish();
             } catch (Throwable error) {
                 fail(error);
             }
         }
 
         private boolean drainGpuSelectionResources() {
-            if (gpuSelection == null && gpuPageBindings == null) return true;
+            if (gpuSelection == null && gpuTransitions == null && gpuFeedback == null
+                    && gpuPageBindings == null) return true;
             retiringStorage = true;
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
             try {
+                while (gpuFeedbackPending && System.nanoTime() < deadline) {
+                    HeightfieldGpuCoverFeedback.Snapshot snapshot = gpuFeedback.poll();
+                    if (snapshot != null) gpuFeedbackPending = false;
+                    else Thread.yield();
+                }
+                if (gpuFeedbackPending) {
+                    fail(new IllegalStateException("GPU transition feedback did not drain; resources retained"));
+                    return false;
+                }
                 while (frameLease == null && residency.stats().frames > 0
                         && System.nanoTime() < deadline) {
                     residency.poll();
@@ -886,6 +1012,14 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             if (gpuSelection != null) {
                 gpuSelection.close();
                 gpuSelection = null;
+            }
+            if (gpuTransitions != null) {
+                gpuTransitions.close();
+                gpuTransitions = null;
+            }
+            if (gpuFeedback != null) {
+                gpuFeedback.close();
+                gpuFeedback = null;
             }
             if (gpuPageBindings != null) {
                 gpuPageBindings.close();
