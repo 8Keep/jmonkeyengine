@@ -145,45 +145,90 @@ public final class TestHeightfieldGpuSelection extends SimpleApplication {
         for (int i = 0; i < nodes.size(); i++) indices.put(nodes.get(i), i);
 
         HeightfieldGpuSelection selection = new HeightfieldGpuSelection(assetManager, renderer, hierarchy);
-        BufferObject result = selection.getPatchRecords();
-        Material readback = new Material(assetManager, "jme3test/terrain/HeightfieldGpuSelection.j3md");
-        readback.setUniformBufferObject("Result", result);
-        Geometry quad = new Geometry("gpu-selection-result", new Quad(2, 2));
-        quad.setLocalTranslation(-1, -1, 0);
-        quad.setMaterial(readback);
-        quad.updateGeometricState();
-        FrameBuffer target = new FrameBuffer(NODE_COUNT, 5, 1);
-        target.addColorTarget(FrameBuffer.FrameBufferTarget.newTarget(Image.Format.RGBA32F));
-        Camera probeCamera = new Camera(NODE_COUNT, 5);
-        probeCamera.setParallelProjection(true);
-        probeCamera.setFrustum(.1f, 10f, -1f, 1f, 1f, -1f);
-        probeCamera.setLocation(new Vector3f(0, 0, 1));
-        probeCamera.lookAt(Vector3f.ZERO, Vector3f.UNIT_Y);
-        probeCamera.update();
-        renderManager.setCamera(probeCamera, false);
+        FrameBuffer target = null;
+        try {
+            BufferObject result = selection.getPatchRecords();
+            Material readback = new Material(assetManager, "jme3test/terrain/HeightfieldGpuSelection.j3md");
+            readback.setUniformBufferObject("Result", result);
+            Geometry quad = new Geometry("gpu-selection-result", new Quad(2, 2));
+            quad.setLocalTranslation(-1, -1, 0);
+            quad.setMaterial(readback);
+            quad.updateGeometricState();
+            target = new FrameBuffer(NODE_COUNT, 5, 1);
+            target.addColorTarget(FrameBuffer.FrameBufferTarget.newTarget(Image.Format.RGBA32F));
+            Camera probeCamera = new Camera(NODE_COUNT, 5);
+            probeCamera.setParallelProjection(true);
+            probeCamera.setFrustum(.1f, 10f, -1f, 1f, 1f, -1f);
+            probeCamera.setLocation(new Vector3f(0, 0, 1));
+            probeCamera.lookAt(Vector3f.ZERO, Vector3f.UNIT_Y);
+            probeCamera.update();
+            renderManager.setCamera(probeCamera, false);
 
-        List<Scenario> scenarios = new ArrayList<>();
-        scenarios.add(new Scenario("normal", camera(new Vector3f(32, 30, 72), new Vector3f(32, 0, 32)), 1.25, MAX_LEAVES, 1, Readiness.ALL));
-        scenarios.add(new Scenario("camera-cut", camera(new Vector3f(-42, 25, 9), new Vector3f(10, 0, 55)), .8, MAX_LEAVES, 1, Readiness.ALL));
-        scenarios.add(new Scenario("cold-root", camera(new Vector3f(32, 30, 72), new Vector3f(32, 0, 32)), .5, MAX_LEAVES, 2, Readiness.ROOT));
-        scenarios.add(new Scenario("missing-children", camera(new Vector3f(32, 30, 72), new Vector3f(32, 0, 32)), .65, MAX_LEAVES, 2, Readiness.NO_LEAVES));
-        scenarios.add(new Scenario("budget-pressure", camera(new Vector3f(32, 30, 72), new Vector3f(32, 0, 32)), .25, 7, 3, Readiness.ALL));
-        scenarios.add(new Scenario("source-revision", camera(new Vector3f(64, 58, -14), new Vector3f(32, 0, 32)), 1.0, MAX_LEAVES, 9, Readiness.ALL));
+            List<Scenario> scenarios = new ArrayList<>();
+            scenarios.add(new Scenario("normal", camera(new Vector3f(32, 30, 72), new Vector3f(32, 0, 32)), 1.25, MAX_LEAVES, 1, Readiness.ALL));
+            scenarios.add(new Scenario("camera-cut", camera(new Vector3f(-42, 25, 9), new Vector3f(10, 0, 55)), .8, MAX_LEAVES, 1, Readiness.ALL));
+            scenarios.add(new Scenario("cold-root", camera(new Vector3f(32, 30, 72), new Vector3f(32, 0, 32)), .5, MAX_LEAVES, 2, Readiness.ROOT));
+            scenarios.add(new Scenario("cold-budget", camera(new Vector3f(32, 30, 72), new Vector3f(32, 0, 32)), .5, 1, 2, Readiness.ROOT));
+            scenarios.add(new Scenario("missing-children", camera(new Vector3f(32, 30, 72), new Vector3f(32, 0, 32)), .65, MAX_LEAVES, 2, Readiness.NO_LEAVES));
+            scenarios.add(new Scenario("budget-pressure", camera(new Vector3f(32, 30, 72), new Vector3f(32, 0, 32)), .25, 7, 3, Readiness.ALL));
+            scenarios.add(new Scenario("source-revision", camera(new Vector3f(64, 58, -14), new Vector3f(32, 0, 32)), 1.0, MAX_LEAVES, 9, Readiness.ALL));
 
-        Files.createDirectories(output);
-        List<String> summary = new ArrayList<>();
-        summary.add("GPU hierarchy selection; projected errors prepared by HeightfieldProjection and rounded upward to float.");
-        summary.add("Readiness is synthetic metadata in this proof; no HeightfieldResidency acceptance is claimed.");
-        for (Scenario scenario : scenarios) {
-            runScenario(renderer, selection, quad, target, scenario, gles);
-            summary.add(scenario.name + " checks=" + checks);
+            Files.createDirectories(output);
+            List<String> summary = new ArrayList<>();
+            summary.add("GPU hierarchy selection; projected errors prepared by HeightfieldProjection and rounded upward to float.");
+            summary.add("Readiness is synthetic metadata in this proof; no HeightfieldResidency acceptance is claimed.");
+            for (Scenario scenario : scenarios) {
+                runScenario(renderer, selection, quad, target, scenario, gles);
+                summary.add(scenario.name + " checks=" + checks);
+            }
+            verifyPaddedHierarchy(renderer, quad, target, scenarios.get(0).camera);
+            summary.add("renderer=" + renderer.getCaps());
+            summary.add("limits=" + renderer.getLimits());
+            Files.write(output.resolve("summary.txt"), summary);
+            verifyOrderingTie(renderer, selection, quad, target, gles);
+        } finally {
+            selection.close();
+            renderer.setFrameBuffer(null);
+            if (target != null) renderer.deleteFrameBuffer(target);
         }
-        verifyPaddedHierarchy(renderer, quad, target, scenarios.get(0).camera);
-        summary.add("renderer=" + renderer.getCaps());
-        summary.add("limits=" + renderer.getLimits());
-        Files.write(output.resolve("summary.txt"), summary);
-        selection.close();
-        renderer.setFrameBuffer(null);
+    }
+
+    private void verifyOrderingTie(Renderer renderer, HeightfieldGpuSelection selection,
+            Geometry quad, FrameBuffer target, boolean gles) throws Exception {
+        HeightfieldPage savedPage = page;
+        HeightfieldHierarchy savedHierarchy = hierarchy;
+        HeightfieldLod savedOracle = oracle;
+        List<HeightfieldHierarchy.Node> savedNodes = nodes;
+        Map<HeightfieldHierarchy.Node, Integer> savedIndices = indices;
+        HeightfieldGpuSelection tieSelection = null;
+        BufferObject savedRecords = selection.getPatchRecords();
+        try {
+            page = makeFlatPage();
+            hierarchy = new HeightfieldHierarchy(page, PATCH_CELLS, 1.0);
+            oracle = new HeightfieldLod(hierarchy);
+            nodes = hierarchy.getNodes();
+            indices = new IdentityHashMap<>();
+            for (int i = 0; i < nodes.size(); i++) indices.put(nodes.get(i), i);
+            tieSelection = new HeightfieldGpuSelection(assetManager, renderer, hierarchy);
+            quad.getMaterial().setUniformBufferObject("Result", tieSelection.getPatchRecords());
+
+            Camera tieCamera = new Camera(320, 240);
+            tieCamera.setParallelProjection(true);
+            tieCamera.setFrustum(1f, 500f, -128f, 128f, 128f, -128f);
+            tieCamera.setLocation(new Vector3f(32, 20, 200));
+            tieCamera.lookAt(new Vector3f(32, 20, 0), Vector3f.UNIT_Y);
+            tieCamera.update();
+            Scenario tie = new Scenario("ordering-tie", tieCamera, .1, 10, 17, Readiness.ALL);
+            runScenario(renderer, tieSelection, quad, target, tie, gles);
+        } finally {
+            quad.getMaterial().setUniformBufferObject("Result", savedRecords);
+            if (tieSelection != null) tieSelection.close();
+            page = savedPage;
+            hierarchy = savedHierarchy;
+            oracle = savedOracle;
+            nodes = savedNodes;
+            indices = savedIndices;
+        }
     }
 
     private void runScenario(Renderer renderer, HeightfieldGpuSelection selection,
@@ -315,6 +360,9 @@ public final class TestHeightfieldGpuSelection extends SimpleApplication {
         HeightfieldLod.Selection cpu = oracle.select(scenario.camera, scenario.targetPixels,
                 scenario.maxLeaves, node -> ready[indices.get(node)]);
         require(cpu.getLeaves().size() <= scenario.maxLeaves, scenario.name + " CPU oracle budget");
+        int cpuSaturation = (cpu.isBudgetLimited() ? 1 : 0) | (cpu.isReadinessLimited() ? 2 : 0)
+                | (cpu.isSourceLimited() ? 4 : 0);
+        require(saturation == cpuSaturation, scenario.name + " saturation matches CPU failure precedence");
         HeightfieldLod.Transition cpuTransition = new HeightfieldLod.Transition(hierarchy);
         for (int i = 0; i < NODE_COUNT * 2; i++) cpuTransition.advance(cpu, 1f);
         boolean[] cpuCover = new boolean[NODE_COUNT];
@@ -330,6 +378,21 @@ public final class TestHeightfieldGpuSelection extends SimpleApplication {
             if (cpuEdges[cover[i]] != (edges[i] & 15)) edgeDeviation++;
         }
         for (int i = 0; i < NODE_COUNT; i++) if (cpuCover[i] && !seen[i]) coverDeviation++;
+        if (scenario.name.equals("ordering-tie")) {
+            StringBuilder cpuNodes = new StringBuilder("[");
+            boolean first = true;
+            for (int i = 0; i < NODE_COUNT; i++) if (cpuCover[i]) {
+                if (!first) cpuNodes.append(", ");
+                cpuNodes.append(i);
+                first = false;
+            }
+            cpuNodes.append(']');
+            System.out.println("HEIGHTFIELD_GPU_ORDERING_TIE gpuNodes="
+                    + java.util.Arrays.toString(cover) + " cpuNodes=" + cpuNodes
+                    + " coverDeviation=" + coverDeviation + " edgeDeviation=" + edgeDeviation);
+        }
+        require(coverDeviation == 0 && edgeDeviation == 0,
+                scenario.name + " selected cover and edge flags match the CPU reference");
         double gpuMaximum = 0;
         for (float reportedError : reportedErrors) gpuMaximum = Math.max(gpuMaximum, reportedError);
         double tolerance = 4.0 * Math.ulp((float) scenario.targetPixels);
@@ -343,7 +406,7 @@ public final class TestHeightfieldGpuSelection extends SimpleApplication {
             require(gpuMaximum <= scenario.targetPixels + tolerance,
                     scenario.name + " GPU policy reaches CPU oracle quality when CPU is not limited");
         }
-        if (scenario.readiness == Readiness.ROOT) {
+        if (scenario.name.equals("cold-root")) {
             require(leafCount == 1 && (saturation & 2) != 0 && gpuMaximum > scenario.targetPixels,
                     "cold root reports unresolved error while child pages are unavailable");
         }
@@ -472,6 +535,11 @@ public final class TestHeightfieldGpuSelection extends SimpleApplication {
             samples[(z + 1) * side + x + 1] = (float) (rolling + ridge + spike);
         }
         return new HeightfieldPage(CELLS, SPACING, samples);
+    }
+
+    private static HeightfieldPage makeFlatPage() {
+        int side = CELLS + 3;
+        return new HeightfieldPage(CELLS, SPACING, new float[side * side]);
     }
 
     private static Camera camera(Vector3f location, Vector3f target) {

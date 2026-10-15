@@ -28,9 +28,13 @@ shared bool candidateNodes[85];
 shared bool unbalanced[85];
 shared bool visible[85];
 shared float coverErrors[85];
+shared int rank[85];
+shared int proposalRank[85];
 shared int candidate;
 shared int splitNode;
 shared int coarseNode;
+shared int rankCounter;
+shared int proposalRankCounter;
 shared int leafCount;
 shared int flags;
 shared int proposedLeaves;
@@ -54,10 +58,6 @@ bool allChildrenReady(int n) {
     if (nodes[n].children.x < 0) return false;
     for (int k=0; k<4; ++k) if (nodes[nodes[n].children[k]].meta.y == 0) return false;
     return true;
-}
-void splitCover(int n) {
-    cover[n] = false;
-    for (int k=0; k<4; ++k) cover[nodes[n].children[k]] = true;
 }
 bool outsideFrustum(int n) {
     vec3 lo = nodes[n].boundsMin.xyz;
@@ -85,10 +85,14 @@ void main() {
         unbalanced[lane] = false;
         visible[lane] = false;
         coverErrors[lane] = 0.0;
+        rank[lane] = -1;
+        proposalRank[lane] = -1;
     }
     barrier();
     if (lane == 0) {
         cover[0] = true; // pinned root fallback
+        rank[0] = 0;
+        rankCounter = 1;
         leafCount = 1;
         flags = nodes[0].meta.y == 0 ? 8 : 0;
         finished = false;
@@ -96,8 +100,8 @@ void main() {
     barrier();
 
     // The original bounded priority loop is unchanged. Lanes parallelize the
-    // per-cover neighbor work; lane zero retains the exact low-index tie order
-    // and serial split/balance mutations.
+    // per-cover neighbor work; lane zero retains the CPU leaf insertion order
+    // for ties and serial split/balance mutations.
     for (int pass=0; pass<1870; ++pass) {
         if (lane < 85) hasCoarser[lane] = lane < nodeCount && nodeHasCoarserNeighbor(lane);
         barrier();
@@ -116,7 +120,10 @@ void main() {
             for (int i=0; i<85; ++i) {
                 if (!candidateNodes[i]) continue;
                 float error = coverErrors[i];
-                if (error > worst) { worst = error; candidate = i; }
+                if (error > worst || (candidate >= 0 && error == worst && rank[i] < rank[candidate])) {
+                    worst = error;
+                    candidate = i;
+                }
             }
             if (candidate < 0) finished = true;
         }
@@ -130,28 +137,38 @@ void main() {
                 splitNode = -1;
                 for (int j=0; j<85; ++j) {
                     if (j != candidate && cover[j] && nodes[j].meta.x < nodes[candidate].meta.x
-                            && touchesNode(candidate,j)) { splitNode = j; break; }
+                            && touchesNode(candidate,j)
+                            && (splitNode < 0 || rank[j] < rank[splitNode])) splitNode = j;
                 }
             }
             accepted = false;
             if (splitNode < 0) {
                 flags |= 4;
-            } else if (!allChildrenReady(splitNode)) {
-                flags |= 2;
-                splitNode = -1;
             } else if (leafCount + 3 > m_MaxLeaves) {
                 flags |= 1;
+                splitNode = -1;
+            } else if (!allChildrenReady(splitNode)) {
+                flags |= 2;
                 splitNode = -1;
             }
         }
         barrier();
 
         if (splitNode >= 0) {
-            if (lane < 85) proposal[lane] = cover[lane];
+            if (lane < 85) {
+                proposal[lane] = cover[lane];
+                proposalRank[lane] = rank[lane];
+            }
             barrier();
             if (lane == 0) {
                 proposal[splitNode] = false;
-                for (int k=0; k<4; ++k) proposal[nodes[splitNode].children[k]] = true;
+                proposalRank[splitNode] = -1;
+                proposalRankCounter = rankCounter;
+                for (int k=0; k<4; ++k) {
+                    int child = nodes[splitNode].children[k];
+                    proposal[child] = true;
+                    proposalRank[child] = proposalRankCounter++;
+                }
                 proposedLeaves = leafCount + 3;
                 accepted = true;
             }
@@ -175,18 +192,24 @@ void main() {
                 if (lane == 0) {
                     coarseNode = -1;
                     for (int a=0; a<85; ++a) {
-                        if (unbalanced[a]) { coarseNode = a; break; }
+                        if (unbalanced[a] && (coarseNode < 0
+                                || proposalRank[a] < proposalRank[coarseNode])) coarseNode = a;
                     }
                     if (coarseNode >= 0) {
-                        if (!allChildrenReady(coarseNode)) {
-                            flags |= 2;
-                            accepted = false;
-                        } else if (proposedLeaves + 3 > m_MaxLeaves) {
+                        if (proposedLeaves + 3 > m_MaxLeaves) {
                             flags |= 1;
+                            accepted = false;
+                        } else if (!allChildrenReady(coarseNode)) {
+                            flags |= 2;
                             accepted = false;
                         } else {
                             proposal[coarseNode] = false;
-                            for (int k=0; k<4; ++k) proposal[nodes[coarseNode].children[k]] = true;
+                            proposalRank[coarseNode] = -1;
+                            for (int k=0; k<4; ++k) {
+                                int child = nodes[coarseNode].children[k];
+                                proposal[child] = true;
+                                proposalRank[child] = proposalRankCounter++;
+                            }
                             proposedLeaves += 3;
                             if (balance == 84) accepted = false;
                         }
@@ -196,10 +219,14 @@ void main() {
                 if (!accepted || coarseNode < 0) break;
             }
 
-            if (lane == 0 && accepted) leafCount = proposedLeaves;
+            if (lane == 0 && accepted) {
+                leafCount = proposedLeaves;
+                rankCounter = proposalRankCounter;
+            }
             barrier();
             if (accepted && lane < 85) {
                 cover[lane] = proposal[lane];
+                rank[lane] = proposalRank[lane];
                 attempted[lane] = false;
             }
             barrier();
