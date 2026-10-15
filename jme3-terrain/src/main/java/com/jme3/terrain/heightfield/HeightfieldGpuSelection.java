@@ -179,6 +179,13 @@ public final class HeightfieldGpuSelection implements AutoCloseable {
      */
     public void dispatch(Camera camera, double targetPixels, int revisionLabel,
             int maxLeaves, Predicate<HeightfieldHierarchy.Node> isReady) {
+        select(camera, targetPixels, revisionLabel, maxLeaves, isReady);
+        writeCommandFrom(patchRecords);
+    }
+
+    // Temporal callers need only the desired records before their own command.
+    void select(Camera camera, double targetPixels, int revisionLabel,
+            int maxLeaves, Predicate<HeightfieldHierarchy.Node> isReady) {
         ensureOpen();
         if (camera == null || isReady == null) {
             throw new IllegalArgumentException("camera and readiness predicate are required");
@@ -210,8 +217,17 @@ public final class HeightfieldGpuSelection implements AutoCloseable {
         renderer.setFixedShaderStorageBufferObject(1, patchRecords);
         renderer.dispatchCompute(selectShader, 1, 1, 1);
         renderer.memoryBarrier(EnumSet.of(MemoryBarrier.ShaderStorage));
+    }
 
-        renderer.setFixedShaderStorageBufferObject(1, patchRecords);
+    // Temporal selection shares the same validated node input and command ABI.
+    BufferObject getNodeInput() {
+        ensureOpen();
+        return input;
+    }
+
+    void writeCommandFrom(BufferObject records) {
+        ensureOpen();
+        renderer.setFixedShaderStorageBufferObject(1, records);
         renderer.setFixedShaderStorageBufferObject(2, command);
         renderer.dispatchCompute(commandShader, 1, 1, 1);
         renderer.memoryBarrier(EnumSet.of(MemoryBarrier.Command, MemoryBarrier.UniformBuffer,
@@ -235,6 +251,7 @@ public final class HeightfieldGpuSelection implements AutoCloseable {
         ensureOpen();
         if (material == null) throw new IllegalArgumentException("material is required");
         material.setBoolean("UseHeightfieldInstances", true);
+        material.setBoolean("UseHeightfieldInstanceMorphs", false);
         material.setUniformBufferObject("PatchRecords", patchRecords);
         material.setInt("PatchRecordBase", drawCover == DrawCover.Complete ? 0 : NODE_CAPACITY * 2);
         material.setInt("PatchRecordVectors", NODE_CAPACITY * 4);
@@ -289,6 +306,7 @@ public final class HeightfieldGpuSelection implements AutoCloseable {
                 throw new IllegalStateException("the fallback root must be ready before GPU selection");
             }
             ints.put(base + 5, ready ? 1 : 0);
+            ints.put(base + 6, node.getParent() == null ? -1 : indices.get(node.getParent()));
             floats.put(base + 8, node.getOriginX());
             floats.put(base + 9, node.getOriginZ());
             floats.put(base + 10, node.getSpan());
@@ -353,7 +371,7 @@ public final class HeightfieldGpuSelection implements AutoCloseable {
         return result;
     }
 
-    private static Shader computeShader(AssetManager manager, String path, String language)
+    static Shader computeShader(AssetManager manager, String path, String language)
             throws IOException {
         Shader shader = new Shader();
         shader.addSource(Shader.ShaderType.Compute, path, readAsset(manager, path), "", language);
@@ -371,7 +389,7 @@ public final class HeightfieldGpuSelection implements AutoCloseable {
         }
     }
 
-    private static void requireCapabilities(Renderer renderer) {
+    static void requireCapabilities(Renderer renderer) {
         if (!renderer.getCaps().contains(Caps.ComputeShader)
                 || !renderer.getCaps().contains(Caps.IndexedIndirectDraw)
                 || !renderer.getCaps().contains(Caps.UniformBufferObject)) {

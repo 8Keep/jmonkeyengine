@@ -5,6 +5,11 @@ MaterialDef HeightfieldLodGpuProbe {
         Int HeightLayer : 0
         Float SampleSpacing : 1.0
         Boolean UseHeightfieldLod : true
+        Boolean UseHeightfieldInstances : false
+        Boolean UseHeightfieldInstanceMorphs : false
+        UniformBufferObject PatchRecords
+        Int PatchRecordBase : 0
+        Int PatchRecordVectors : 340
         Int PageCells : 0
         Int PatchGridCells : 0
         Vector2 PageLatticeOrigin : 0.0 0.0
@@ -23,6 +28,9 @@ MaterialDef HeightfieldLodGpuProbe {
 
         Defines {
             HEIGHTFIELD_LOD : UseHeightfieldLod
+            HEIGHTFIELD_INSTANCES : UseHeightfieldInstances
+            HEIGHTFIELD_INSTANCE_MORPHS : UseHeightfieldInstanceMorphs
+            HEIGHTFIELD_PATCH_RECORD_VECS : PatchRecordVectors
         }
 
         RenderState {

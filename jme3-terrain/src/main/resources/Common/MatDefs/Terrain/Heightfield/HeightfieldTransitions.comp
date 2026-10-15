@@ -1,0 +1,309 @@
+layout(local_size_x=128) in;
+
+struct Node {
+    ivec4 children;
+    ivec4 meta;      // level, ready, parent, unused
+    vec4 rect;       // originX, originZ, span, stride
+    vec4 errors;     // conservative stable and morph pixels
+    vec4 boundsMin;
+    vec4 boundsMax;
+};
+layout(std430, binding=0) readonly buffer NodeInput {
+    Node nodes[85];
+    vec4 planes[6];
+    vec4 sourceInfo;
+};
+layout(std430, binding=1) readonly buffer DesiredInput {
+    vec4 desiredHeader;
+    vec4 desiredRecords[340];
+};
+layout(std430, binding=2) buffer TemporalOutput {
+    vec4 header;
+    vec4 records[340];
+    vec4 control;       // revision, active parent, alpha, merging
+    ivec4 ranks[22];    // four live-order ranks per vector
+};
+
+uniform int m_NodeCount;
+uniform float m_Step;
+uniform bool m_Reset;
+
+shared bool cover[85];
+shared bool attempted[85];
+shared bool assigned[85];
+shared int liveRank[85];
+shared float interior[85];
+shared int activeParent;
+shared float alpha;
+shared bool merging;
+shared int leafCount;
+
+bool touches(int a, int b) {
+    vec4 x = nodes[a].rect;
+    vec4 y = nodes[b].rect;
+    return a != b && x.x <= y.x + y.z && y.x <= x.x + x.z
+        && x.y <= y.y + y.z && y.y <= x.y + x.z;
+}
+
+bool allChildrenReady(int n) {
+    if (nodes[n].children.x < 0) return false;
+    for (int k=0; k<4; ++k) {
+        int child = nodes[n].children[k];
+        if (child < 0 || child >= m_NodeCount || nodes[child].meta.y == 0) return false;
+    }
+    return true;
+}
+
+bool balancedCover() {
+    for (int a=0; a<85; ++a) {
+        if (!cover[a]) continue;
+        for (int b=0; b<85; ++b) {
+            if (cover[b] && touches(a,b)
+                    && nodes[a].meta.x + 1 < nodes[b].meta.x) return false;
+        }
+    }
+    return true;
+}
+
+bool desiredHasFiner(int n) {
+    int count = clamp(int(floor(desiredHeader.z + 0.5)), 0, 85);
+    vec4 a = nodes[n].rect;
+    for (int i=0; i<count; ++i) {
+        int d = int(floor(desiredRecords[2*i].x + 0.5));
+        if (d < 0 || d >= m_NodeCount || nodes[d].meta.x <= nodes[n].meta.x) continue;
+        vec4 b = nodes[d].rect;
+        if (b.x >= a.x && b.y >= a.y && b.x + b.z <= a.x + a.z
+                && b.y + b.z <= a.y + a.z) return true;
+    }
+    return false;
+}
+
+bool desiredContains(int n) {
+    int count = clamp(int(floor(desiredHeader.z + 0.5)), 0, 85);
+    vec4 a = nodes[n].rect;
+    for (int i=0; i<count; ++i) {
+        int d = int(floor(desiredRecords[2*i].x + 0.5));
+        if (d < 0 || d >= m_NodeCount || nodes[d].meta.x > nodes[n].meta.x) continue;
+        vec4 b = nodes[d].rect;
+        if (b.x <= a.x && b.y <= a.y && b.x + b.z >= a.x + a.z
+                && b.y + b.z >= a.y + a.z) return true;
+    }
+    return false;
+}
+
+int edgeSide(int a, int b) {
+    if (a == b) return -1;
+    vec4 x = nodes[a].rect, y = nodes[b].rect;
+    bool zOverlap = max(x.y,y.y) < min(x.y+x.z,y.y+y.z);
+    bool xOverlap = max(x.x,y.x) < min(x.x+x.z,y.x+y.z);
+    if (zOverlap && x.x == y.x+y.z) return 0;
+    if (zOverlap && x.x+x.z == y.x) return 1;
+    if (xOverlap && x.y == y.y+y.z) return 2;
+    if (xOverlap && x.y+x.z == y.y) return 3;
+    return -1;
+}
+
+void main() {
+    int lane = int(gl_LocalInvocationID.x);
+    int nodeCount = clamp(m_NodeCount, 0, 85);
+
+    if (lane < 85) {
+        int r = ranks[lane / 4][lane % 4];
+        liveRank[lane] = m_Reset ? -1 : r;
+        cover[lane] = !m_Reset && r >= 0 && lane < nodeCount;
+        interior[lane] = 0.0;
+    }
+    barrier();
+
+    if (lane == 0) {
+        activeParent = m_Reset ? -1 : int(floor(control.y + 0.5));
+        alpha = m_Reset ? 0.0 : clamp(control.z, 0.0, 1.0);
+        merging = !m_Reset && control.w >= 0.5;
+        if (m_Reset) {
+            cover[0] = true;
+            liveRank[0] = 0;
+        }
+        for (int i=0; i<85; ++i) attempted[i] = false;
+        leafCount = 0;
+        for (int i=0; i<85; ++i) if (cover[i]) ++leafCount;
+        float step = clamp(m_Step, 0.0, 1.0);
+
+        if (activeParent >= 0 && activeParent < nodeCount) {
+            alpha = merging ? min(1.0, alpha + step) : max(0.0, alpha - step);
+            bool complete = (merging && alpha >= 1.0) || (!merging && alpha <= 0.0);
+            if (complete) {
+                if (merging) {
+                    for (int k=0; k<4; ++k) {
+                        int child = nodes[activeParent].children[k];
+                        if (child >= 0 && child < 85 && cover[child]) {
+                            cover[child] = false;
+                            liveRank[child] = -1;
+                            --leafCount;
+                        }
+                    }
+                    int appendRank = -1;
+                    for (int i=0; i<85; ++i) {
+                        if (cover[i]) appendRank = max(appendRank, liveRank[i]);
+                    }
+                    cover[activeParent] = true;
+                    liveRank[activeParent] = appendRank + 1;
+                    ++leafCount;
+                }
+                activeParent = -1;
+                alpha = 0.0;
+                merging = false;
+            }
+        } else {
+            activeParent = -1;
+            alpha = 0.0;
+            merging = false;
+
+            // CPU oracle order: level ascending, then stable live insertion rank.
+            bool splitStarted = false;
+            if (leafCount + 3 <= 64) {
+                for (int attempt=0; attempt<85 && !splitStarted; ++attempt) {
+                    int chosen = -1;
+                    int bestLevel = 2147483647;
+                    int bestRank = 2147483647;
+                    for (int n=0; n<nodeCount; ++n) {
+                        if (!cover[n] || attempted[n] || !desiredHasFiner(n) || !allChildrenReady(n)) continue;
+                        int level = nodes[n].meta.x;
+                        int rank = liveRank[n];
+                        if (level < bestLevel || (level == bestLevel && rank < bestRank)) {
+                            chosen = n;
+                            bestLevel = level;
+                            bestRank = rank;
+                        }
+                    }
+                    if (chosen < 0) break;
+                    attempted[chosen] = true;
+                    int oldRank = liveRank[chosen];
+                    cover[chosen] = false;
+                    liveRank[chosen] = -1;
+                    int appendRank = 0;
+                    for (int i=0; i<85; ++i) if (cover[i]) appendRank = max(appendRank, liveRank[i] + 1);
+                    for (int k=0; k<4; ++k) {
+                        int child = nodes[chosen].children[k];
+                        cover[child] = true;
+                        liveRank[child] = appendRank++;
+                    }
+                    if (balancedCover()) {
+                        activeParent = chosen;
+                        alpha = 1.0;
+                        merging = false;
+                        leafCount += 3;
+                        splitStarted = true;
+                    } else {
+                        for (int k=0; k<4; ++k) {
+                            int child = nodes[chosen].children[k];
+                            cover[child] = false;
+                            liveRank[child] = -1;
+                        }
+                        cover[chosen] = true;
+                        liveRank[chosen] = oldRank;
+                    }
+                }
+            }
+
+            // Only try a merge when no refinement transaction was started.
+            if (activeParent < 0) {
+                for (int i=0; i<85; ++i) attempted[i] = false;
+                for (int attempt=0; attempt<85 && activeParent < 0; ++attempt) {
+                    int parent = -1;
+                    int parentLevel = -1;
+                    for (int n=0; n<nodeCount; ++n) {
+                        if (attempted[n] || nodes[n].children.x < 0 || nodes[n].meta.y == 0 || !desiredContains(n)) continue;
+                        bool allPresent = true;
+                        for (int k=0; k<4; ++k) {
+                            int child = nodes[n].children[k];
+                            if (child < 0 || child >= 85 || !cover[child]) allPresent = false;
+                        }
+                        int level = nodes[n].meta.x;
+                        if (allPresent && (level > parentLevel || (level == parentLevel && (parent < 0 || n < parent)))) {
+                            parent = n;
+                            parentLevel = level;
+                        }
+                    }
+                    if (parent < 0) break;
+                    attempted[parent] = true;
+                    for (int k=0; k<4; ++k) cover[nodes[parent].children[k]] = false;
+                    cover[parent] = true;
+                    bool balanced = balancedCover();
+                    for (int k=0; k<4; ++k) cover[nodes[parent].children[k]] = true;
+                    cover[parent] = false;
+                    if (balanced) {
+                        activeParent = parent;
+                        alpha = 0.0;
+                        merging = true;
+                    }
+                }
+            }
+        }
+
+        // Keep a dense rank sequence while preserving insertion order.
+        for (int n=0; n<85; ++n) assigned[n] = false;
+        for (int r=0; r<64; ++r) {
+            int selected = -1;
+            int minimum = 2147483647;
+            for (int n=0; n<85; ++n) {
+                if (cover[n] && !assigned[n] && liveRank[n] >= 0 && liveRank[n] < minimum) {
+                    minimum = liveRank[n];
+                    selected = n;
+                }
+            }
+            if (selected >= 0) {
+                liveRank[selected] = r;
+                assigned[selected] = true;
+            }
+        }
+        leafCount = 0;
+        for (int i=0; i<85; ++i) if (cover[i]) ++leafCount;
+    }
+    barrier();
+
+    if (lane < 85) {
+        interior[lane] = cover[lane] && activeParent >= 0 && nodes[lane].meta.z == activeParent
+                ? alpha : 0.0;
+    }
+    barrier();
+
+    if (lane < nodeCount && cover[lane]) {
+        float edge[4] = float[4](interior[lane], interior[lane], interior[lane], interior[lane]);
+        int edgeMask = 0;
+        for (int other=0; other<nodeCount; ++other) {
+            if (!cover[other] || other == lane) continue;
+            int side = edgeSide(lane, other);
+            if (side < 0) continue;
+            if (nodes[other].meta.x < nodes[lane].meta.x) {
+                edge[side] = 1.0;
+                edgeMask |= 1 << side;
+            } else if (nodes[other].meta.x == nodes[lane].meta.x) {
+                edge[side] = max(edge[side], interior[other]);
+            }
+        }
+        bool morphed = interior[lane] > 0.0 || edge[0] > 0.0 || edge[1] > 0.0
+                || edge[2] > 0.0 || edge[3] > 0.0;
+        int record = 0;
+        for (int n=0; n<lane; ++n) if (cover[n]) ++record;
+        float error = morphed ? nodes[lane].errors.y : nodes[lane].errors.x;
+        records[record*4] = vec4(float(lane), nodes[lane].rect.x, nodes[lane].rect.y, nodes[lane].rect.w);
+        records[record*4+1] = vec4(nodes[lane].rect.z, float(edgeMask | (morphed ? 16 : 0)), error, sourceInfo.x);
+        records[record*4+2] = vec4(interior[lane], edge[0], edge[1], edge[2]);
+        records[record*4+3] = vec4(edge[3], 0.0, 0.0, 0.0);
+    }
+    barrier();
+
+    if (lane < 22) {
+        ivec4 rankPack = ivec4(-1);
+        for (int k=0; k<4; ++k) {
+            int n = lane*4+k;
+            if (n < 85 && cover[n]) rankPack[k] = liveRank[n];
+        }
+        ranks[lane] = rankPack;
+    }
+    if (lane == 0) {
+        header = vec4(float(leafCount), activeParent >= 0 ? 1.0 : 0.0,
+                float(leafCount), sourceInfo.x);
+        control = vec4(sourceInfo.x, float(activeParent), alpha, merging ? 1.0 : 0.0);
+    }
+}

@@ -1,7 +1,7 @@
 layout(local_size_x=128) in;
 struct Node {
     ivec4 children;  // child indices; -1 for a leaf
-    ivec4 meta;      // level, ready, unused, unused
+    ivec4 meta;      // level, ready, parent, unused
     vec4 rect;       // originX, originZ, span, stride
     vec4 errors;     // conservative stable and morph pixels, rounded upward
     vec4 boundsMin;
