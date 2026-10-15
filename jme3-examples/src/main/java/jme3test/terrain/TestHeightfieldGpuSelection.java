@@ -133,8 +133,8 @@ public final class TestHeightfieldGpuSelection extends SimpleApplication {
         require(renderer.getLimits().get(Limits.ComputeStorageBufferBindings) >= 2, "two storage bindings");
         require(renderer.getLimits().get(Limits.ComputeStorageBufferBlockSize) >= outputBytes, "output SSBO size");
         require(renderer.getLimits().get(Limits.UniformBufferObjectMaxBlockSize) >= outputBytes, "output UBO size");
-        require(renderer.getLimits().get(Limits.ComputeWorkGroupSizeX) >= 1
-                && renderer.getLimits().get(Limits.ComputeWorkGroupInvocations) >= 1, "single invocation workgroup");
+        require(renderer.getLimits().get(Limits.ComputeWorkGroupSizeX) >= 128
+                && renderer.getLimits().get(Limits.ComputeWorkGroupInvocations) >= 128, "128 invocation workgroup");
 
         page = makePage();
         hierarchy = new HeightfieldHierarchy(page, PATCH_CELLS, 0);

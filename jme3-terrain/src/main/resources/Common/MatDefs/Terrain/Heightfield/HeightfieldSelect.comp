@@ -1,4 +1,4 @@
-layout(local_size_x=1) in;
+layout(local_size_x=128) in;
 struct Node {
     ivec4 children;  // child indices; -1 for a leaf
     ivec4 meta;      // level, ready, unused, unused
@@ -20,33 +20,42 @@ uniform int m_NodeCount;
 uniform int m_MaxLeaves;
 uniform float m_TargetPixels;
 
+shared bool cover[85];
+shared bool attempted[85];
+shared bool proposal[85];
+shared bool hasCoarser[85];
+shared bool candidateNodes[85];
+shared bool unbalanced[85];
+shared bool visible[85];
+shared float coverErrors[85];
+shared int candidate;
+shared int splitNode;
+shared int coarseNode;
+shared int leafCount;
+shared int flags;
+shared int proposedLeaves;
+shared int visibleCount;
+shared bool accepted;
+shared bool finished;
+
 bool touchesNode(int a, int b) {
     vec4 x = nodes[a].rect;
     vec4 y = nodes[b].rect;
     return x.x <= y.x + y.z && y.x <= x.x + x.z
         && x.y <= y.y + y.z && y.y <= x.y + x.z;
 }
-bool hasCoarserNeighbor(bool cover[85], int n) {
+bool nodeHasCoarserNeighbor(int n) {
     for (int j=0; j<85; ++j) {
         if (j != n && cover[j] && nodes[j].meta.x < nodes[n].meta.x && touchesNode(n,j)) return true;
     }
     return false;
-}
-float coverError(bool cover[85], int n) {
-    return hasCoarserNeighbor(cover, n) ? nodes[n].errors.y : nodes[n].errors.x;
-}
-int firstCoarserNeighbor(bool cover[85], int n) {
-    for (int j=0; j<85; ++j) {
-        if (j != n && cover[j] && nodes[j].meta.x < nodes[n].meta.x && touchesNode(n,j)) return j;
-    }
-    return -1;
 }
 bool allChildrenReady(int n) {
     if (nodes[n].children.x < 0) return false;
     for (int k=0; k<4; ++k) if (nodes[nodes[n].children[k]].meta.y == 0) return false;
     return true;
 }
-void splitCover(inout bool cover[85], int n) {
+void splitCover(int n) {
     cover[n] = false;
     for (int k=0; k<4; ++k) cover[nodes[n].children[k]] = true;
 }
@@ -65,104 +74,200 @@ bool outsideFrustum(int n) {
     return false;
 }
 void main() {
-    bool cover[85];
-    bool attempted[85];
-    for (int i=0; i<85; ++i) { cover[i] = false; attempted[i] = false; }
-    cover[0] = true; // pinned root fallback
-    int leafCount = 1;
-    int flags = nodes[0].meta.y == 0 ? 8 : 0;
+    int lane = int(gl_LocalInvocationID.x);
+    int nodeCount = clamp(m_NodeCount, 0, 85);
+    if (lane < 85) {
+        cover[lane] = false;
+        attempted[lane] = false;
+        proposal[lane] = false;
+        hasCoarser[lane] = false;
+        candidateNodes[lane] = false;
+        unbalanced[lane] = false;
+        visible[lane] = false;
+        coverErrors[lane] = 0.0;
+    }
+    barrier();
+    if (lane == 0) {
+        cover[0] = true; // pinned root fallback
+        leafCount = 1;
+        flags = nodes[0].meta.y == 0 ? 8 : 0;
+        finished = false;
+    }
+    barrier();
 
-    bool finished = false;
-    // At most 21 successful leaf splits fit a 64-leaf budget; each successful
-    // split can be preceded by at most 85 failed candidate attempts.
+    // The original bounded priority loop is unchanged. Lanes parallelize the
+    // per-cover neighbor work; lane zero retains the exact low-index tie order
+    // and serial split/balance mutations.
     for (int pass=0; pass<1870; ++pass) {
-        int candidate = -1;
-        float worst = m_TargetPixels;
-        for (int i=0; i<85; ++i) {
-            if (!cover[i] || attempted[i]) continue;
-            float error = coverError(cover, i);
-            if (error > worst) { worst = error; candidate = i; }
+        if (lane < 85) hasCoarser[lane] = lane < nodeCount && nodeHasCoarserNeighbor(lane);
+        barrier();
+        if (lane < 85) {
+            coverErrors[lane] = cover[lane]
+                    && lane < nodeCount
+                    ? (hasCoarser[lane] ? nodes[lane].errors.y : nodes[lane].errors.x)
+                    : 0.0;
+            candidateNodes[lane] = lane < nodeCount && cover[lane] && !attempted[lane]
+                    && coverErrors[lane] > m_TargetPixels;
         }
-        if (candidate < 0) { finished = true; break; }
-        attempted[candidate] = true;
-        int split = candidate;
-        if (nodes[split].children.x < 0) {
-            split = firstCoarserNeighbor(cover, candidate);
-            if (split < 0) { flags |= 4; continue; }
+        barrier();
+        if (lane == 0) {
+            candidate = -1;
+            float worst = m_TargetPixels;
+            for (int i=0; i<85; ++i) {
+                if (!candidateNodes[i]) continue;
+                float error = coverErrors[i];
+                if (error > worst) { worst = error; candidate = i; }
+            }
+            if (candidate < 0) finished = true;
         }
-        if (!allChildrenReady(split)) { flags |= 2; continue; }
-        if (leafCount + 3 > m_MaxLeaves) { flags |= 1; continue; }
+        barrier();
+        if (finished) break;
 
-        bool proposal[85];
-        for (int i=0; i<85; ++i) proposal[i] = cover[i];
-        splitCover(proposal, split);
-        bool accepted = true;
-        int proposedLeaves = leafCount + 3;
-        for (int balance=0; balance<85; ++balance) {
-            int coarse = -1;
-            for (int a=0; a<85 && coarse < 0; ++a) {
-                if (!proposal[a]) continue;
-                for (int b=0; b<85; ++b) {
-                    if (!proposal[b] || !touchesNode(a,b)) continue;
-                    if (nodes[a].meta.x + 1 < nodes[b].meta.x) { coarse = a; break; }
+        if (lane == 0) {
+            attempted[candidate] = true;
+            splitNode = candidate;
+            if (nodes[splitNode].children.x < 0) {
+                splitNode = -1;
+                for (int j=0; j<85; ++j) {
+                    if (j != candidate && cover[j] && nodes[j].meta.x < nodes[candidate].meta.x
+                            && touchesNode(candidate,j)) { splitNode = j; break; }
                 }
             }
-            if (coarse < 0) break;
-            if (!allChildrenReady(coarse)) { flags |= 2; accepted = false; break; }
-            if (proposedLeaves + 3 > m_MaxLeaves) { flags |= 1; accepted = false; break; }
-            splitCover(proposal, coarse);
-            proposedLeaves += 3;
-            if (balance == 84) accepted = false;
+            accepted = false;
+            if (splitNode < 0) {
+                flags |= 4;
+            } else if (!allChildrenReady(splitNode)) {
+                flags |= 2;
+                splitNode = -1;
+            } else if (leafCount + 3 > m_MaxLeaves) {
+                flags |= 1;
+                splitNode = -1;
+            }
         }
-        if (accepted) {
-            for (int i=0; i<85; ++i) { cover[i] = proposal[i]; attempted[i] = false; }
-            leafCount = proposedLeaves;
-        }
-    }
-    if (!finished) {
-        for (int i=0; i<85; ++i) {
-            if (cover[i] && !attempted[i] && coverError(cover, i) > m_TargetPixels) flags |= 16;
+        barrier();
+
+        if (splitNode >= 0) {
+            if (lane < 85) proposal[lane] = cover[lane];
+            barrier();
+            if (lane == 0) {
+                proposal[splitNode] = false;
+                for (int k=0; k<4; ++k) proposal[nodes[splitNode].children[k]] = true;
+                proposedLeaves = leafCount + 3;
+                accepted = true;
+            }
+            barrier();
+
+            for (int balance=0; balance<85; ++balance) {
+                if (lane < 85) {
+                    bool found = false;
+                    if (lane < nodeCount && proposal[lane]) {
+                        for (int b=0; b<85; ++b) {
+                            if (proposal[b] && touchesNode(lane,b)
+                                    && nodes[lane].meta.x + 1 < nodes[b].meta.x) {
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                    unbalanced[lane] = found;
+                }
+                barrier();
+                if (lane == 0) {
+                    coarseNode = -1;
+                    for (int a=0; a<85; ++a) {
+                        if (unbalanced[a]) { coarseNode = a; break; }
+                    }
+                    if (coarseNode >= 0) {
+                        if (!allChildrenReady(coarseNode)) {
+                            flags |= 2;
+                            accepted = false;
+                        } else if (proposedLeaves + 3 > m_MaxLeaves) {
+                            flags |= 1;
+                            accepted = false;
+                        } else {
+                            proposal[coarseNode] = false;
+                            for (int k=0; k<4; ++k) proposal[nodes[coarseNode].children[k]] = true;
+                            proposedLeaves += 3;
+                            if (balance == 84) accepted = false;
+                        }
+                    }
+                }
+                barrier();
+                if (!accepted || coarseNode < 0) break;
+            }
+
+            if (lane == 0 && accepted) leafCount = proposedLeaves;
+            barrier();
+            if (accepted && lane < 85) {
+                cover[lane] = proposal[lane];
+                attempted[lane] = false;
+            }
+            barrier();
         }
     }
 
-    float remainingError = 0.0;
-    for (int i=0; i<85; ++i) if (cover[i]) {
-        bool morph = hasCoarserNeighbor(cover, i);
-        remainingError = max(remainingError, morph ? nodes[i].errors.y : nodes[i].errors.x);
+    if (lane < 85) hasCoarser[lane] = lane < nodeCount && nodeHasCoarserNeighbor(lane);
+    barrier();
+    if (lane < 85) {
+        coverErrors[lane] = cover[lane] && lane < nodeCount
+                ? (hasCoarser[lane] ? nodes[lane].errors.y : nodes[lane].errors.x)
+                : 0.0;
     }
-    if (remainingError <= m_TargetPixels) flags &= ~7;
-
-    int visibleCount = 0;
-    for (int i=0; i<85; ++i) {
-        if (!cover[i]) continue;
-        int edgeMask = 0;
-        for (int j=0; j<85; ++j) {
-            if (i == j || !cover[j] || nodes[j].meta.x >= nodes[i].meta.x) continue;
-            if (!touchesNode(i,j)) continue;
-            vec4 a = nodes[i].rect, b = nodes[j].rect;
-            bool zOverlap = max(a.y,b.y) < min(a.y+a.z,b.y+b.z);
-            bool xOverlap = max(a.x,b.x) < min(a.x+a.z,b.x+b.z);
-            if (zOverlap && a.x == b.x+b.z) edgeMask |= 1;
-            else if (zOverlap && a.x+a.z == b.x) edgeMask |= 2;
-            else if (xOverlap && a.y == b.y+b.z) edgeMask |= 4;
-            else if (xOverlap && a.y+a.z == b.y) edgeMask |= 8;
+    barrier();
+    if (lane == 0) {
+        if (!finished) {
+            for (int i=0; i<85; ++i) {
+                if (cover[i] && !attempted[i] && coverErrors[i] > m_TargetPixels) flags |= 16;
+            }
         }
-        bool morph = hasCoarserNeighbor(cover, i);
-        int edgeData = edgeMask | (morph ? 16 : 0);
-        int record = 0;
-        for (int j=0; j<i; ++j) if (cover[j]) ++record;
-        float error = morph ? nodes[i].errors.y : nodes[i].errors.x;
-        records[record*2] = vec4(float(i), nodes[i].rect.x, nodes[i].rect.y, nodes[i].rect.w);
-        records[record*2+1] = vec4(nodes[i].rect.z, float(edgeData), error, sourceInfo.x);
+        float remainingError = 0.0;
+        for (int i=0; i<85; ++i) if (cover[i]) remainingError = max(remainingError, coverErrors[i]);
+        if (remainingError <= m_TargetPixels) flags &= ~7;
     }
-    // A second deterministic pass compacts the complete balanced cover after edge decisions.
-    for (int i=0; i<85; ++i) {
-        if (!cover[i] || outsideFrustum(i)) continue;
-        int sourceRecord = 0;
-        for (int j=0; j<i; ++j) if (cover[j]) ++sourceRecord;
-        records[170 + visibleCount*2] = records[sourceRecord*2];
-        records[170 + visibleCount*2+1] = records[sourceRecord*2+1];
-        ++visibleCount;
+    barrier();
+
+    vec4 patchOrigin = vec4(0.0);
+    vec4 patchDetail = vec4(0.0);
+    if (lane < 85) {
+        visible[lane] = lane < nodeCount && cover[lane] && !outsideFrustum(lane);
+        if (lane < nodeCount && cover[lane]) {
+            int edgeMask = 0;
+            for (int j=0; j<85; ++j) {
+                if (lane == j || !cover[j] || nodes[j].meta.x >= nodes[lane].meta.x) continue;
+                if (!touchesNode(lane,j)) continue;
+                vec4 a = nodes[lane].rect, b = nodes[j].rect;
+                bool zOverlap = max(a.y,b.y) < min(a.y+a.z,b.y+b.z);
+                bool xOverlap = max(a.x,b.x) < min(a.x+a.z,b.x+b.z);
+                if (zOverlap && a.x == b.x+b.z) edgeMask |= 1;
+                else if (zOverlap && a.x+a.z == b.x) edgeMask |= 2;
+                else if (xOverlap && a.y == b.y+b.z) edgeMask |= 4;
+                else if (xOverlap && a.y+a.z == b.y) edgeMask |= 8;
+            }
+            int edgeData = edgeMask | (hasCoarser[lane] ? 16 : 0);
+            int record = 0;
+            for (int j=0; j<lane; ++j) if (cover[j]) ++record;
+            float error = coverErrors[lane];
+            patchOrigin = vec4(float(lane), nodes[lane].rect.x, nodes[lane].rect.y, nodes[lane].rect.w);
+            patchDetail = vec4(nodes[lane].rect.z, float(edgeData), error, sourceInfo.x);
+            records[record*2] = patchOrigin;
+            records[record*2+1] = patchDetail;
+        }
     }
-    header = vec4(float(visibleCount), float(flags), float(leafCount), sourceInfo.x);
+    // Synchronize visibility decisions; each lane retains its own record values
+    // for compaction, so no cross-invocation SSBO read is needed.
+    barrier();
+    if (lane < nodeCount && visible[lane]) {
+        int compactRecord = 0;
+        for (int j=0; j<lane; ++j) {
+            if (visible[j]) ++compactRecord;
+        }
+        records[170 + compactRecord*2] = patchOrigin;
+        records[170 + compactRecord*2+1] = patchDetail;
+    }
+    barrier();
+    if (lane == 0) {
+        visibleCount = 0;
+        for (int i=0; i<85; ++i) if (visible[i]) ++visibleCount;
+        header = vec4(float(visibleCount), float(flags), float(leafCount), sourceInfo.x);
+    }
 }
