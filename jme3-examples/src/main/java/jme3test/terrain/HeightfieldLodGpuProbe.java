@@ -153,6 +153,37 @@ public final class HeightfieldLodGpuProbe implements AutoCloseable {
      * @return sample count and maximum absolute/allowed errors
      */
     public Verification verify(List<Patch> patches, FrameBuffer resumeTarget) {
+        return verifyPatches(patches, resumeTarget, -1);
+    }
+
+    /**
+     * Check four-vec4 GPU morph records against independent CPU patch metadata.
+     * Patches must follow record order. Each record is drawn separately through
+     * the shared instance decoder; readback remains a diagnostic operation.
+     */
+    public Verification verifyMorphRecords(List<Patch> patches,
+            com.jme3.shader.bufferobject.BufferObject records, int recordBase,
+            FrameBuffer resumeTarget) {
+        requireOpen();
+        if (patches == null || records == null || recordBase < 0
+                || (long) recordBase + patches.size() * 4L > 340
+                || records.getData() == null || records.getData().limit() < 341 * 16) {
+            throw new IllegalArgumentException("matching morph records and ordered patches are required");
+        }
+        material.setBoolean("UseHeightfieldInstances", true);
+        material.setBoolean("UseHeightfieldInstanceMorphs", true);
+        material.setUniformBufferObject("PatchRecords", records);
+        try {
+            return verifyPatches(patches, resumeTarget, recordBase);
+        } finally {
+            material.setBoolean("UseHeightfieldInstances", false);
+            material.setBoolean("UseHeightfieldInstanceMorphs", false);
+            material.clearParam("PatchRecords");
+            material.setInt("PatchRecordBase", 0);
+        }
+    }
+
+    private Verification verifyPatches(List<Patch> patches, FrameBuffer resumeTarget, int recordBase) {
         requireOpen();
         if (patches == null) {
             throw new IllegalArgumentException("patch metadata is required");
@@ -181,8 +212,10 @@ public final class HeightfieldLodGpuProbe implements AutoCloseable {
         Vector3f expectedPosition = new Vector3f();
         for (Vector2f pageOrigin : pageOrigins) {
             material.setVector2("PageLatticeOrigin", pageOrigin);
-            for (Patch patch : patches) {
+            for (int patchIndex = 0; patchIndex < patches.size(); patchIndex++) {
+                Patch patch = patches.get(patchIndex);
                 configure(patch, cells);
+                if (recordBase >= 0) material.setInt("PatchRecordBase", recordBase + patchIndex * 4);
                 // Resume an explicit caller target. The engine's current-FBO
                 // query can report a main override rather than the physical
                 // offscreen binding, so this probe must not infer it.

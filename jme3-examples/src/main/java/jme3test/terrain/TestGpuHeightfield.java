@@ -54,6 +54,7 @@ import com.jme3.scene.instancing.IndirectGeometry;
 import com.jme3.shadow.DirectionalLightVisibilityRenderer;
 import com.jme3.system.AppSettings;
 import com.jme3.terrain.heightfield.HeightfieldGpuSelection;
+import com.jme3.terrain.heightfield.HeightfieldGpuTransitions;
 import com.jme3.terrain.heightfield.HeightfieldGrid;
 import com.jme3.terrain.heightfield.HeightfieldHierarchy;
 import com.jme3.terrain.heightfield.HeightfieldPage;
@@ -87,7 +88,9 @@ import javax.imageio.ImageIO;
  * dispatched only once per camera preset. --edit-tour captures one valley hill
  * edit and restore; it cannot be combined with profiling. --cpu-selection uses
  * the ordinary CPU oracle and instanced material route without compute/indirect
- * draws; it also works in interactive mode.
+ * draws; it also works in interactive mode. --smooth-lod enables GPU sibling
+ * morphing, with each transaction taking about .2 seconds during interaction.
+ * Finite captures use a fixed .25 step and allow the cover to settle.
  */
 public final class TestGpuHeightfield extends SimpleApplication {
     private static final int CELLS = 256;
@@ -108,6 +111,8 @@ public final class TestGpuHeightfield extends SimpleApplication {
     private final boolean staticSelection;
     private final boolean editTour;
     private final boolean cpuSelection;
+    private final boolean smoothLod;
+    private float transitionStep;
     private final CountDownLatch capturesFinished = new CountDownLatch(1);
     private volatile Throwable failure;
     private TerrainRevision activeRevision;
@@ -133,7 +138,7 @@ public final class TestGpuHeightfield extends SimpleApplication {
     private int editTourSettledFrames;
 
     private TestGpuHeightfield(boolean finiteRun, Path output, boolean shadowsEnabled,
-            boolean profileRun, boolean staticSelection, boolean editTour, boolean cpuSelection) {
+            boolean profileRun, boolean staticSelection, boolean editTour, boolean cpuSelection, boolean smoothLod) {
         this.finiteRun = finiteRun;
         this.output = output;
         this.shadowsEnabled = shadowsEnabled;
@@ -141,10 +146,11 @@ public final class TestGpuHeightfield extends SimpleApplication {
         this.staticSelection = staticSelection;
         this.editTour = editTour;
         this.cpuSelection = cpuSelection;
+        this.smoothLod = smoothLod;
     }
 
     public static void main(String[] args) throws Exception {
-        boolean shadows = true, profile = false, staticSelection = false, editTour = false, cpu = false;
+        boolean shadows = true, profile = false, staticSelection = false, editTour = false, cpu = false, smooth = false;
         String rendererName = AppSettings.ANGLE_GLES3;
         Path output = null;
         int positional = 0;
@@ -154,21 +160,25 @@ public final class TestGpuHeightfield extends SimpleApplication {
             else if ("--static-selection".equals(arg)) staticSelection = true;
             else if ("--edit-tour".equals(arg)) editTour = true;
             else if ("--cpu-selection".equals(arg)) cpu = true;
+            else if ("--smooth-lod".equals(arg)) smooth = true;
             else if (!arg.startsWith("--") && positional < 2) {
                 if (positional == 0) rendererName = arg;
                 else output = Paths.get(arg);
                 positional++;
             }
-            else throw new IllegalArgumentException("Usage: TestGpuHeightfield [<renderer> [<output-directory>]] [--cpu-selection] [--no-shadows] [--profile [--static-selection] | --edit-tour]");
+            else throw new IllegalArgumentException("Usage: TestGpuHeightfield [<renderer> [<output-directory>]] [--cpu-selection | --smooth-lod] [--no-shadows] [--profile [--static-selection] | --edit-tour]");
         }
         if (staticSelection && !profile) throw new IllegalArgumentException("--static-selection requires --profile");
+        if (smooth && (cpu || staticSelection)) {
+            throw new IllegalArgumentException("--smooth-lod requires GPU selection on every frame");
+        }
         boolean finite = output != null;
         if (profile && !finite) throw new IllegalArgumentException("--profile requires an output directory");
         if (editTour && (!finite || profile || staticSelection)) {
             throw new IllegalArgumentException("--edit-tour requires an output directory and cannot be combined with --profile or --static-selection");
         }
         TestGpuHeightfield app = new TestGpuHeightfield(finite, output,
-                shadows, profile, staticSelection, editTour, cpu);
+                shadows, profile, staticSelection, editTour, cpu, smooth);
         AppSettings settings = new AppSettings(true);
         settings.setRenderer(rendererName);
         settings.setResolution(WIDTH, HEIGHT);
@@ -216,7 +226,7 @@ public final class TestGpuHeightfield extends SimpleApplication {
             }
             HeightfieldGrid.requireSupported(renderer);
             System.out.println("HEIGHTFIELD_SELECTION_MODE cpu=" + cpuSelection
-                    + " computeCap=" + renderer.getCaps().contains(Caps.ComputeShader)
+                    + " smooth=" + smoothLod + " computeCap=" + renderer.getCaps().contains(Caps.ComputeShader)
                     + " indirectCap=" + renderer.getCaps().contains(Caps.IndexedIndirectDraw));
             setDisplayFps(false);
             setDisplayStatView(false);
@@ -311,11 +321,14 @@ public final class TestGpuHeightfield extends SimpleApplication {
     private TerrainRevision createRevision(boolean edited, int label) {
         HeightfieldGpuSelection nextSelection = null;
         HeightfieldCpuPatchBatch nextCpu = null;
+        HeightfieldGpuTransitions nextTransitions = null;
         TextureArray nextHeights = null;
         try {
             HeightfieldPage page = createPage(edited);
             HeightfieldHierarchy hierarchy = new HeightfieldHierarchy(page, PATCH_CELLS, 0);
-            if (!cpuSelection) {
+            if (smoothLod) {
+                nextTransitions = new HeightfieldGpuTransitions(assetManager, renderer, hierarchy);
+            } else if (!cpuSelection) {
                 nextSelection = new HeightfieldGpuSelection(assetManager, renderer, hierarchy,
                         HeightfieldGpuSelection.DrawCover.Complete);
             }
@@ -334,9 +347,11 @@ public final class TestGpuHeightfield extends SimpleApplication {
                 nextCpu = new HeightfieldCpuPatchBatch(renderer, hierarchy, mesh, material);
                 geometry = nextCpu.getGeometry();
             } else {
-                nextSelection.configureMaterial(material);
+                if (nextTransitions != null) nextTransitions.configureMaterial(material);
+                else nextSelection.configureMaterial(material);
                 geometry = new IndirectGeometry("GPU selected terrain r" + label,
-                        mesh, nextSelection.getCommand(), 0, hierarchy.getRoot().getBound());
+                        mesh, nextTransitions != null ? nextTransitions.getCommand() : nextSelection.getCommand(),
+                        0, hierarchy.getRoot().getBound());
             }
             geometry.setShadowMode(ShadowMode.CastAndReceive);
             material.setFloat("SnowLine", 26f);
@@ -344,8 +359,9 @@ public final class TestGpuHeightfield extends SimpleApplication {
             material.setColor("GrassColor", new ColorRGBA(.16f, .24f, .085f, 1));
             material.setColor("RockColor", new ColorRGBA(.28f, .255f, .22f, 1));
             geometry.setMaterial(material);
-            return new TerrainRevision(edited, label, page, nextSelection, nextCpu, nextHeights, geometry, material);
+            return new TerrainRevision(edited, label, page, nextSelection, nextCpu, nextTransitions, nextHeights, geometry, material);
         } catch (Throwable error) {
+            if (nextTransitions != null) nextTransitions.close();
             if (nextSelection != null) nextSelection.close();
             if (nextCpu != null) nextCpu.close();
             if (nextHeights != null) renderer.deleteImage(nextHeights.getImage());
@@ -386,7 +402,7 @@ public final class TestGpuHeightfield extends SimpleApplication {
     private void installHud() {
         com.jme3.font.BitmapText text = new com.jme3.font.BitmapText(guiFont);
         text.setSize(16f);
-        text.setText((cpuSelection ? "CPU" : "GPU") + " HEIGHTFIELD  |  1 overview  2 valley  3 close  |  E toggle valley hill  |  H sun shadows\n"
+        text.setText((cpuSelection ? "CPU" : smoothLod ? "GPU SMOOTH" : "GPU") + " HEIGHTFIELD  |  1 overview  2 valley  3 close  |  E toggle valley hill  |  H sun shadows\n"
                 + "WASD/QZ move  |  hold left mouse and drag to look\n"
                 + "One resident 128 m page; E rebuilds a 10 m hill revision. No streaming.");
         text.setLocalTranslation(16, cam.getHeight() - 16, 0);
@@ -412,6 +428,7 @@ public final class TestGpuHeightfield extends SimpleApplication {
     public void simpleUpdate(float tpf) {
         if (activeRevision == null || failure != null) return;
         try {
+            transitionStep = finiteRun ? .25f : Math.min(1f, Math.max(0f, tpf) / .2f);
             retireSignaledRevisions();
             applyRequestedRevision();
             if (profileRun && !profileWritten) {
@@ -421,7 +438,7 @@ public final class TestGpuHeightfield extends SimpleApplication {
                     setCameraPose(pose);
                     profileFrame++;
                     if (!staticSelection || profilePose != pose) {
-                        activeRevision.dispatch(cam);
+                        activeRevision.dispatch(cam, transitionStep);
                         profilePose = pose;
                     }
                     if (profileFrame == PROFILE_WARMUP + PROFILE_FRAMES_PER_VIEW * CAPTURE_NAMES.length) {
@@ -433,7 +450,7 @@ public final class TestGpuHeightfield extends SimpleApplication {
                 // until all queries retire, then write outside measured frames.
                 if (!timings.isDrained()) {
                     if (++drainFrames > 300) throw new IllegalStateException("GPU timing queries did not retire");
-                    activeRevision.dispatch(cam);
+                    activeRevision.dispatch(cam, transitionStep);
                     return;
                 }
                 timings.write(output);
@@ -443,7 +460,7 @@ public final class TestGpuHeightfield extends SimpleApplication {
                         + PROFILE_FRAMES_PER_VIEW * CAPTURE_NAMES.length + " warmup=" + PROFILE_WARMUP
                         + " selection=" + (staticSelection ? "once-per-view" : "every-frame"));
             }
-            activeRevision.dispatch(cam);
+            activeRevision.dispatch(cam, transitionStep);
             if (!finiteRun) return;
             if (editTour) {
                 updateEditTour();
@@ -464,7 +481,7 @@ public final class TestGpuHeightfield extends SimpleApplication {
                 changeCameraAfterCapture = false;
                 captureFrame = 0;
                 setCameraPose(nextCapture);
-            } else if (++captureFrame >= 5) {
+            } else if (++captureFrame >= (smoothLod ? 110 : 5)) {
                 captureFrame = 0;
                 screenshots.setFileName(CAPTURE_NAMES[nextCapture]);
                 screenshots.takeScreenshot();
@@ -506,13 +523,14 @@ public final class TestGpuHeightfield extends SimpleApplication {
             editTourSettledFrames = 0;
             return;
         }
-        if (++editTourSettledFrames < EDIT_SETTLED_FRAMES) return;
+        int settledFrames = smoothLod ? 110 : EDIT_SETTLED_FRAMES;
+        if (++editTourSettledFrames < settledFrames) return;
         String name = EDIT_CAPTURE_NAMES[editTourStage];
         screenshots.setFileName(name);
         screenshots.takeScreenshot();
         System.out.println("GPU_HEIGHTFIELD_EDIT_TOUR_CAPTURE name=" + name
                 + " revision=" + activeRevision.label + " edited=" + activeRevision.edited
-                + " settledFrames=" + EDIT_SETTLED_FRAMES);
+                + " settledFrames=" + settledFrames);
         editTourStage++;
         editTourSettledFrames = 0;
         if (editTourStage == 1) {
@@ -535,7 +553,7 @@ public final class TestGpuHeightfield extends SimpleApplication {
         try {
             candidate = createRevision(requestedEdit, nextRevision);
             candidateGpuWorkStarted = true;
-            candidate.dispatch(cam);
+            candidate.dispatch(cam, transitionStep);
             // Force the new one-layer array upload while the old revision is still active.
             renderer.setTexture(0, candidate.heightPages);
             retirementFence = renderer.createFence();
@@ -597,31 +615,36 @@ public final class TestGpuHeightfield extends SimpleApplication {
         private final HeightfieldPage page;
         private final HeightfieldGpuSelection selection;
         private final HeightfieldCpuPatchBatch cpuBatch;
+        private final HeightfieldGpuTransitions transitions;
         private final TextureArray heightPages;
         private final Geometry geometry;
         private final Material material;
         private boolean released;
 
         private TerrainRevision(boolean edited, int label, HeightfieldPage page,
-                HeightfieldGpuSelection selection, HeightfieldCpuPatchBatch cpuBatch, TextureArray heightPages,
+                HeightfieldGpuSelection selection, HeightfieldCpuPatchBatch cpuBatch,
+                HeightfieldGpuTransitions transitions, TextureArray heightPages,
                 Geometry geometry, Material material) {
             this.edited = edited;
             this.label = label;
             this.page = page;
             this.selection = selection;
             this.cpuBatch = cpuBatch;
+            this.transitions = transitions;
             this.heightPages = heightPages;
             this.geometry = geometry;
             this.material = material;
         }
 
-        private void dispatch(com.jme3.renderer.Camera camera) {
-            if (selection != null) selection.dispatch(camera, 1.25, label, 64, node -> true);
+        private void dispatch(com.jme3.renderer.Camera camera, float step) {
+            if (transitions != null) transitions.dispatch(camera, 1.25, label, 64, step, node -> true);
+            else if (selection != null) selection.dispatch(camera, 1.25, label, 64, node -> true);
             else cpuBatch.dispatch(camera, 1.25, label, 64, node -> true);
         }
 
         private void release(com.jme3.renderer.Renderer renderer) {
             if (released) return;
+            if (transitions != null) transitions.close();
             if (selection != null) selection.close();
             if (cpuBatch != null) cpuBatch.close();
             renderer.deleteImage(heightPages.getImage());
