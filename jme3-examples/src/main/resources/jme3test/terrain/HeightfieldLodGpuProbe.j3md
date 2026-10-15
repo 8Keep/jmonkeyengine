@@ -7,6 +7,9 @@ MaterialDef HeightfieldLodGpuProbe {
         Boolean UseHeightfieldLod : true
         Boolean UseHeightfieldInstances : false
         Boolean UseHeightfieldInstanceMorphs : false
+        // Physical node-local halo pages; requires instance records and live bindings.
+        Boolean UseHeightfieldNodePages : false
+        UniformBufferObject HeightfieldPageBindings
         UniformBufferObject PatchRecords
         Int PatchRecordBase : 0
         Int PatchRecordVectors : 340
@@ -30,6 +33,7 @@ MaterialDef HeightfieldLodGpuProbe {
             HEIGHTFIELD_LOD : UseHeightfieldLod
             HEIGHTFIELD_INSTANCES : UseHeightfieldInstances
             HEIGHTFIELD_INSTANCE_MORPHS : UseHeightfieldInstanceMorphs
+            HEIGHTFIELD_NODE_PAGES : UseHeightfieldNodePages
             HEIGHTFIELD_PATCH_RECORD_VECS : PatchRecordVectors
         }
 

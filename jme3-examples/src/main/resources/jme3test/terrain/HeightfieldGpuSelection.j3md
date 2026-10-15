@@ -1,9 +1,14 @@
 MaterialDef HeightfieldGpuSelection {
     MaterialParameters {
         UniformBufferObject Result
+        Boolean InspectCommand : false
+        UniformBufferObject Command
     }
     Technique {
         VertexShader GLSL300 GLSL150 : jme3test/terrain/HeightfieldGpuSelection.vert
         FragmentShader GLSL300 GLSL150 : jme3test/terrain/HeightfieldGpuSelection.frag
+        Defines {
+            HEIGHTFIELD_COMMAND_CHECK : InspectCommand
+        }
     }
 }
