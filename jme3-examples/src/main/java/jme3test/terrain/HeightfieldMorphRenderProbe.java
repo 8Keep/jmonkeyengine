@@ -154,7 +154,7 @@ public final class HeightfieldMorphRenderProbe implements AutoCloseable {
     public Verification verify(Camera camera, List<Patch> reference, String name, Path output)
             throws IOException, com.jme3.renderer.TextureUnitException {
         return verifyInternal(camera, reference, null, null, name, output,
-                renderer.getCurrentFrameBuffer());
+                renderer.getCurrentFrameBuffer(), null);
     }
 
     /**
@@ -169,12 +169,28 @@ public final class HeightfieldMorphRenderProbe implements AutoCloseable {
         if (pageBindings == null || nodePages == null) {
             throw new IllegalArgumentException("node page bindings and atlas are required");
         }
-        return verifyInternal(camera, reference, pageBindings, nodePages, name, output, resumeTarget);
+        return verifyInternal(camera, reference, pageBindings, nodePages, name, output, resumeTarget, null);
+    }
+
+    /** Compare canonical source-gradient pages with strict color and depth checks. */
+    public Verification verifyNodePages(Camera camera, List<Patch> reference,
+            com.jme3.terrain.heightfield.HeightfieldGpuPageBindings pageBindings,
+            TextureArray nodePages, TextureArray gradientPages, String name, Path output,
+            FrameBuffer resumeTarget) throws IOException, com.jme3.renderer.TextureUnitException {
+        if (gradientPages == null) {
+            return verifyNodePages(camera, reference, pageBindings, nodePages, name, output, resumeTarget);
+        }
+        if (pageBindings == null || nodePages == null || gradientPages.getImage() == null) {
+            throw new IllegalArgumentException("open node and source-gradient pages are required");
+        }
+        return verifyInternal(camera, reference, pageBindings, nodePages, name, output,
+                resumeTarget, gradientPages);
     }
 
     private Verification verifyInternal(Camera camera, List<Patch> reference,
             com.jme3.terrain.heightfield.HeightfieldGpuPageBindings pageBindings,
-            TextureArray nodePages, String name, Path output, FrameBuffer resumeTarget)
+            TextureArray nodePages, String name, Path output, FrameBuffer resumeTarget,
+            TextureArray gradientPages)
             throws IOException, com.jme3.renderer.TextureUnitException {
         requireOpen();
         boolean nodePageMode = pageBindings != null || nodePages != null;
@@ -199,7 +215,7 @@ public final class HeightfieldMorphRenderProbe implements AutoCloseable {
             scene.detachAllChildren();
             scene.updateGeometricState();
 
-            scene.attachChild(createGpuGeometry(false, pageBindings, nodePages));
+            scene.attachChild(createGpuGeometry(false, pageBindings, nodePages, gradientPages));
             scene.updateGeometricState();
             renderScene(camera, gpuTarget, false);
             gpuColor = readColor(gpuTarget);
@@ -223,7 +239,7 @@ public final class HeightfieldMorphRenderProbe implements AutoCloseable {
             referenceColor = readColor(referenceTarget);
 
             scene.detachAllChildren();
-            scene.attachChild(createGpuGeometry(true, pageBindings, nodePages));
+            scene.attachChild(createGpuGeometry(true, pageBindings, nodePages, gradientPages));
             scene.updateGeometricState();
             renderScene(camera, gpuShadowTarget, true);
             gpuDepth = readDepth(gpuShadowTarget);
@@ -245,7 +261,8 @@ public final class HeightfieldMorphRenderProbe implements AutoCloseable {
             Files.createDirectories(output);
             writePng(output.resolve(name + "-gpu.png"), gpuColor);
             writePng(output.resolve(name + "-reference.png"), referenceColor);
-            Verification result = compare(gpuColor, referenceColor, gpuDepth, referenceDepth, !nodePageMode);
+            boolean compareColor = !nodePageMode || gradientPages != null;
+            Verification result = compare(gpuColor, referenceColor, gpuDepth, referenceDepth, compareColor);
             float maximumMainCaster = 0;
             for (int i = 0; i < mainDepth.length; i++) {
                 float difference = Math.abs(mainDepth[i] - gpuDepth[i]);
@@ -257,7 +274,8 @@ public final class HeightfieldMorphRenderProbe implements AutoCloseable {
             System.out.println("HEIGHTFIELD_MORPH_MAIN_CASTER phase=" + name + " maxDepthDifference=" + maximumMainCaster);
             if (nodePageMode) {
                 System.out.println("HEIGHTFIELD_NODE_PAGE_RENDER phase=" + name
-                        + " colorCompared=false (node-page gradients are decimated) " + result);
+                        + " colorCompared=" + compareColor + " sourceGradients="
+                        + (gradientPages != null) + " " + result);
             } else {
                 System.out.println("HEIGHTFIELD_MORPH_RENDER phase=" + name + " " + result);
             }
@@ -273,7 +291,7 @@ public final class HeightfieldMorphRenderProbe implements AutoCloseable {
 
     private Geometry createGpuGeometry(boolean caster,
             com.jme3.terrain.heightfield.HeightfieldGpuPageBindings pageBindings,
-            TextureArray nodePages) {
+            TextureArray nodePages, TextureArray gradientPages) {
         Geometry geometry = new IndirectGeometry("heightfield temporal GPU"
                 + (caster ? " caster" : " cover"), grid,
                 transitions.getCommand(), 0, hierarchy.getRoot().getBound());
@@ -285,6 +303,10 @@ public final class HeightfieldMorphRenderProbe implements AutoCloseable {
         if (pageBindings != null) {
             material.setTexture("HeightPages", nodePages);
             pageBindings.configureMaterial(material);
+        }
+        if (gradientPages != null) {
+            material.setTexture("HeightGradientPages", gradientPages);
+            material.setBoolean("UseHeightfieldSourceGradients", true);
         }
         if (caster) {
             material.selectTechnique("PreShadow", renderManager);

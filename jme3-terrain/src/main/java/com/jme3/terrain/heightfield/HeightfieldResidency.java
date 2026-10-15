@@ -56,6 +56,7 @@ import java.util.Objects;
  */
 public final class HeightfieldResidency implements AutoCloseable {
     private final int pageCells;
+    /** Maximum per-page CPU payload reservation; actual page payload may be smaller. */
     private final long pageBytes;
     private final Limits limits;
     private final Thread ownerThread;
@@ -74,15 +75,31 @@ public final class HeightfieldResidency implements AutoCloseable {
     private boolean externalCallback;
 
     public HeightfieldResidency(int pageCells, Limits limits) {
+        this(pageCells, minimumPageBytes(pageCells), limits);
+    }
+
+    /**
+     * Creates residency with a declared maximum payload size per page. The
+     * budget must fit the R32F height payload; pages with optional payloads may
+     * use any total size up to this reservation.
+     */
+    public HeightfieldResidency(int pageCells, long pageBytes, Limits limits) {
         if (pageCells < 2 || pageCells > 256) {
             throw new IllegalArgumentException("pageCells must be between 2 and 256");
         }
         this.limits = Objects.requireNonNull(limits, "limits");
         this.pageCells = pageCells;
-        long side = (long) pageCells + 3;
-        this.pageBytes = side * side * Float.BYTES;
+        long minimumPageBytes = minimumPageBytes(pageCells);
+        if (pageBytes < minimumPageBytes) {
+            throw new IllegalArgumentException("per-page byte budget must fit at least the height payload ("
+                    + minimumPageBytes + ")");
+        }
+        this.pageBytes = pageBytes;
         if (limits.slots == 0) {
             throw new IllegalArgumentException("at least one physical slot is required");
+        }
+        if (pageBytes > Long.MAX_VALUE / limits.slots) {
+            throw new IllegalArgumentException("per-page byte budget overflows total slot capacity");
         }
         if (limits.queuedReservedBytes < pageBytes || limits.preparedBytes < pageBytes
                 || limits.uploadBytesPerCall < pageBytes) {
@@ -118,8 +135,8 @@ public final class HeightfieldResidency implements AutoCloseable {
         if (request.owner != this) return false;
         Request live = requests.get(request.key);
         if (live != request || request.epoch != epoch) return false;
-        if (page.getCells() != pageCells || pageBytes != expectedPageBytes(page)) {
-            throw new IllegalArgumentException("page does not match the fixed residency payload size");
+        if (page.getCells() != pageCells || page.getPayloadBytes() > pageBytes) {
+            throw new IllegalArgumentException("page dimensions or total payload exceed the declared residency budget");
         }
         if (preparedBytes > limits.preparedBytes - pageBytes) return false;
         requests.remove(request.key);
@@ -369,6 +386,7 @@ public final class HeightfieldResidency implements AutoCloseable {
     }
 
     public int getPageCells() { return pageCells; }
+    /** Returns the per-page byte reservation used by queue, prepared, and slot budgets. */
     public long getPageBytes() { return pageBytes; }
     public Limits getLimits() { return limits; }
 
@@ -423,8 +441,8 @@ public final class HeightfieldResidency implements AutoCloseable {
         slot.reserved = null;
     }
 
-    private long expectedPageBytes(HeightfieldPage page) {
-        long side = (long) page.getCells() + 3;
+    private static long minimumPageBytes(int pageCells) {
+        long side = (long) pageCells + 3;
         return side * side * Float.BYTES;
     }
 

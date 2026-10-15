@@ -113,6 +113,8 @@ import javax.imageio.ImageIO;
  * Pass --gpu-selection for an immediate GPU cover using actual node pages and
  * conservative all-ready-page frame leases. That mode keeps one source revision;
  * pass --gpu-transitions to add persistent GPU morph state with readback feedback.
+ * Add --source-gradients to preserve canonical source lighting in node pages;
+ * height and gradient payloads share publication, generations and frame leases.
  * The default CPU mode also exercises gradual transitions, edits and recreation.
  */
 public final class TestHeightfieldStreaming extends SimpleApplication {
@@ -126,6 +128,8 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     private final boolean gpuSelectionMode;
     private final boolean gpuTransitionsMode;
     private final boolean profileMode;
+    private final boolean sourceGradientMode;
+    private final long pageBytes;
     private final List<Long> feedbackPollNanos = new ArrayList<>(MAX_PROFILE_STAGE_SAMPLES);
     private final List<Long> jobUploadNanos = new ArrayList<>(MAX_PROFILE_STAGE_SAMPLES);
     private final List<Long> cpuOracleNanos = new ArrayList<>(MAX_PROFILE_STAGE_SAMPLES);
@@ -155,6 +159,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     private Mesh gpuPatchMesh;
     private Material gpuMaterial;
     private TextureArray atlas;
+    private TextureArray gradientAtlas;
     private FrameBuffer captureTarget;
     private Frame frameLease;
     private volatile Throwable failure;
@@ -179,11 +184,13 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     private List<Node> pendingOracleNodes = Collections.emptyList();
 
     private TestHeightfieldStreaming(Path output, boolean gpuSelectionMode,
-            boolean gpuTransitionsMode, boolean profileMode) {
+            boolean gpuTransitionsMode, boolean profileMode, boolean sourceGradientMode) {
         this.output = output;
         this.gpuSelectionMode = gpuSelectionMode;
         this.gpuTransitionsMode = gpuTransitionsMode;
         this.profileMode = profileMode;
+        this.sourceGradientMode = sourceGradientMode;
+        this.pageBytes = PAGE_BYTES * (sourceGradientMode ? 3L : 1L);
     }
 
     public static void main(String[] args) throws Exception {
@@ -193,21 +200,23 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         boolean gpuSelectionMode = false;
         boolean gpuTransitionsMode = false;
         boolean profileMode = false;
+        boolean sourceGradientMode = false;
         for (String arg : args) {
             if ("--gpu-selection".equals(arg)) gpuSelectionMode = true;
             else if ("--gpu-transitions".equals(arg)) gpuTransitionsMode = true;
             else if ("--profile".equals(arg)) profileMode = true;
+            else if ("--source-gradients".equals(arg)) sourceGradientMode = true;
             else if (arg.startsWith("--")) throw new IllegalArgumentException("Unknown option: " + arg);
             else positional.add(arg);
         }
-        if (gpuTransitionsMode) gpuSelectionMode = true;
+        if (gpuTransitionsMode || sourceGradientMode) gpuSelectionMode = true;
         if (positional.size() > 2) throw new IllegalArgumentException("Expected renderer and optional output directory");
         String rendererName = positional.isEmpty() ? AppSettings.ANGLE_GLES3 : positional.get(0);
         Path output = positional.size() > 1 ? Paths.get(positional.get(1)) : null;
         if (profileMode && output == null) throw new IllegalArgumentException("--profile requires an output directory");
         if (!assertions) throw new IllegalStateException("Streaming control requires -ea");
         TestHeightfieldStreaming app = new TestHeightfieldStreaming(output, gpuSelectionMode,
-                gpuTransitionsMode, profileMode);
+                gpuTransitionsMode, profileMode, sourceGradientMode);
         AppSettings settings = new AppSettings(true);
         settings.setRenderer(rendererName);
         settings.setResolution(960, 640);
@@ -238,10 +247,11 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             flyCam.setMoveSpeed(24);
             flyCam.setDragToRotate(true);
             HeightfieldGrid.requireSupported(renderer);
-            residency = new HeightfieldResidency(PATCH_CELLS,
-                    new HeightfieldResidency.Limits(CAPACITY, MAX_JOBS, MAX_JOBS * PAGE_BYTES,
-                            6L * PAGE_BYTES, 2, 2L * PAGE_BYTES, 12, 12));
+            residency = new HeightfieldResidency(PATCH_CELLS, pageBytes,
+                    new HeightfieldResidency.Limits(CAPACITY, MAX_JOBS, MAX_JOBS * pageBytes,
+                            6L * pageBytes, 2, 2L * pageBytes, 12, 12));
             atlas = createAtlas();
+            if (sourceGradientMode) gradientAtlas = createGradientAtlas();
             page = makePage(0);
             hierarchy = new HeightfieldHierarchy(page, PATCH_CELLS, 0);
             installRoot(hierarchy, revision);
@@ -254,10 +264,20 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     }
 
     private TextureArray createAtlas() {
+        return createAtlas(false);
+    }
+
+    private TextureArray createGradientAtlas() {
+        return createAtlas(true);
+    }
+
+    private TextureArray createAtlas(boolean gradients) {
         List<Image> layers = new ArrayList<>();
         float[] zeros = new float[(PATCH_CELLS + 3) * (PATCH_CELLS + 3)];
         for (int slot = 0; slot < CAPACITY; slot++) {
-            layers.add(new HeightfieldPage(PATCH_CELLS, SPACING, zeros).createImage());
+            HeightfieldPage empty = new HeightfieldPage(PATCH_CELLS, SPACING, zeros,
+                    gradients ? new float[zeros.length * 2] : null);
+            layers.add(gradients ? empty.createGradientImage() : empty.createImage());
         }
         TextureArray result = new TextureArray(layers);
         result.setMinFilter(Texture.MinFilter.NearestNoMipMaps);
@@ -295,12 +315,24 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     private HeightfieldPage prepare(Node node, long sourceRevision) {
         int side = PATCH_CELLS + 3, stride = node.getStride();
         float[] samples = new float[side * side];
+        float[] gradients = sourceGradientMode ? new float[samples.length * 2] : null;
         for (int z = -1; z <= PATCH_CELLS + 1; z++) for (int x = -1; x <= PATCH_CELLS + 1; x++) {
             samples[(z + 1) * side + x + 1] = (float) height(
                     (node.getOriginX() + x * stride) * (double) SPACING,
                     (node.getOriginZ() + z * stride) * (double) SPACING, sourceRevision);
+            if (gradients != null) {
+                int gx = node.getOriginX() + x * stride;
+                int gz = node.getOriginZ() + z * stride;
+                float left = (float) height((gx - 1) * (double) SPACING, gz * (double) SPACING, sourceRevision);
+                float right = (float) height((gx + 1) * (double) SPACING, gz * (double) SPACING, sourceRevision);
+                float back = (float) height(gx * (double) SPACING, (gz - 1) * (double) SPACING, sourceRevision);
+                float front = (float) height(gx * (double) SPACING, (gz + 1) * (double) SPACING, sourceRevision);
+                int offset = 2 * ((z + 1) * side + x + 1);
+                gradients[offset] = left * .5f - right * .5f;
+                gradients[offset + 1] = back * .5f - front * .5f;
+            }
         }
-        return new HeightfieldPage(PATCH_CELLS, SPACING * stride, samples);
+        return new HeightfieldPage(PATCH_CELLS, SPACING * stride, samples, gradients);
     }
 
     private void installRoot(HeightfieldHierarchy source, long sourceRevision) {
@@ -356,11 +388,11 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     }
 
     private void initializeGpuSelection() throws java.io.IOException {
-        activateGpuResources(createGpuResources(hierarchy, atlas));
+        activateGpuResources(createGpuResources(hierarchy, atlas, gradientAtlas));
     }
 
     private GpuResourceBundle createGpuResources(HeightfieldHierarchy targetHierarchy,
-            TextureArray targetAtlas) throws java.io.IOException {
+            TextureArray targetAtlas, TextureArray targetGradients) throws java.io.IOException {
         HeightfieldGpuPageBindings pageBindings = null;
         HeightfieldGpuSelection selection = null;
         HeightfieldGpuTransitions transitions = null;
@@ -389,6 +421,10 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             else selection.configureMaterial(material);
             pageBindings.configureMaterial(material);
             material.setTexture("HeightPages", targetAtlas);
+            if (targetGradients != null) {
+                material.setTexture("HeightGradientPages", targetGradients);
+                material.setBoolean("UseHeightfieldSourceGradients", true);
+            }
             material.setColor("GrassColor", new ColorRGBA(.12f, .20f, .075f, 1));
             material.setColor("RockColor", new ColorRGBA(.29f, .26f, .22f, 1));
             material.setColor("SnowColor", new ColorRGBA(.83f, .87f, .9f, 1));
@@ -726,18 +762,14 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     private void uploadPrepared(boolean inject) {
         try {
             uploads += residency.uploadPrepared((slot, payload) -> {
-                Image image = payload.createImage();
-                try { renderer.modifyTexture(atlas, image, slot, 0, 0); }
-                finally {
-                    // modifyTexture consumes client memory before returning;
-                    // this temporary image was never manager-registered.
-                    BufferUtils.destroyDirectBuffer(image.getData(0));
-                }
+                uploadImage(atlas, payload.createImage(), slot);
                 if (inject && !injectedUpload && frame > 20) {
                     injectedUpload = true;
                     uploadFailures++;
                     throw new InjectedUploadFailure();
                 }
+                if (sourceGradientMode) uploadImage(gradientAtlas, payload.createGradientImage(), slot);
+                // Only returning after both writes publishes the shared slot.
             });
         } catch (InjectedUploadFailure expected) {
             // A physical write happened, but its mapping was not published.
@@ -749,6 +781,14 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                 publicationLatency.add(frame - entry.getValue());
                 iterator.remove();
             } else if (frame - entry.getValue() > 200) iterator.remove();
+        }
+    }
+
+    private void uploadImage(TextureArray target, Image image, int slot) {
+        try { renderer.modifyTexture(target, image, slot, 0, 0); }
+        finally {
+            // The client data was consumed; this temporary image was not registered.
+            BufferUtils.destroyDirectBuffer(image.getData(0));
         }
     }
 
@@ -764,7 +804,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                 || residency.ready(key(pendingHierarchy.getRoot(), revision + 1)) == null) return;
         GpuResourceBundle replacement;
         try {
-            replacement = createGpuResources(pendingHierarchy, atlas);
+            replacement = createGpuResources(pendingHierarchy, atlas, gradientAtlas);
         } catch (java.io.IOException error) {
             throw new IllegalStateException("Could not prepare GPU resources for edited hierarchy", error);
         }
@@ -844,12 +884,18 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         require(gpuRecreationDraining && !gpuFeedbackPending && residency.stats().frames == 0
                 && retiredGpuResources.isEmpty(), "all old GPU and page users drained before atlas replacement");
         TextureArray replacementAtlas = createAtlas();
+        TextureArray replacementGradients = sourceGradientMode ? createGradientAtlas() : null;
         GpuResourceBundle replacement;
         try {
-            replacement = createGpuResources(hierarchy, replacementAtlas);
+            replacement = createGpuResources(hierarchy, replacementAtlas, replacementGradients);
         } catch (java.io.IOException | RuntimeException error) {
             for (ByteBuffer data : replacementAtlas.getImage().getData()) {
                 BufferUtils.destroyDirectBuffer(data);
+            }
+            if (replacementGradients != null) {
+                for (ByteBuffer data : replacementGradients.getImage().getData()) {
+                    BufferUtils.destroyDirectBuffer(data);
+                }
             }
             throw new IllegalStateException("Could not prepare replacement atlas GPU resources", error);
         }
@@ -860,9 +906,11 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         jobs.clear();
         requestedAt.clear();
         discardAtlas(atlas);
+        if (gradientAtlas != null) discardAtlas(gradientAtlas);
         residency.reset();
         obsolete.clear();
         atlas = replacementAtlas;
+        gradientAtlas = replacementGradients;
         installRoot(hierarchy, revision);
         rebuildScene();
         activateGpuResources(replacement);
@@ -1018,11 +1066,11 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                 gpuPageBindings.getBuffer(), atlas, captureTarget);
         comparedChannels += result.getComparedChannels();
         maximumGpuError = Math.max(maximumGpuError, result.getMaximumAbsoluteError());
-        if (frame == 350 || frame == 530) {
+        if (frame == 350 || frame == 530 || sourceGradientMode && (frame == 120 || frame == 215)) {
             try (HeightfieldMorphRenderProbe spatial = new HeightfieldMorphRenderProbe(
                     assetManager, renderManager, renderer, hierarchy, gpuTransitions)) {
                 spatial.verifyNodePages(cam, ordered, gpuPageBindings, atlas,
-                        "stream-depth-f" + frame, output, captureTarget);
+                        gradientAtlas, "stream-depth-f" + frame, output, captureTarget);
             }
         }
     }
@@ -1048,8 +1096,8 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         peakRetired = Math.max(peakRetired, stats.retiredSlots);
         peakFrames = Math.max(peakFrames, stats.frames);
         if (stats.readySlots + stats.retiredSlots == CAPACITY) fullAtlasFrames++;
-        require(stats.requests <= MAX_JOBS && stats.queuedBytes <= MAX_JOBS * PAGE_BYTES
-                && stats.preparedBytes <= 6L * PAGE_BYTES && stats.retiredSlots <= 12
+        require(stats.requests <= MAX_JOBS && stats.queuedBytes <= MAX_JOBS * pageBytes
+                && stats.preparedBytes <= 6L * pageBytes && stats.retiredSlots <= 12
                 && stats.readySlots + stats.retiredSlots <= CAPACITY && stats.frames <= 12
                 && jobs.size() <= MAX_JOBS, "independent residency/preparation/frame budgets hold");
         require(residency.ready(key(hierarchy.getRoot(), revision)) != null, "root fallback remains ready");
@@ -1065,6 +1113,15 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             for (int z = 0; z <= PATCH_CELLS; z++) for (int x = 0; x <= PATCH_CELLS; x++) {
                 require(payload.getHeight(x, z) == page.getHeight(node.getOriginX() + x * node.getStride(),
                         node.getOriginZ() + z * node.getStride()), "node payload retains exact canonical samples");
+                if (sourceGradientMode) {
+                    int gx = node.getOriginX() + x * node.getStride();
+                    int gz = node.getOriginZ() + z * node.getStride();
+                    require(payload.getSourceGradientX(x, z) == page.getHeight(gx - 1, gz) * .5f
+                            - page.getHeight(gx + 1, gz) * .5f
+                            && payload.getSourceGradientZ(x, z) == page.getHeight(gx, gz - 1) * .5f
+                            - page.getHeight(gx, gz + 1) * .5f,
+                            "height and gradient payloads share the canonical revision");
+                }
             }
             for (int z = node.getOriginZ(); z < node.getOriginZ() + node.getSpan(); z++) {
                 for (int x = node.getOriginX(); x < node.getOriginX() + node.getSpan(); x++) coverage[z * CELLS + x]++;
@@ -1127,6 +1184,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                 + " peakPreparedBytes=" + peakPreparedBytes + " peakReady=" + peakReady
                 + " peakRetired=" + peakRetired + " peakFrames=" + peakFrames
                 + " sourceRevision=" + revision + " edits=" + edits + " recreations=" + recreations
+                + " sourceGradients=" + sourceGradientMode + " atlasPayloadBytes=" + (CAPACITY * pageBytes)
                 + " publicationFrameLatencyP50=" + p50 + " p95=" + p95 + " max=" + maximum
                 + " gpuChannels=" + comparedChannels + " maxGpuError=" + maximumGpuError
                 + " waitingFrames=" + waitingFrames + " fullAtlasFrames=" + fullAtlasFrames
@@ -1301,6 +1359,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             if (gpuSelectionMode && !drainGpuSelectionResources()) return;
             // Discard the physical storage before invalidating its leases.
             if (atlas != null) discardAtlas();
+            if (gradientAtlas != null) discardAtlas(gradientAtlas);
             if (residency != null) residency.close();
             frameLease = null;
             if (gpuProbe != null) gpuProbe.close();

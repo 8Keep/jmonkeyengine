@@ -74,6 +74,44 @@ class HeightfieldPageTest {
         assertThrows(IndexOutOfBoundsException.class, () -> page.getHeight(6, 0));
     }
 
+    @Test void optionalSourceGradientsAreInterleavedValidatedAndUploadedAsRg32f() {
+        int cells = 4, side = cells + 3;
+        float[] heights = ramp(cells);
+        float[] gradients = new float[heights.length * 2];
+        int center = ((1 + 1) * side + 1 + 1) * 2;
+        gradients[center] = (heights[(1 + 1) * side + 0 + 1] * .5f)
+                - (heights[(1 + 1) * side + 2 + 1] * .5f);
+        gradients[center + 1] = (heights[(0 + 1) * side + 1 + 1] * .5f)
+                - (heights[(2 + 1) * side + 1 + 1] * .5f);
+        gradients[0] = 9;
+        HeightfieldPage page = new HeightfieldPage(cells, 2, heights, gradients);
+        gradients[0] = -100;
+        assertTrue(page.hasSourceGradients());
+        assertEquals(-2, page.getSourceGradientX(1, 1));
+        assertEquals(-3, page.getSourceGradientZ(1, 1));
+        assertEquals(9, page.getSourceGradientX(-1, -1));
+        assertEquals((long) heights.length * 3 * Float.BYTES, page.getPayloadBytes());
+
+        Image image = page.createGradientImage();
+        assertEquals(Image.Format.RG32F, image.getFormat());
+        assertEquals(side, image.getWidth());
+        assertEquals(side, image.getHeight());
+        assertTrue(image.getData(0).isDirect());
+        assertEquals(9, image.getData(0).order(ByteOrder.nativeOrder()).getFloat(0));
+        image.getData(0).putFloat(0, -200);
+        assertEquals(9, page.getSourceGradientX(-1, -1));
+
+        HeightfieldPage withoutGradients = new HeightfieldPage(cells, 2, heights);
+        assertTrue(!withoutGradients.hasSourceGradients());
+        assertEquals((long) heights.length * Float.BYTES, withoutGradients.getPayloadBytes());
+        assertThrows(IllegalStateException.class, withoutGradients::createGradientImage);
+        assertThrows(IllegalArgumentException.class,
+                () -> new HeightfieldPage(cells, 2, heights, new float[heights.length]));
+        float[] invalid = new float[heights.length * 2];
+        invalid[invalid.length - 1] = Float.NaN;
+        assertThrows(IllegalArgumentException.class, () -> new HeightfieldPage(cells, 2, heights, invalid));
+    }
+
     @Test void boundsCoverDisplacedInteriorAndIgnoreHaloOutliers() {
         float[] values = ramp(4);
         values[0] = 10000;

@@ -2,6 +2,10 @@
 precision highp sampler2DArray;
 #endif
 
+#if defined(HEIGHTFIELD_SOURCE_GRADIENTS) && (!defined(HEIGHTFIELD_NODE_PAGES) || !defined(HEIGHTFIELD_INSTANCES))
+#error HEIGHTFIELD_SOURCE_GRADIENTS requires HEIGHTFIELD_NODE_PAGES and HEIGHTFIELD_INSTANCES
+#endif
+
 // Instance records use the same page uniforms and LOD reconstruction as the
 // ordinary path. The caller supplies the matching page/patch uniforms, record
 // range, and indirect instance count for each batch.
@@ -24,6 +28,9 @@ layout(std140) uniform m_HeightfieldPageBindings {
 uniform sampler2DArray m_HeightPages;
 uniform int m_HeightLayer;
 uniform float m_SampleSpacing;
+#ifdef HEIGHTFIELD_SOURCE_GRADIENTS
+uniform sampler2DArray m_HeightGradientPages;
+#endif
 
 #ifdef HEIGHTFIELD_LOD
 // PageLatticeOrigin is integer-valued and exactly representable in a float.
@@ -95,12 +102,20 @@ vec3 Heightfield_lodGradient(ivec2 globalGrid, bool parent) {
         layer = heightfieldPageLayers[node].y;
     }
     ivec2 grid = (globalGrid - Heightfield_pageOrigin() - origin) / stride;
+#ifdef HEIGHTFIELD_SOURCE_GRADIENTS
+    // RG stores canonical half-height differences, without node-stride division.
+    ivec2 gradientTexel = clamp(grid, ivec2(-1), ivec2(m_PatchGridCells + 1)) + ivec2(1);
+    vec2 canonicalGradient = texelFetch(m_HeightGradientPages,
+            ivec3(gradientTexel, layer), 0).rg;
+    return vec3(canonicalGradient.x, m_SampleSpacing, canonicalGradient.y);
+#else
     float left = Heightfield_readNodeHeight(grid + ivec2(-1, 0), layer);
     float right = Heightfield_readNodeHeight(grid + ivec2(1, 0), layer);
     float back = Heightfield_readNodeHeight(grid + ivec2(0, -1), layer);
     float front = Heightfield_readNodeHeight(grid + ivec2(0, 1), layer);
     return vec3((left * 0.5 - right * 0.5) / float(stride), m_SampleSpacing,
                 (back * 0.5 - front * 0.5) / float(stride));
+#endif
 #else
     float left = Heightfield_readGlobalHeight(globalGrid + ivec2(-1, 0));
     float right = Heightfield_readGlobalHeight(globalGrid + ivec2(1, 0));

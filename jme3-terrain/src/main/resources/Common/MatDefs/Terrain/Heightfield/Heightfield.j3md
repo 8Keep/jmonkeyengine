@@ -19,6 +19,10 @@ MaterialDef Heightfield {
         Boolean UseHeightfieldInstanceMorphs : false
         // Physical node-local halo pages; requires instance records and live bindings.
         Boolean UseHeightfieldNodePages : false
+        // Optional canonical height-slope samples aligned with node-page layers.
+        // Supported only with UseHeightfieldNodePages; RG stores dx,dz.
+        Boolean UseHeightfieldSourceGradients : false
+        TextureArray HeightGradientPages -LINEAR
         UniformBufferObject HeightfieldPageBindings
         UniformBufferObject PatchRecords
         // Offset in vec4 record units (the header is outside this array).
@@ -118,6 +122,7 @@ MaterialDef Heightfield {
             HEIGHTFIELD_INSTANCES : UseHeightfieldInstances
             HEIGHTFIELD_INSTANCE_MORPHS : UseHeightfieldInstanceMorphs
             HEIGHTFIELD_NODE_PAGES : UseHeightfieldNodePages
+            HEIGHTFIELD_SOURCE_GRADIENTS : UseHeightfieldSourceGradients
             HEIGHTFIELD_PATCH_RECORD_VECS : PatchRecordVectors
             HEIGHTFIELD_SURFACE : UseHeightfieldSurface
             SURFACE_DIRECT_REFERENCE : SurfaceDirectReference

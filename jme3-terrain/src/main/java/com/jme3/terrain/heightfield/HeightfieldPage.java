@@ -45,15 +45,35 @@ import java.nio.ByteOrder;
  * hence {@code (cells + 3)^2} row-major samples. Heights and spacing share the
  * caller's local units. Adjacent pages must sample the same source lattice.
  * This render payload does not own generation, edits, collision or persistence.
+ * Optional source gradients use the same row-major lattice and store interleaved
+ * X/Z values. At each sample the producer supplies the canonical half-height
+ * differences {@code (left * 0.5 - right * 0.5, back * 0.5 - front * 0.5)}
+ * from adjacent source samples. These values are not divided by spacing,
+ * normalized, or derived from a coarser patch stride. The producer supplies the
+ * canonical source spacing to the material; {@link #getSampleSpacing()} describes
+ * this page's grid and can be coarser than that source. The producer must compute
+ * halo gradients from the same source lattice, including samples beyond the
+ * height halo where needed, so adjacent pages agree at shared coordinates.
  */
 public final class HeightfieldPage {
     private final int cells;
     private final float spacing;
     private final float[] samples;
+    private final float[] sourceGradients;
     private final float minimum;
     private final float maximum;
 
     public HeightfieldPage(int cells, float spacing, float[] samples) {
+        this(cells, spacing, samples, null);
+    }
+
+    /**
+     * Creates a page with optional interleaved source gradients. When present,
+     * {@code sourceGradients} contains one {@code (x, z)} pair per height
+     * sample, including every halo sample. The producer contract is described
+     * on this class; values are copied and must all be finite.
+     */
+    public HeightfieldPage(int cells, float spacing, float[] samples, float[] sourceGradients) {
         if (cells < 2 || cells > 256) {
             throw new IllegalArgumentException("cells must be between 2 and 256");
         }
@@ -67,6 +87,17 @@ public final class HeightfieldPage {
         this.cells = cells;
         this.spacing = spacing;
         this.samples = samples.clone();
+        if (sourceGradients != null && sourceGradients.length != samples.length * 2) {
+            throw new IllegalArgumentException("gradient payload must contain an interleaved X/Z pair per height sample");
+        }
+        this.sourceGradients = sourceGradients == null ? null : sourceGradients.clone();
+        if (this.sourceGradients != null) {
+            for (float value : this.sourceGradients) {
+                if (!Float.isFinite(value)) {
+                    throw new IllegalArgumentException("source gradients must be finite, including halos");
+                }
+            }
+        }
         float low = Float.POSITIVE_INFINITY;
         float high = Float.NEGATIVE_INFINITY;
         for (int z = -1; z <= cells + 1; z++) {
@@ -102,6 +133,28 @@ public final class HeightfieldPage {
         return spacing;
     }
 
+    public boolean hasSourceGradients() {
+        return sourceGradients != null;
+    }
+
+    public float getSourceGradientX(int x, int z) {
+        return sourceGradient(x, z, 0);
+    }
+
+    public float getSourceGradientZ(int x, int z) {
+        return sourceGradient(x, z, 1);
+    }
+
+    private float sourceGradient(int x, int z, int component) {
+        if (x < -1 || x > cells + 1 || z < -1 || z > cells + 1) {
+            throw new IndexOutOfBoundsException("gradient lies outside the page and its halo");
+        }
+        if (sourceGradients == null) {
+            throw new IllegalStateException("this page has no source gradients");
+        }
+        return sourceGradients[((z + 1) * getTextureSize() + x + 1) * 2 + component];
+    }
+
     public float getHeight(int x, int z) {
         if (x < -1 || x > cells + 1 || z < -1 || z > cells + 1) {
             throw new IndexOutOfBoundsException("sample lies outside the page and its halo");
@@ -119,6 +172,27 @@ public final class HeightfieldPage {
         data.flip();
         return new Image(Image.Format.Luminance32F, getTextureSize(), getTextureSize(),
                 data, ColorSpace.Linear);
+    }
+
+    /** Returns a new complete RG32F X/Z gradient image with independent direct storage. */
+    public Image createGradientImage() {
+        if (sourceGradients == null) {
+            throw new IllegalStateException("this page has no source gradients");
+        }
+        ByteBuffer data = BufferUtils.createByteBuffer(sourceGradients.length * Float.BYTES)
+                .order(ByteOrder.nativeOrder());
+        for (float value : sourceGradients) {
+            data.putFloat(value);
+        }
+        data.flip();
+        return new Image(Image.Format.RG32F, getTextureSize(), getTextureSize(),
+                data, ColorSpace.Linear);
+    }
+
+    /** Total bytes in the height image and optional gradient image payload. */
+    public long getPayloadBytes() {
+        return (long) samples.length * Float.BYTES
+                + (sourceGradients == null ? 0L : (long) sourceGradients.length * Float.BYTES);
     }
 
     /** Conservative bounds for vertex displacement and its triangle interiors. */
