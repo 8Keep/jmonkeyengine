@@ -23,9 +23,9 @@ void main() {
 
 #ifdef HEIGHTFIELD_LOD
     ivec2 patchVertex = ivec2(floor(inPosition.xz + vec2(0.5)));
-    localPosition = Heightfield_lodPosition(patchVertex, grid);
-    // Shading keeps the fine source-lattice central difference as an explicit
-    // approximation while geometry moves between fine and parent surfaces.
+    ivec2 parentGrid;
+    float morphAlpha;
+    localPosition = Heightfield_lodPosition(patchVertex, grid, parentGrid, morphAlpha);
     leftHeight = Heightfield_readGlobalHeight(grid + ivec2(-1, 0));
     rightHeight = Heightfield_readGlobalHeight(grid + ivec2(1, 0));
     backHeight = Heightfield_readGlobalHeight(grid + ivec2(0, -1));
@@ -46,6 +46,21 @@ void main() {
     vec3 gradientNormal = vec3(leftHeight * 0.5 - rightHeight * 0.5,
                               m_SampleSpacing,
                               backHeight * 0.5 - frontHeight * 0.5);
+#ifdef HEIGHTFIELD_LOD
+    // Use the same parent coordinate and weight as displacement. Fully collapsed
+    // child vertices then share the stable parent's source-gradient shading.
+    // This retains the one-sample halo; it is not a coarse-stride slope filter.
+    if (morphAlpha > 0.0 && any(notEqual(grid, parentGrid))) {
+        float parentLeft = Heightfield_readGlobalHeight(parentGrid + ivec2(-1, 0));
+        float parentRight = Heightfield_readGlobalHeight(parentGrid + ivec2(1, 0));
+        float parentBack = Heightfield_readGlobalHeight(parentGrid + ivec2(0, -1));
+        float parentFront = Heightfield_readGlobalHeight(parentGrid + ivec2(0, 1));
+        gradientNormal.x = Heightfield_mixFinite(gradientNormal.x,
+                parentLeft * 0.5 - parentRight * 0.5, morphAlpha);
+        gradientNormal.z = Heightfield_mixFinite(gradientNormal.z,
+                parentBack * 0.5 - parentFront * 0.5, morphAlpha);
+    }
+#endif
     float largest = max(max(abs(gradientNormal.x), abs(gradientNormal.z)),
                         gradientNormal.y);
     vec3 localNormal = normalize(gradientNormal / largest);

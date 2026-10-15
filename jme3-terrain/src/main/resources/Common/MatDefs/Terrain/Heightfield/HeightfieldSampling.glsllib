@@ -128,7 +128,8 @@ float Heightfield_vertexMorph(ivec2 patchVertex) {
 
 vec3 Heightfield_lodPosition(ivec2 patchVertex, ivec2 patchOrigin, int stride,
                             int gridCells, float interiorMorph, vec4 edgeMorph,
-                            out ivec2 globalGrid) {
+                            out ivec2 globalGrid, out ivec2 safeParentGlobal,
+                            out float alpha) {
     ivec2 pageOrigin = Heightfield_pageOrigin();
     globalGrid = pageOrigin + patchOrigin + patchVertex * stride;
 
@@ -137,9 +138,9 @@ vec3 Heightfield_lodPosition(ivec2 patchVertex, ivec2 patchOrigin, int stride,
     // A correctly aligned page + patch origin keeps the parent sample inside
     // the page. Clamp only as a safety guard for invalid metadata, and use the
     // same clamped lattice coordinate for position and height.
-    ivec2 safeParentGlobal = clamp(parentGlobal, pageOrigin,
+    safeParentGlobal = clamp(parentGlobal, pageOrigin,
                                    pageOrigin + ivec2(m_PageCells));
-    float alpha = Heightfield_vertexMorph(patchVertex, gridCells, interiorMorph, edgeMorph);
+    alpha = Heightfield_vertexMorph(patchVertex, gridCells, interiorMorph, edgeMorph);
 
     vec2 localFine = vec2(globalGrid - pageOrigin) * m_SampleSpacing;
     vec2 localParent = vec2(safeParentGlobal - pageOrigin) * m_SampleSpacing;
@@ -150,7 +151,17 @@ vec3 Heightfield_lodPosition(ivec2 patchVertex, ivec2 patchOrigin, int stride,
                 Heightfield_mixFinite(localFine.y, localParent.y, alpha));
 }
 
-vec3 Heightfield_lodPosition(ivec2 patchVertex, out ivec2 globalGrid) {
+vec3 Heightfield_lodPosition(ivec2 patchVertex, ivec2 patchOrigin, int stride,
+                            int gridCells, float interiorMorph, vec4 edgeMorph,
+                            out ivec2 globalGrid) {
+    ivec2 parentGrid;
+    float alpha;
+    return Heightfield_lodPosition(patchVertex, patchOrigin, stride, gridCells,
+            interiorMorph, edgeMorph, globalGrid, parentGrid, alpha);
+}
+
+vec3 Heightfield_lodPosition(ivec2 patchVertex, out ivec2 globalGrid,
+                            out ivec2 parentGrid, out float alpha) {
 #ifdef HEIGHTFIELD_INSTANCES
 #ifdef HEIGHTFIELD_INSTANCE_MORPHS
     int firstRecord = m_PatchRecordBase + 4 * gl_InstanceID;
@@ -161,7 +172,7 @@ vec3 Heightfield_lodPosition(ivec2 patchVertex, out ivec2 globalGrid) {
     vec4 northMorph = heightfieldRecords[firstRecord + 3];
     vec4 edgeMorph = vec4(morphWeights.y, morphWeights.z, morphWeights.w, northMorph.x);
     return Heightfield_lodPosition(patchVertex, ivec2(patchData.y, patchData.z), int(patchData.w),
-            m_PatchGridCells, morphWeights.x, edgeMorph, globalGrid);
+            m_PatchGridCells, morphWeights.x, edgeMorph, globalGrid, parentGrid, alpha);
 #else
     int firstRecord = m_PatchRecordBase + 2 * gl_InstanceID;
     // Pair layout: id/originX/originZ/stride, then span/edgeBits/error/revision.
@@ -174,12 +185,19 @@ vec3 Heightfield_lodPosition(ivec2 patchVertex, out ivec2 globalGrid) {
             (edgeBits & 4) != 0 ? 1.0 : 0.0,
             (edgeBits & 8) != 0 ? 1.0 : 0.0);
     return Heightfield_lodPosition(patchVertex, ivec2(patchData.y, patchData.z), int(patchData.w),
-            m_PatchGridCells, 0.0, edgeMorph, globalGrid);
+            m_PatchGridCells, 0.0, edgeMorph, globalGrid, parentGrid, alpha);
 #endif
 #else
     return Heightfield_lodPosition(patchVertex, ivec2(m_PatchLatticeOrigin), m_SampleStride,
             m_PatchGridCells, m_InteriorMorph,
-            vec4(m_EdgeMorphWest, m_EdgeMorphEast, m_EdgeMorphSouth, m_EdgeMorphNorth), globalGrid);
+            vec4(m_EdgeMorphWest, m_EdgeMorphEast, m_EdgeMorphSouth, m_EdgeMorphNorth),
+            globalGrid, parentGrid, alpha);
 #endif
+}
+
+vec3 Heightfield_lodPosition(ivec2 patchVertex, out ivec2 globalGrid) {
+    ivec2 parentGrid;
+    float alpha;
+    return Heightfield_lodPosition(patchVertex, globalGrid, parentGrid, alpha);
 }
 #endif
