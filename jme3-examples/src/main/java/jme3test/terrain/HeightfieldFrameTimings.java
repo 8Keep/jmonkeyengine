@@ -216,7 +216,7 @@ final class HeightfieldFrameTimings implements SceneProcessor {
             writer.write("Finite public terrain demo frame timings\n");
             writer.write("CPU scope: wall time from the caller's beginFrame before scene selection through this viewport's postFrame callback after its scene processors; includes CPU selection and intervening frame work.\n");
             writer.write("GPU scope: renderer timer query opened at beginFrame and closed at this viewport's postFrame; measures GPU work between those query commands, including shadow/main/sky/post work submitted in that interval.\n");
-            writer.write("GPU limits: query timing does not measure CPU selection cost, window presentation, display synchronization, or total user-visible frame latency; GUI work is outside the intended scope, though any GPU commands submitted between the query commands may contribute. This small static page is not a regional performance benchmark.\n");
+            writer.write("GPU limits: elapsed query intervals can include submission-induced idle gaps; they do not isolate GPU busy time and must not be added to CPU intervals. Window presentation, display synchronization and GUI are outside the intended scope; this small static page is not a regional performance benchmark.\n");
             writer.write("Warmup frames discarded: " + warmupDiscarded + " (configured " + warmupFrames + ")\n");
             writer.write("Recorded frames: " + samples.size() + "\n");
             writer.write("Frames beyond bounded capacity: " + overflowFrames + "\n");
