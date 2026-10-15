@@ -91,6 +91,9 @@ import javax.imageio.ImageIO;
  * draws; it also works in interactive mode. --smooth-lod enables GPU sibling
  * morphing, with each transaction taking about .2 seconds during interaction.
  * Finite captures use a fixed .25 step and allow the cover to settle.
+ * --surface-cache adds resident, height-aware material pages with filtered mips.
+ * E replaces matching height and surface resources together; construction is
+ * synchronous and is not a streamed material-production budget.
  */
 public final class TestGpuHeightfield extends SimpleApplication {
     private static final int CELLS = 256;
@@ -112,6 +115,7 @@ public final class TestGpuHeightfield extends SimpleApplication {
     private final boolean editTour;
     private final boolean cpuSelection;
     private final boolean smoothLod;
+    private final boolean surfaceCache;
     private float transitionStep;
     private final CountDownLatch capturesFinished = new CountDownLatch(1);
     private volatile Throwable failure;
@@ -138,7 +142,8 @@ public final class TestGpuHeightfield extends SimpleApplication {
     private int editTourSettledFrames;
 
     private TestGpuHeightfield(boolean finiteRun, Path output, boolean shadowsEnabled,
-            boolean profileRun, boolean staticSelection, boolean editTour, boolean cpuSelection, boolean smoothLod) {
+            boolean profileRun, boolean staticSelection, boolean editTour, boolean cpuSelection,
+            boolean smoothLod, boolean surfaceCache) {
         this.finiteRun = finiteRun;
         this.output = output;
         this.shadowsEnabled = shadowsEnabled;
@@ -147,10 +152,12 @@ public final class TestGpuHeightfield extends SimpleApplication {
         this.editTour = editTour;
         this.cpuSelection = cpuSelection;
         this.smoothLod = smoothLod;
+        this.surfaceCache = surfaceCache;
     }
 
     public static void main(String[] args) throws Exception {
         boolean shadows = true, profile = false, staticSelection = false, editTour = false, cpu = false, smooth = false;
+        boolean surfaceCache = false;
         String rendererName = AppSettings.ANGLE_GLES3;
         Path output = null;
         int positional = 0;
@@ -161,12 +168,13 @@ public final class TestGpuHeightfield extends SimpleApplication {
             else if ("--edit-tour".equals(arg)) editTour = true;
             else if ("--cpu-selection".equals(arg)) cpu = true;
             else if ("--smooth-lod".equals(arg)) smooth = true;
+            else if ("--surface-cache".equals(arg)) surfaceCache = true;
             else if (!arg.startsWith("--") && positional < 2) {
                 if (positional == 0) rendererName = arg;
                 else output = Paths.get(arg);
                 positional++;
             }
-            else throw new IllegalArgumentException("Usage: TestGpuHeightfield [<renderer> [<output-directory>]] [--cpu-selection | --smooth-lod] [--no-shadows] [--profile [--static-selection] | --edit-tour]");
+            else throw new IllegalArgumentException("Usage: TestGpuHeightfield [<renderer> [<output-directory>]] [--cpu-selection | --smooth-lod] [--surface-cache] [--no-shadows] [--profile [--static-selection] | --edit-tour]");
         }
         if (staticSelection && !profile) throw new IllegalArgumentException("--static-selection requires --profile");
         if (smooth && (cpu || staticSelection)) {
@@ -178,7 +186,7 @@ public final class TestGpuHeightfield extends SimpleApplication {
             throw new IllegalArgumentException("--edit-tour requires an output directory and cannot be combined with --profile or --static-selection");
         }
         TestGpuHeightfield app = new TestGpuHeightfield(finite, output,
-                shadows, profile, staticSelection, editTour, cpu, smooth);
+                shadows, profile, staticSelection, editTour, cpu, smooth, surfaceCache);
         AppSettings settings = new AppSettings(true);
         settings.setRenderer(rendererName);
         settings.setResolution(WIDTH, HEIGHT);
@@ -226,7 +234,8 @@ public final class TestGpuHeightfield extends SimpleApplication {
             }
             HeightfieldGrid.requireSupported(renderer);
             System.out.println("HEIGHTFIELD_SELECTION_MODE cpu=" + cpuSelection
-                    + " smooth=" + smoothLod + " computeCap=" + renderer.getCaps().contains(Caps.ComputeShader)
+                    + " smooth=" + smoothLod + " surfaceCache=" + surfaceCache
+                    + " computeCap=" + renderer.getCaps().contains(Caps.ComputeShader)
                     + " indirectCap=" + renderer.getCaps().contains(Caps.IndexedIndirectDraw));
             setDisplayFps(false);
             setDisplayStatView(false);
@@ -237,6 +246,7 @@ public final class TestGpuHeightfield extends SimpleApplication {
             viewPort.setBackgroundColor(new ColorRGBA(.42f, .59f, .76f, 1));
 
             activeRevision = createRevision(false, 1);
+            if (activeRevision.surfaces != null) activeRevision.surfaces.upload();
             rootNode.attachChild(activeRevision.geometry);
 
             DirectionalLight sun = new DirectionalLight();
@@ -323,6 +333,7 @@ public final class TestGpuHeightfield extends SimpleApplication {
         HeightfieldCpuPatchBatch nextCpu = null;
         HeightfieldGpuTransitions nextTransitions = null;
         TextureArray nextHeights = null;
+        ScenicSurfacePages nextSurfaces = null;
         try {
             HeightfieldPage page = createPage(edited);
             HeightfieldHierarchy hierarchy = new HeightfieldHierarchy(page, PATCH_CELLS, 0);
@@ -358,13 +369,22 @@ public final class TestGpuHeightfield extends SimpleApplication {
             material.setFloat("SnowFade", 4f);
             material.setColor("GrassColor", new ColorRGBA(.16f, .24f, .085f, 1));
             material.setColor("RockColor", new ColorRGBA(.28f, .255f, .22f, 1));
+            if (surfaceCache) {
+                nextSurfaces = new ScenicSurfacePages(renderer, page, label);
+                nextSurfaces.bind(material);
+                System.out.printf(Locale.ROOT,
+                        "HEIGHTFIELD_SCENIC_SURFACE revision=%d edited=%s payloadBytes=%d buildMs=%.3f%n",
+                        label, edited, nextSurfaces.getPayloadBytes(), nextSurfaces.getBuildNanos() / 1_000_000.0);
+            }
             geometry.setMaterial(material);
-            return new TerrainRevision(edited, label, page, nextSelection, nextCpu, nextTransitions, nextHeights, geometry, material);
+            return new TerrainRevision(edited, label, page, nextSelection, nextCpu, nextTransitions,
+                    nextHeights, nextSurfaces, geometry, material);
         } catch (Throwable error) {
             if (nextTransitions != null) nextTransitions.close();
             if (nextSelection != null) nextSelection.close();
             if (nextCpu != null) nextCpu.close();
             if (nextHeights != null) renderer.deleteImage(nextHeights.getImage());
+            if (nextSurfaces != null) nextSurfaces.close();
             if (error instanceof RuntimeException) throw (RuntimeException) error;
             if (error instanceof Error) throw (Error) error;
             throw new IllegalStateException("Could not create terrain revision " + label, error);
@@ -404,7 +424,8 @@ public final class TestGpuHeightfield extends SimpleApplication {
         text.setSize(16f);
         text.setText((cpuSelection ? "CPU" : smoothLod ? "GPU SMOOTH" : "GPU") + " HEIGHTFIELD  |  1 overview  2 valley  3 close  |  E toggle valley hill  |  H sun shadows\n"
                 + "WASD/QZ move  |  hold left mouse and drag to look\n"
-                + "One resident 128 m page; E rebuilds a 10 m hill revision. No streaming.");
+                + "One resident 128 m page; E rebuilds a 10 m hill revision. "
+                + (surfaceCache ? "Cached surface detail; synchronous edits." : "No streaming."));
         text.setLocalTranslation(16, cam.getHeight() - 16, 0);
         guiNode.attachChild(text);
     }
@@ -556,6 +577,7 @@ public final class TestGpuHeightfield extends SimpleApplication {
             candidate.dispatch(cam, transitionStep);
             // Force the new one-layer array upload while the old revision is still active.
             renderer.setTexture(0, candidate.heightPages);
+            if (candidate.surfaces != null) candidate.surfaces.upload();
             retirementFence = renderer.createFence();
             visibility.addReceiver(candidate.material);
 
@@ -617,6 +639,7 @@ public final class TestGpuHeightfield extends SimpleApplication {
         private final HeightfieldCpuPatchBatch cpuBatch;
         private final HeightfieldGpuTransitions transitions;
         private final TextureArray heightPages;
+        private final ScenicSurfacePages surfaces;
         private final Geometry geometry;
         private final Material material;
         private boolean released;
@@ -624,7 +647,7 @@ public final class TestGpuHeightfield extends SimpleApplication {
         private TerrainRevision(boolean edited, int label, HeightfieldPage page,
                 HeightfieldGpuSelection selection, HeightfieldCpuPatchBatch cpuBatch,
                 HeightfieldGpuTransitions transitions, TextureArray heightPages,
-                Geometry geometry, Material material) {
+                ScenicSurfacePages surfaces, Geometry geometry, Material material) {
             this.edited = edited;
             this.label = label;
             this.page = page;
@@ -632,6 +655,7 @@ public final class TestGpuHeightfield extends SimpleApplication {
             this.cpuBatch = cpuBatch;
             this.transitions = transitions;
             this.heightPages = heightPages;
+            this.surfaces = surfaces;
             this.geometry = geometry;
             this.material = material;
         }
@@ -648,6 +672,7 @@ public final class TestGpuHeightfield extends SimpleApplication {
             if (selection != null) selection.close();
             if (cpuBatch != null) cpuBatch.close();
             renderer.deleteImage(heightPages.getImage());
+            if (surfaces != null) surfaces.close();
             for (VertexBuffer buffer : geometry.getMesh().getBufferList().getArray()) {
                 renderer.deleteBuffer(buffer);
             }
@@ -681,6 +706,13 @@ public final class TestGpuHeightfield extends SimpleApplication {
 
     @Override
     public void destroy() {
+        if (surfaceCache && (activeRevision != null || !retiredRevisions.isEmpty())
+                && !drainSurfaceUsers()) {
+            // Preserve uncertain resources until context teardown rather than
+            // explicitly releasing the surface cache's owned CPU storage early.
+            super.destroy();
+            return;
+        }
         if (activeRevision != null) {
             if (visibility != null) visibility.removeReceiver(activeRevision.material);
             activeRevision.release(renderer);
@@ -697,5 +729,25 @@ public final class TestGpuHeightfield extends SimpleApplication {
             captureTarget = null;
         }
         super.destroy();
+    }
+
+    private boolean drainSurfaceUsers() {
+        GLFence lastUse = null;
+        try {
+            lastUse = renderer.createFence();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            while (System.nanoTime() < deadline) {
+                if (renderer.isFenceSignaled(lastUse)) {
+                    renderer.deleteFence(lastUse);
+                    System.out.println("HEIGHTFIELD_SCENIC_SURFACE_DRAIN complete=true");
+                    return true;
+                }
+                Thread.yield();
+            }
+            fail(new IllegalStateException("Surface users did not drain; explicit release skipped"));
+        } catch (RuntimeException error) {
+            fail(error);
+        }
+        return false;
     }
 }
