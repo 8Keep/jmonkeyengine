@@ -165,6 +165,9 @@ public final class HeightfieldGpuSelection implements AutoCloseable {
         }
 
         packInput(camera, target, revisionLabel, maxLeaves, isReady);
+        // A previous frame may still read these records/commands. Order the
+        // next storage writes after those GPU consumers, without CPU readback.
+        renderer.memoryBarrier(EnumSet.of(MemoryBarrier.ShaderStorage));
         selectShader.getUniform("m_MaxLeaves").setValue(VarType.Int, maxLeaves);
         selectShader.getUniform("m_TargetPixels").setValue(VarType.Float, target);
         renderer.setFixedShaderStorageBufferObject(0, input);
