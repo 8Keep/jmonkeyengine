@@ -128,11 +128,9 @@ public abstract class ShaderGenerator {
      * @return the code of the generated vertex shader
      */
     protected String buildShader(List<ShaderNode> shaderNodes, ShaderGenerationInfo info, ShaderType type) {
-        if (type == ShaderType.TessellationControl ||
-            type == ShaderType.TessellationEvaluation ||
-            type == ShaderType.Geometry) {
-            // TODO: Those are not supported.
-            // Too much code assumes that type is either Vertex or Fragment
+        if (type != ShaderType.Vertex && type != ShaderType.Fragment) {
+            // Node generation only supports graphics vertex/fragment stages.
+            // Compute programs are dispatched independently of material draws.
             return null;
         }
 
