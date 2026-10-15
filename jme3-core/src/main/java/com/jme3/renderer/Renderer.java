@@ -241,6 +241,26 @@ public interface Renderer {
     }
 
     /**
+     * Reads a range from an already-uploaded GPU buffer into a direct writable
+     * byte buffer. This operation does not upload the source or change the
+     * contents of its CPU mirror. Checking the mirrored size uses
+     * {@link BufferObject#getData()}, which rewinds that buffer's cursor. For
+     * shader-produced data, issue {@link MemoryBarrier#BufferUpdate} after the
+     * write and wait for a completion fence before reading a snapshot that must
+     * not be overwritten; the read itself may block if the GPU is busy.
+     *
+     * @param source uploaded, clean shader-storage buffer object
+     * @param byteOffset byte offset within the buffer data store
+     * @param destination direct writable destination; its position and limit are preserved
+     * @throws UnsupportedOperationException if shader-storage readback is unsupported
+     * @throws IllegalArgumentException if the source, range, or destination is invalid
+     * @throws IllegalStateException if the source is not currently uploaded and clean
+     */
+    default void readBufferObject(BufferObject source, long byteOffset, ByteBuffer destination) {
+        throw new UnsupportedOperationException("GPU buffer readback is not supported");
+    }
+
+    /**
      * Deletes a shader. This method also deletes
      * the attached shader sources.
      *

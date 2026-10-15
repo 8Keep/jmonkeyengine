@@ -1,0 +1,13 @@
+layout(local_size_x=64) in;
+layout(std430, binding=0) buffer FeedbackBuffer {
+    uint words[64];
+};
+
+uniform int m_Sequence;
+uniform int m_Slot;
+
+void main() {
+    uint i = gl_LocalInvocationID.x;
+    uint seed = uint(m_Sequence) * 65537u ^ uint(m_Slot) * 0x01020304u;
+    words[i] = seed ^ (i * 0x9e3779b9u);
+}

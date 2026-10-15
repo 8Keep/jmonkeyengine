@@ -2234,6 +2234,49 @@ public final class GLRenderer implements Renderer {
         if (bits != 0) glCompute.glMemoryBarrier(bits);
     }
 
+    @Override
+    public void readBufferObject(BufferObject source, long byteOffset, ByteBuffer destination) {
+        // The managed SSBO-block cap includes desktop reflection/rebinding.
+        // Fixed compute storage is also readable on GLES without that cap.
+        if (!caps.contains(Caps.ComputeShader) && !caps.contains(Caps.ShaderStorageBufferObject)) {
+            throw new UnsupportedOperationException("GPU storage buffer readback is not supported");
+        }
+        if (source == null) throw new IllegalArgumentException("Buffer object cannot be null");
+        if (source.getAccessHint() == BufferObject.AccessHint.CpuOnly) {
+            throw new IllegalArgumentException("CPU-only buffer cannot be read from the GPU");
+        }
+        if (source.getId() == NativeObject.INVALID_ID) {
+            throw new IllegalStateException("Buffer object has no uploaded native storage");
+        }
+        if (source.isUpdateNeeded()) {
+            throw new IllegalStateException("Buffer object is dirty or was invalidated; readback would be stale");
+        }
+        if (destination == null) throw new IllegalArgumentException("Destination cannot be null");
+        if (!destination.isDirect() || destination.isReadOnly()) {
+            throw new IllegalArgumentException("Destination must be direct and writable");
+        }
+        if (byteOffset < 0) throw new IllegalArgumentException("byteOffset must be nonnegative");
+
+        // BufferObject.getData() intentionally rewinds its CPU mirror. Its limit
+        // is the allocated mirror size and matches the uploaded data-store size.
+        int sourceSize = source.getData().remaining();
+        int destinationBytes = destination.remaining();
+        if (byteOffset > sourceSize || destinationBytes > sourceSize - byteOffset) {
+            throw new IllegalArgumentException("Read range exceeds the buffer data store");
+        }
+        if (destinationBytes == 0) return;
+
+        int priorBinding = getInteger(GL4.GL_SHADER_STORAGE_BUFFER_BINDING);
+        try {
+            gl.glBindBuffer(GL4.GL_SHADER_STORAGE_BUFFER, source.getId());
+            // Pass a duplicate so even a backend that advances the destination
+            // cursor cannot change the caller's position or limit.
+            gl.glGetBufferSubData(GL4.GL_SHADER_STORAGE_BUFFER, byteOffset, destination.duplicate());
+        } finally {
+            gl.glBindBuffer(GL4.GL_SHADER_STORAGE_BUFFER, priorBinding);
+        }
+    }
+
     private void validateShaderBufferBlocks(Shader shader) {
         ListMap<String, ShaderBufferBlock> blocks = shader.getBufferBlockMap();
         for (int i = 0; i < blocks.size(); i++) {
