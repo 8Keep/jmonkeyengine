@@ -81,33 +81,41 @@ float Heightfield_mixFinite(float first, float second, float alpha) {
     return mixed;
 }
 
-float Heightfield_vertexMorph(ivec2 patchVertex) {
+// Explicit parameters let ordinary uniforms and GPU instance records share
+// exactly the same corner/edge reconstruction. Edge order: west/east/south/north.
+float Heightfield_vertexMorph(ivec2 patchVertex, int gridCells,
+                             float interiorMorph, vec4 edgeMorph) {
     // Patch corners are shared source vertices and never collapse.
-    if ((patchVertex.x == 0 || patchVertex.x == m_PatchGridCells)
-            && (patchVertex.y == 0 || patchVertex.y == m_PatchGridCells)) {
+    if ((patchVertex.x == 0 || patchVertex.x == gridCells)
+            && (patchVertex.y == 0 || patchVertex.y == gridCells)) {
         return 0.0;
     }
 
-    float alpha = m_InteriorMorph;
+    float alpha = interiorMorph;
     if (patchVertex.x == 0) {
-        alpha = max(alpha, m_EdgeMorphWest);
+        alpha = max(alpha, edgeMorph.x);
     }
-    if (patchVertex.x == m_PatchGridCells) {
-        alpha = max(alpha, m_EdgeMorphEast);
+    if (patchVertex.x == gridCells) {
+        alpha = max(alpha, edgeMorph.y);
     }
-    if (patchVertex.y == m_PatchGridCells) {
-        alpha = max(alpha, m_EdgeMorphNorth);
+    if (patchVertex.y == gridCells) {
+        alpha = max(alpha, edgeMorph.w);
     }
     if (patchVertex.y == 0) {
-        alpha = max(alpha, m_EdgeMorphSouth);
+        alpha = max(alpha, edgeMorph.z);
     }
     return alpha;
 }
 
-vec3 Heightfield_lodPosition(ivec2 patchVertex, out ivec2 globalGrid) {
+float Heightfield_vertexMorph(ivec2 patchVertex) {
+    return Heightfield_vertexMorph(patchVertex, m_PatchGridCells, m_InteriorMorph,
+            vec4(m_EdgeMorphWest, m_EdgeMorphEast, m_EdgeMorphSouth, m_EdgeMorphNorth));
+}
+
+vec3 Heightfield_lodPosition(ivec2 patchVertex, ivec2 patchOrigin, int stride,
+                            int gridCells, float interiorMorph, vec4 edgeMorph,
+                            out ivec2 globalGrid) {
     ivec2 pageOrigin = Heightfield_pageOrigin();
-    ivec2 patchOrigin = ivec2(m_PatchLatticeOrigin);
-    int stride = m_SampleStride;
     globalGrid = pageOrigin + patchOrigin + patchVertex * stride;
 
     int parentStride = stride * 2;
@@ -117,7 +125,7 @@ vec3 Heightfield_lodPosition(ivec2 patchVertex, out ivec2 globalGrid) {
     // same clamped lattice coordinate for position and height.
     ivec2 safeParentGlobal = clamp(parentGlobal, pageOrigin,
                                    pageOrigin + ivec2(m_PageCells));
-    float alpha = Heightfield_vertexMorph(patchVertex);
+    float alpha = Heightfield_vertexMorph(patchVertex, gridCells, interiorMorph, edgeMorph);
 
     vec2 localFine = vec2(globalGrid - pageOrigin) * m_SampleSpacing;
     vec2 localParent = vec2(safeParentGlobal - pageOrigin) * m_SampleSpacing;
@@ -126,5 +134,11 @@ vec3 Heightfield_lodPosition(ivec2 patchVertex, out ivec2 globalGrid) {
     return vec3(Heightfield_mixFinite(localFine.x, localParent.x, alpha),
                 Heightfield_mixFinite(fineHeight, parentHeight, alpha),
                 Heightfield_mixFinite(localFine.y, localParent.y, alpha));
+}
+
+vec3 Heightfield_lodPosition(ivec2 patchVertex, out ivec2 globalGrid) {
+    return Heightfield_lodPosition(patchVertex, ivec2(m_PatchLatticeOrigin), m_SampleStride,
+            m_PatchGridCells, m_InteriorMorph,
+            vec4(m_EdgeMorphWest, m_EdgeMorphEast, m_EdgeMorphSouth, m_EdgeMorphNorth), globalGrid);
 }
 #endif
