@@ -153,14 +153,43 @@ public final class HeightfieldMorphRenderProbe implements AutoCloseable {
     /** Render and compare the current GPU morph cover with the supplied CPU state. */
     public Verification verify(Camera camera, List<Patch> reference, String name, Path output)
             throws IOException, com.jme3.renderer.TextureUnitException {
+        return verifyInternal(camera, reference, null, null, name, output,
+                renderer.getCurrentFrameBuffer());
+    }
+
+    /**
+     * Compare node-local pages with the canonical source. Color differences are
+     * advisory because node-page gradients are decimated; depth remains strict.
+     * The caller retains ownership of the atlas and page-binding UBO.
+     */
+    public Verification verifyNodePages(Camera camera, List<Patch> reference,
+            com.jme3.terrain.heightfield.HeightfieldGpuPageBindings pageBindings,
+            TextureArray nodePages, String name, Path output, FrameBuffer resumeTarget)
+            throws IOException, com.jme3.renderer.TextureUnitException {
+        if (pageBindings == null || nodePages == null) {
+            throw new IllegalArgumentException("node page bindings and atlas are required");
+        }
+        return verifyInternal(camera, reference, pageBindings, nodePages, name, output, resumeTarget);
+    }
+
+    private Verification verifyInternal(Camera camera, List<Patch> reference,
+            com.jme3.terrain.heightfield.HeightfieldGpuPageBindings pageBindings,
+            TextureArray nodePages, String name, Path output, FrameBuffer resumeTarget)
+            throws IOException, com.jme3.renderer.TextureUnitException {
         requireOpen();
+        boolean nodePageMode = pageBindings != null || nodePages != null;
         if (camera == null || reference == null || name == null || name.isEmpty() || output == null
                 || name.contains("/") || name.contains("\\")) {
             throw new IllegalArgumentException("camera, ordered reference patches, simple name and output folder are required");
         }
+        if (nodePageMode && (pageBindings == null || nodePages == null)) {
+            throw new IllegalArgumentException("node page bindings and atlas must both be supplied");
+        }
+        if (nodePageMode && (pageBindings.getBuffer() == null || nodePages.getImage() == null)) {
+            throw new IllegalArgumentException("node page bindings and atlas must be open");
+        }
         Camera previousCamera = renderManager.getCurrentCamera();
         RenderState previousForcedState = renderManager.getForcedRenderState();
-        FrameBuffer resumeTarget = renderer.getCurrentFrameBuffer();
         float[] gpuColor = null;
         float[] referenceColor = null;
         float[] gpuDepth = null;
@@ -170,15 +199,7 @@ public final class HeightfieldMorphRenderProbe implements AutoCloseable {
             scene.detachAllChildren();
             scene.updateGeometricState();
 
-            Geometry gpu = new IndirectGeometry("heightfield temporal GPU cover", grid,
-                    transitions.getCommand(), 0, hierarchy.getRoot().getBound());
-            gpu.setCullHint(Spatial.CullHint.Never);
-            Material gpuMaterial = createMaterial();
-            transitions.configureMaterial(gpuMaterial);
-            gpuMaterial.setBoolean("UseHeightfieldLod", true);
-            gpu.setMaterial(gpuMaterial);
-            gpu.setQueueBucket(RenderQueue.Bucket.Opaque);
-            scene.attachChild(gpu);
+            scene.attachChild(createGpuGeometry(false, pageBindings, nodePages));
             scene.updateGeometricState();
             renderScene(camera, gpuTarget, false);
             gpuColor = readColor(gpuTarget);
@@ -202,7 +223,7 @@ public final class HeightfieldMorphRenderProbe implements AutoCloseable {
             referenceColor = readColor(referenceTarget);
 
             scene.detachAllChildren();
-            scene.attachChild(createGpuGeometry(true));
+            scene.attachChild(createGpuGeometry(true, pageBindings, nodePages));
             scene.updateGeometricState();
             renderScene(camera, gpuShadowTarget, true);
             gpuDepth = readDepth(gpuShadowTarget);
@@ -224,7 +245,7 @@ public final class HeightfieldMorphRenderProbe implements AutoCloseable {
             Files.createDirectories(output);
             writePng(output.resolve(name + "-gpu.png"), gpuColor);
             writePng(output.resolve(name + "-reference.png"), referenceColor);
-            Verification result = compare(gpuColor, referenceColor, gpuDepth, referenceDepth);
+            Verification result = compare(gpuColor, referenceColor, gpuDepth, referenceDepth, !nodePageMode);
             float maximumMainCaster = 0;
             for (int i = 0; i < mainDepth.length; i++) {
                 float difference = Math.abs(mainDepth[i] - gpuDepth[i]);
@@ -234,7 +255,12 @@ public final class HeightfieldMorphRenderProbe implements AutoCloseable {
                 maximumMainCaster = Math.max(maximumMainCaster, difference);
             }
             System.out.println("HEIGHTFIELD_MORPH_MAIN_CASTER phase=" + name + " maxDepthDifference=" + maximumMainCaster);
-            System.out.println("HEIGHTFIELD_MORPH_RENDER phase=" + name + " " + result);
+            if (nodePageMode) {
+                System.out.println("HEIGHTFIELD_NODE_PAGE_RENDER phase=" + name
+                        + " colorCompared=false (node-page gradients are decimated) " + result);
+            } else {
+                System.out.println("HEIGHTFIELD_MORPH_RENDER phase=" + name + " " + result);
+            }
             return result;
         } finally {
             renderManager.setForcedRenderState(previousForcedState);
@@ -245,14 +271,21 @@ public final class HeightfieldMorphRenderProbe implements AutoCloseable {
         }
     }
 
-    private Geometry createGpuGeometry(boolean caster) {
-        Geometry geometry = new IndirectGeometry("heightfield temporal GPU caster", grid,
+    private Geometry createGpuGeometry(boolean caster,
+            com.jme3.terrain.heightfield.HeightfieldGpuPageBindings pageBindings,
+            TextureArray nodePages) {
+        Geometry geometry = new IndirectGeometry("heightfield temporal GPU"
+                + (caster ? " caster" : " cover"), grid,
                 transitions.getCommand(), 0, hierarchy.getRoot().getBound());
         geometry.setCullHint(Spatial.CullHint.Never);
         geometry.setQueueBucket(RenderQueue.Bucket.Opaque);
         Material material = createMaterial();
         transitions.configureMaterial(material);
         material.setBoolean("UseHeightfieldLod", true);
+        if (pageBindings != null) {
+            material.setTexture("HeightPages", nodePages);
+            pageBindings.configureMaterial(material);
+        }
         if (caster) {
             material.selectTechnique("PreShadow", renderManager);
         }
@@ -359,7 +392,7 @@ public final class HeightfieldMorphRenderProbe implements AutoCloseable {
     }
 
     private static Verification compare(float[] gpu, float[] reference, float[] gpuDepth,
-            float[] referenceDepth) {
+            float[] referenceDepth, boolean compareColor) {
         int terrainPixels = 0;
         int depthPixels = 0;
         float maxColor = 0;
@@ -368,7 +401,7 @@ public final class HeightfieldMorphRenderProbe implements AutoCloseable {
             int offset = pixel * 4;
             boolean gpuCovered = gpu[offset + 3] >= .5f;
             boolean referenceCovered = reference[offset + 3] >= .5f;
-            if (gpuCovered != referenceCovered) {
+            if (compareColor && gpuCovered != referenceCovered) {
                 throw new IllegalStateException("GPU/reference terrain coverage differs at pixel " + pixel);
             }
             if (gpuCovered) terrainPixels++;
@@ -380,7 +413,7 @@ public final class HeightfieldMorphRenderProbe implements AutoCloseable {
                 }
                 float error = Math.abs(a - b);
                 maxColor = Math.max(maxColor, error);
-                if (error > COLOR_TOLERANCE) {
+                if (compareColor && error > COLOR_TOLERANCE) {
                     throw new IllegalStateException("GPU/reference color differs at pixel " + pixel
                             + " channel " + channel + ": " + a + " vs " + b + " (" + error + ")");
                 }
