@@ -33,6 +33,7 @@ package jme3test.terrain;
 
 import com.jme3.asset.AssetManager;
 import com.jme3.material.Material;
+import com.jme3.material.RenderState;
 import com.jme3.math.ColorRGBA;
 import com.jme3.math.Vector2f;
 import com.jme3.math.Vector3f;
@@ -60,8 +61,12 @@ import com.jme3.util.BufferUtils;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Example-only native readback check for the shared HeightfieldSampling LOD
@@ -76,6 +81,7 @@ public final class HeightfieldLodGpuProbe implements AutoCloseable {
 
     private final RenderManager renderManager;
     private final Renderer renderer;
+    private final AssetManager assetManager;
     private final HeightfieldPage page;
     private final TextureArray heightPages;
     private final int heightLayer;
@@ -89,6 +95,12 @@ public final class HeightfieldLodGpuProbe implements AutoCloseable {
     private Geometry geometry;
     private ByteBuffer readback;
     private int gridCells = -1;
+    private Material coverDecoderMaterial;
+    private ViewPort coverDecoderViewPort;
+    private FrameBuffer coverDecoderTarget;
+    private Mesh coverDecoderQuad;
+    private Geometry coverDecoderGeometry;
+    private ByteBuffer coverDecoderReadback;
     private boolean closed;
 
     /** Creates and owns a one-layer source array from {@code page}. */
@@ -118,6 +130,7 @@ public final class HeightfieldLodGpuProbe implements AutoCloseable {
         }
         this.renderManager = renderManager;
         this.renderer = renderer;
+        this.assetManager = assetManager;
         this.page = page;
         this.heightPages = heightPages;
         this.heightLayer = heightLayer;
@@ -153,7 +166,7 @@ public final class HeightfieldLodGpuProbe implements AutoCloseable {
      * @return sample count and maximum absolute/allowed errors
      */
     public Verification verify(List<Patch> patches, FrameBuffer resumeTarget) {
-        return verifyPatches(patches, resumeTarget, -1);
+        return verifyPatches(patches, resumeTarget, -1, 4);
     }
 
     /**
@@ -174,7 +187,7 @@ public final class HeightfieldLodGpuProbe implements AutoCloseable {
         material.setBoolean("UseHeightfieldInstanceMorphs", true);
         material.setUniformBufferObject("PatchRecords", records);
         try {
-            return verifyPatches(patches, resumeTarget, recordBase);
+            return verifyPatches(patches, resumeTarget, recordBase, 4);
         } finally {
             material.setBoolean("UseHeightfieldInstances", false);
             material.setBoolean("UseHeightfieldInstanceMorphs", false);
@@ -183,7 +196,48 @@ public final class HeightfieldLodGpuProbe implements AutoCloseable {
         }
     }
 
-    private Verification verifyPatches(List<Patch> patches, FrameBuffer resumeTarget, int recordBase) {
+    /** Check a two-vec4 GPU cover sampling actual node-local atlas layers. */
+    public Verification verifyPageRecords(List<Patch> patches,
+            com.jme3.shader.bufferobject.BufferObject records,
+            com.jme3.shader.bufferobject.BufferObject command, int recordBase,
+            com.jme3.shader.bufferobject.BufferObject pageBindings, TextureArray atlas,
+            FrameBuffer resumeTarget) {
+        requireOpen();
+        if (patches == null || patches.isEmpty() || records == null || command == null || pageBindings == null || atlas == null
+                || recordBase < 0 || (long) recordBase + patches.size() * 2L > 340
+                || records.getData() == null || records.getData().limit() < 341 * 16
+                || pageBindings.getData() == null || pageBindings.getData().limit() < 85 * 16
+                || command.getData() == null || command.getData().limit() < 32) {
+            throw new IllegalArgumentException("matching GPU records, page bindings and atlas required");
+        }
+        if (!patches.isEmpty() && (atlas.getImage().getWidth() != gridCells(patches.get(0)) + 3
+                || atlas.getImage().getHeight() != gridCells(patches.get(0)) + 3)) {
+            throw new IllegalArgumentException("atlas must contain patch-sized halo pages");
+        }
+        if (recordBase != 0) {
+            throw new IllegalArgumentException("complete GPU cover records must start at record zero");
+        }
+        requireFloatReadbackSupport();
+        verifyCompleteCover(patches, records, command, resumeTarget);
+        material.setBoolean("UseHeightfieldInstances", true);
+        material.setBoolean("UseHeightfieldInstanceMorphs", false);
+        material.setBoolean("UseHeightfieldNodePages", true);
+        material.setUniformBufferObject("PatchRecords", records);
+        material.setUniformBufferObject("HeightfieldPageBindings", pageBindings);
+        material.setTexture("HeightPages", atlas);
+        try {
+            return verifyPatches(patches, resumeTarget, recordBase, 2);
+        } finally {
+            material.setTexture("HeightPages", heightPages);
+            material.setBoolean("UseHeightfieldInstances", false);
+            material.setBoolean("UseHeightfieldNodePages", false);
+            material.clearParam("PatchRecords");
+            material.clearParam("HeightfieldPageBindings");
+            material.setInt("PatchRecordBase", 0);
+        }
+    }
+
+    private Verification verifyPatches(List<Patch> patches, FrameBuffer resumeTarget, int recordBase, int recordStride) {
         requireOpen();
         if (patches == null) {
             throw new IllegalArgumentException("patch metadata is required");
@@ -215,7 +269,7 @@ public final class HeightfieldLodGpuProbe implements AutoCloseable {
             for (int patchIndex = 0; patchIndex < patches.size(); patchIndex++) {
                 Patch patch = patches.get(patchIndex);
                 configure(patch, cells);
-                if (recordBase >= 0) material.setInt("PatchRecordBase", recordBase + patchIndex * 4);
+                if (recordBase >= 0) material.setInt("PatchRecordBase", recordBase + patchIndex * recordStride);
                 // Resume an explicit caller target. The engine's current-FBO
                 // query can report a main override rather than the physical
                 // offscreen binding, so this probe must not infer it.
@@ -266,6 +320,192 @@ public final class HeightfieldLodGpuProbe implements AutoCloseable {
             }
         }
         return new Verification(compared, maxError, maxTolerance);
+    }
+
+    private void verifyCompleteCover(List<Patch> patches,
+            com.jme3.shader.bufferobject.BufferObject records,
+            com.jme3.shader.bufferobject.BufferObject command, FrameBuffer resumeTarget) {
+        if (patches.isEmpty()) {
+            throw new IllegalArgumentException("a complete heightfield cover must include its root");
+        }
+        ensureCoverDecoder();
+        Node root = patches.get(0).getNode();
+        while (root.getParent() != null) root = root.getParent();
+        List<Node> hierarchyNodes = new ArrayList<>();
+        Map<Node, Integer> nodeIds = new IdentityHashMap<>();
+        collectNodeOrder(root, hierarchyNodes, nodeIds);
+        if (hierarchyNodes.size() > 85) {
+            throw new IllegalArgumentException("GPU cover decoder supports at most 85 hierarchy nodes");
+        }
+        List<Patch> expected = new ArrayList<>(patches);
+        expected.sort(Comparator.comparingInt(patch -> {
+            Integer id = nodeIds.get(patch.getNode());
+            return id == null ? Integer.MAX_VALUE : id;
+        }));
+        for (int i = 0; i < patches.size(); i++) {
+            if (patches.get(i) != expected.get(i) || !nodeIds.containsKey(expected.get(i).getNode())) {
+                throw new IllegalArgumentException("CPU patches must follow hierarchy node order");
+            }
+            Patch patch = expected.get(i);
+            if (patch.getMorph() != 0f) {
+                throw new IllegalArgumentException("complete-cover record check requires stable interior morphs");
+            }
+            for (int edge = 0; edge < 4; edge++) {
+                float weight = patch.getEdgeMorph(edge);
+                if (weight != 0f && weight != 1f) {
+                    throw new IllegalArgumentException("complete-cover record check requires stable edge morphs");
+                }
+            }
+        }
+
+        coverDecoderMaterial.setUniformBufferObject("Result", records);
+        coverDecoderMaterial.setUniformBufferObject("Command", command);
+        Camera previousCamera = renderManager.getCurrentCamera();
+        RenderState previousState = renderManager.getForcedRenderState();
+        String previousTechnique = renderManager.getForcedTechnique();
+        Material previousMaterial = renderManager.getForcedMaterial();
+        FloatBuffer actual;
+        try {
+            renderManager.setForcedRenderState(null);
+            renderManager.setForcedTechnique(null);
+            renderManager.setForcedMaterial(null);
+            renderManager.renderViewPort(coverDecoderViewPort, 0f);
+            coverDecoderReadback.clear();
+            renderer.readFrameBufferWithFormat(coverDecoderTarget, coverDecoderReadback, Image.Format.RGBA32F);
+            coverDecoderReadback.rewind();
+            actual = coverDecoderReadback.asFloatBuffer();
+        } finally {
+            coverDecoderMaterial.clearParam("Result");
+            coverDecoderMaterial.clearParam("Command");
+            renderer.setFrameBuffer(resumeTarget);
+            if (previousCamera != null) {
+                int targetWidth = resumeTarget == null ? previousCamera.getWidth() : resumeTarget.getWidth();
+                int targetHeight = resumeTarget == null ? previousCamera.getHeight() : resumeTarget.getHeight();
+                renderManager.setCamera(previousCamera, false, targetWidth, targetHeight);
+            }
+            renderManager.setForcedRenderState(previousState);
+            renderManager.setForcedTechnique(previousTechnique);
+            renderManager.setForcedMaterial(previousMaterial);
+        }
+
+        int count = patches.size();
+        float headerCount = actual.get(0);
+        float headerTotal = actual.get(2);
+        float sourceLabel = actual.get(3);
+        if (!Float.isFinite(headerCount) || headerCount < 0 || headerCount > count
+                || headerCount != Math.rint(headerCount) || headerTotal != count) {
+            throw new IllegalStateException("GPU complete cover count differs from CPU cover: header.x="
+                    + headerCount + " header.z=" + headerTotal + " CPU=" + count);
+        }
+        requireRecordValue(actual, 4, 6 * gridCells(patches.get(0)) * gridCells(patches.get(0)), "command indices", 0);
+        requireRecordValue(actual, 5, count, "command instances", 0);
+        requireRecordValue(actual, 6, 0, "command first index", 0);
+        requireRecordValue(actual, 7, 0, "command base vertex", 0);
+        requireRecordValue(actual, 8, 0, "command reserved/base instance", 0);
+        if (!Float.isFinite(sourceLabel) || sourceLabel < 0f || sourceLabel > 16777216f
+                || sourceLabel != Math.rint(sourceLabel)) {
+            throw new IllegalStateException("GPU complete cover has an invalid source label: " + sourceLabel);
+        }
+        for (int i = 0; i < count; i++) {
+            Patch patch = expected.get(i);
+            Node node = patch.getNode();
+            int originOffset = (85 + i) * 4;
+            int detailOffset = (170 + i) * 4;
+            requireRecordValue(actual, originOffset, nodeIds.get(node), "node id", i);
+            requireRecordValue(actual, originOffset + 1, node.getOriginX(), "origin x", i);
+            requireRecordValue(actual, originOffset + 2, node.getOriginZ(), "origin z", i);
+            requireRecordValue(actual, originOffset + 3, node.getStride(), "stride", i);
+            requireRecordValue(actual, detailOffset, node.getSpan(), "span", i);
+            requireRecordValue(actual, detailOffset + 1, coverEdgeFlags(patch, expected), "edge flags", i);
+            float label = actual.get(detailOffset + 3);
+            if (!Float.isFinite(label) || label != sourceLabel) {
+                throw new IllegalStateException("GPU source label differs at complete-cover record " + i
+                        + ": header=" + sourceLabel + " record=" + label);
+            }
+        }
+    }
+
+    private void ensureCoverDecoder() {
+        if (coverDecoderMaterial != null) return;
+        coverDecoderMaterial = new Material(assetManager,
+                "jme3test/terrain/HeightfieldGpuSelection.j3md");
+        coverDecoderMaterial.setBoolean("InspectCommand", true);
+        RenderState state = coverDecoderMaterial.getAdditionalRenderState();
+        state.setDepthTest(false);
+        state.setDepthWrite(false);
+        state.setFaceCullMode(RenderState.FaceCullMode.Off);
+        state.setBlendMode(RenderState.BlendMode.Off);
+
+        coverDecoderQuad = new Mesh();
+        coverDecoderQuad.setMode(Mesh.Mode.Triangles);
+        coverDecoderQuad.setBuffer(Type.Position, 3,
+                new float[]{0, 0, 0, 2, 0, 0, 2, 2, 0, 0, 2, 0});
+        coverDecoderQuad.setBuffer(Type.Index, 3, new int[]{0, 1, 2, 0, 2, 3});
+        coverDecoderQuad.setStatic();
+        coverDecoderQuad.updateBound();
+        coverDecoderGeometry = new Geometry("heightfield-cover-decoder-quad", coverDecoderQuad);
+        coverDecoderGeometry.setMaterial(coverDecoderMaterial);
+        coverDecoderGeometry.setCullHint(Spatial.CullHint.Never);
+        coverDecoderGeometry.setQueueBucket(RenderQueue.Bucket.Opaque);
+        com.jme3.scene.Node decoderScene = new com.jme3.scene.Node("heightfield-cover-decoder-scene");
+        decoderScene.attachChild(coverDecoderGeometry);
+        decoderScene.setCullHint(Spatial.CullHint.Never);
+        decoderScene.updateGeometricState();
+
+        coverDecoderTarget = new FrameBuffer(85, 5, 1);
+        coverDecoderTarget.addColorTarget(FrameBuffer.FrameBufferTarget.newTarget(Image.Format.RGBA32F));
+        Camera camera = new Camera(85, 5);
+        coverDecoderViewPort = new ViewPort(
+                "Heightfield cover decoder " + Integer.toHexString(System.identityHashCode(this)), camera);
+        coverDecoderViewPort.attachScene(decoderScene);
+        coverDecoderViewPort.setOutputFrameBuffer(coverDecoderTarget);
+        coverDecoderViewPort.setBackgroundColor(new ColorRGBA(0, 0, 0, 0));
+        coverDecoderViewPort.setClearFlags(true, false, false);
+        coverDecoderReadback = BufferUtils.createByteBuffer(85 * 5 * 4 * Float.BYTES)
+                .order(ByteOrder.nativeOrder());
+    }
+
+    private static void collectNodeOrder(Node node, List<Node> nodes, Map<Node, Integer> indices) {
+        indices.put(node, nodes.size());
+        nodes.add(node);
+        for (Node child : node.getChildren()) collectNodeOrder(child, nodes, indices);
+    }
+
+    private static int coverEdgeFlags(Patch patch, List<Patch> cover) {
+        Node node = patch.getNode();
+        int mask = 0;
+        boolean coarserNeighbor = false;
+        for (Patch otherPatch : cover) {
+            Node other = otherPatch.getNode();
+            if (other == node || !touches(node, other)) continue;
+            if (other.getLevel() >= node.getLevel()) continue;
+            coarserNeighbor = true;
+            int x = node.getOriginX(), z = node.getOriginZ(), span = node.getSpan();
+            int ox = other.getOriginX(), oz = other.getOriginZ(), otherSpan = other.getSpan();
+            boolean zOverlap = Math.max(z, oz) < Math.min(z + span, oz + otherSpan);
+            boolean xOverlap = Math.max(x, ox) < Math.min(x + span, ox + otherSpan);
+            if (zOverlap && x == ox + otherSpan) mask |= 1;
+            else if (zOverlap && x + span == ox) mask |= 2;
+            else if (xOverlap && z == oz + otherSpan) mask |= 4;
+            else if (xOverlap && z + span == oz) mask |= 8;
+        }
+        return mask | (coarserNeighbor ? 16 : 0);
+    }
+
+    private static boolean touches(Node a, Node b) {
+        return a.getOriginX() <= b.getOriginX() + b.getSpan()
+                && b.getOriginX() <= a.getOriginX() + a.getSpan()
+                && a.getOriginZ() <= b.getOriginZ() + b.getSpan()
+                && b.getOriginZ() <= a.getOriginZ() + a.getSpan();
+    }
+
+    private static void requireRecordValue(FloatBuffer values, int offset, float expected,
+            String field, int record) {
+        float actual = values.get(offset);
+        if (!Float.isFinite(actual) || actual != expected) {
+            throw new IllegalStateException("GPU complete-cover " + field + " differs at record "
+                    + record + ": expected=" + expected + " actual=" + actual);
+        }
     }
 
     /**
@@ -528,6 +768,24 @@ public final class HeightfieldLodGpuProbe implements AutoCloseable {
             renderer.deleteFrameBuffer(target);
             target = null;
         }
+        if (coverDecoderViewPort != null) {
+            coverDecoderViewPort.clearScenes();
+            coverDecoderViewPort = null;
+        }
+        if (coverDecoderTarget != null) {
+            renderer.deleteFrameBuffer(coverDecoderTarget);
+            coverDecoderTarget = null;
+        }
+        if (coverDecoderQuad != null) {
+            for (VertexBuffer buffer : coverDecoderQuad.getBufferList().getArray()) {
+                renderer.deleteBuffer(buffer);
+            }
+            coverDecoderQuad = null;
+        }
+        coverDecoderGeometry = null;
+        coverDecoderMaterial = null;
+        if (coverDecoderReadback != null) BufferUtils.destroyDirectBuffer(coverDecoderReadback);
+        coverDecoderReadback = null;
         deleteMeshBuffers();
         geometry = null;
         if (ownsHeightPages) {

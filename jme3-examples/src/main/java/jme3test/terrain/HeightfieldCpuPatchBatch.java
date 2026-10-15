@@ -111,6 +111,7 @@ final class HeightfieldCpuPatchBatch implements AutoCloseable {
 
         material.setBoolean("UseHeightfieldInstances", true);
         material.setBoolean("UseHeightfieldInstanceMorphs", false);
+        material.setBoolean("UseHeightfieldNodePages", false);
         material.setUniformBufferObject("PatchRecords", patchRecords);
         material.setInt("PatchRecordBase", 0);
         material.setInt("PatchRecordVectors", NODE_CAPACITY * 4);

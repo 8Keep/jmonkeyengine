@@ -16,49 +16,35 @@ varying vec3 wNormal;
 void main() {
     ivec2 grid;
     vec3 localPosition;
-    float leftHeight;
-    float rightHeight;
-    float backHeight;
-    float frontHeight;
+    vec3 gradientNormal;
 
 #ifdef HEIGHTFIELD_LOD
     ivec2 patchVertex = ivec2(floor(inPosition.xz + vec2(0.5)));
     ivec2 parentGrid;
     float morphAlpha;
     localPosition = Heightfield_lodPosition(patchVertex, grid, parentGrid, morphAlpha);
-    leftHeight = Heightfield_readGlobalHeight(grid + ivec2(-1, 0));
-    rightHeight = Heightfield_readGlobalHeight(grid + ivec2(1, 0));
-    backHeight = Heightfield_readGlobalHeight(grid + ivec2(0, -1));
-    frontHeight = Heightfield_readGlobalHeight(grid + ivec2(0, 1));
+    gradientNormal = Heightfield_lodGradient(grid, false);
 #else
     grid = ivec2(floor(inPosition.xz + vec2(0.5)));
     float height = Heightfield_readHeight(grid);
-    leftHeight = Heightfield_readHeight(grid + ivec2(-1, 0));
-    rightHeight = Heightfield_readHeight(grid + ivec2(1, 0));
-    backHeight = Heightfield_readHeight(grid + ivec2(0, -1));
-    frontHeight = Heightfield_readHeight(grid + ivec2(0, 1));
+    float leftHeight = Heightfield_readHeight(grid + ivec2(-1, 0));
+    float rightHeight = Heightfield_readHeight(grid + ivec2(1, 0));
+    float backHeight = Heightfield_readHeight(grid + ivec2(0, -1));
+    float frontHeight = Heightfield_readHeight(grid + ivec2(0, 1));
     localPosition = vec3(inPosition.x * m_SampleSpacing, height,
                          inPosition.z * m_SampleSpacing);
+    gradientNormal = vec3(leftHeight * 0.5 - rightHeight * 0.5,
+                          m_SampleSpacing,
+                          backHeight * 0.5 - frontHeight * 0.5);
 #endif
-
-    // Equivalent to the central-difference gradient, without overflow from
-    // subtracting opposite finite heights or dividing by very small spacing.
-    vec3 gradientNormal = vec3(leftHeight * 0.5 - rightHeight * 0.5,
-                              m_SampleSpacing,
-                              backHeight * 0.5 - frontHeight * 0.5);
 #ifdef HEIGHTFIELD_LOD
     // Use the same parent coordinate and weight as displacement. Fully collapsed
     // child vertices then share the stable parent's source-gradient shading.
     // This retains the one-sample halo; it is not a coarse-stride slope filter.
     if (morphAlpha > 0.0 && any(notEqual(grid, parentGrid))) {
-        float parentLeft = Heightfield_readGlobalHeight(parentGrid + ivec2(-1, 0));
-        float parentRight = Heightfield_readGlobalHeight(parentGrid + ivec2(1, 0));
-        float parentBack = Heightfield_readGlobalHeight(parentGrid + ivec2(0, -1));
-        float parentFront = Heightfield_readGlobalHeight(parentGrid + ivec2(0, 1));
-        gradientNormal.x = Heightfield_mixFinite(gradientNormal.x,
-                parentLeft * 0.5 - parentRight * 0.5, morphAlpha);
-        gradientNormal.z = Heightfield_mixFinite(gradientNormal.z,
-                parentBack * 0.5 - parentFront * 0.5, morphAlpha);
+        vec3 parentGradient = Heightfield_lodGradient(parentGrid, true);
+        gradientNormal.x = Heightfield_mixFinite(gradientNormal.x, parentGradient.x, morphAlpha);
+        gradientNormal.z = Heightfield_mixFinite(gradientNormal.z, parentGradient.z, morphAlpha);
     }
 #endif
     float largest = max(max(abs(gradientNormal.x), abs(gradientNormal.z)),

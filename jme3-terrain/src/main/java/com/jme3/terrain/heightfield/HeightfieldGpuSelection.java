@@ -252,6 +252,7 @@ public final class HeightfieldGpuSelection implements AutoCloseable {
         if (material == null) throw new IllegalArgumentException("material is required");
         material.setBoolean("UseHeightfieldInstances", true);
         material.setBoolean("UseHeightfieldInstanceMorphs", false);
+        material.setBoolean("UseHeightfieldNodePages", false);
         material.setUniformBufferObject("PatchRecords", patchRecords);
         material.setInt("PatchRecordBase", drawCover == DrawCover.Complete ? 0 : NODE_CAPACITY * 2);
         material.setInt("PatchRecordVectors", NODE_CAPACITY * 4);

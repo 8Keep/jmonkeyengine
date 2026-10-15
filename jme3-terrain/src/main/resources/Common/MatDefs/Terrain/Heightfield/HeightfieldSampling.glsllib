@@ -14,6 +14,11 @@ layout(std140) uniform m_PatchRecords {
     vec4 heightfieldRecords[HEIGHTFIELD_PATCH_RECORD_VECS];
 };
 uniform int m_PatchRecordBase;
+#ifdef HEIGHTFIELD_NODE_PAGES
+layout(std140) uniform m_HeightfieldPageBindings {
+    ivec4 heightfieldPageLayers[85]; // own layer, parent layer, reserved, reserved
+};
+#endif
 #endif
 
 uniform sampler2DArray m_HeightPages;
@@ -58,6 +63,52 @@ ivec2 Heightfield_readablePageGrid(ivec2 globalGrid) {
 
 float Heightfield_readGlobalHeight(ivec2 globalGrid) {
     return Heightfield_readHeight(Heightfield_readablePageGrid(globalGrid));
+}
+
+#ifdef HEIGHTFIELD_NODE_PAGES
+vec4 Heightfield_instancePatch() {
+#ifdef HEIGHTFIELD_INSTANCE_MORPHS
+    return heightfieldRecords[m_PatchRecordBase + 4 * gl_InstanceID];
+#else
+    return heightfieldRecords[m_PatchRecordBase + 2 * gl_InstanceID];
+#endif
+}
+
+float Heightfield_readNodeHeight(ivec2 nodeGrid, int layer) {
+    ivec2 safeGrid = clamp(nodeGrid, ivec2(-1), ivec2(m_PatchGridCells + 1));
+    return texelFetch(m_HeightPages, ivec3(safeGrid + ivec2(1), layer), 0).r;
+}
+#endif
+
+// Gradients share canonical spacing even when a physical node page is decimated.
+vec3 Heightfield_lodGradient(ivec2 globalGrid, bool parent) {
+#ifdef HEIGHTFIELD_NODE_PAGES
+    vec4 patchRecord = Heightfield_instancePatch();
+    int node = int(patchRecord.x);
+    int stride = int(patchRecord.w);
+    ivec2 origin = ivec2(patchRecord.yz);
+    int layer = heightfieldPageLayers[node].x;
+    if (parent && node != 0) {
+        int span = m_PatchGridCells * stride * 2;
+        origin = (origin / span) * span;
+        stride *= 2;
+        layer = heightfieldPageLayers[node].y;
+    }
+    ivec2 grid = (globalGrid - Heightfield_pageOrigin() - origin) / stride;
+    float left = Heightfield_readNodeHeight(grid + ivec2(-1, 0), layer);
+    float right = Heightfield_readNodeHeight(grid + ivec2(1, 0), layer);
+    float back = Heightfield_readNodeHeight(grid + ivec2(0, -1), layer);
+    float front = Heightfield_readNodeHeight(grid + ivec2(0, 1), layer);
+    return vec3((left * 0.5 - right * 0.5) / float(stride), m_SampleSpacing,
+                (back * 0.5 - front * 0.5) / float(stride));
+#else
+    float left = Heightfield_readGlobalHeight(globalGrid + ivec2(-1, 0));
+    float right = Heightfield_readGlobalHeight(globalGrid + ivec2(1, 0));
+    float back = Heightfield_readGlobalHeight(globalGrid + ivec2(0, -1));
+    float front = Heightfield_readGlobalHeight(globalGrid + ivec2(0, 1));
+    return vec3(left * 0.5 - right * 0.5, m_SampleSpacing,
+                back * 0.5 - front * 0.5);
+#endif
 }
 
 int Heightfield_floorDiv(int value, int divisor) {
@@ -144,8 +195,15 @@ vec3 Heightfield_lodPosition(ivec2 patchVertex, ivec2 patchOrigin, int stride,
 
     vec2 localFine = vec2(globalGrid - pageOrigin) * m_SampleSpacing;
     vec2 localParent = vec2(safeParentGlobal - pageOrigin) * m_SampleSpacing;
+#ifdef HEIGHTFIELD_NODE_PAGES
+    int layer = heightfieldPageLayers[int(Heightfield_instancePatch().x)].x;
+    float fineHeight = Heightfield_readNodeHeight(patchVertex, layer);
+    ivec2 parentNodeGrid = (safeParentGlobal - pageOrigin - patchOrigin) / stride;
+    float parentHeight = Heightfield_readNodeHeight(parentNodeGrid, layer);
+#else
     float fineHeight = Heightfield_readGlobalHeight(globalGrid);
     float parentHeight = Heightfield_readGlobalHeight(safeParentGlobal);
+#endif
     return vec3(Heightfield_mixFinite(localFine.x, localParent.x, alpha),
                 Heightfield_mixFinite(fineHeight, parentHeight, alpha),
                 Heightfield_mixFinite(localFine.y, localParent.y, alpha));
