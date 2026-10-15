@@ -66,11 +66,23 @@ import java.util.function.Predicate;
  * <p>The caller owns source-page leases, page textures and residency, frame
  * fences and scheduling, transforms, and view-specific culling. Projection
  * uses the supplied camera directly, so the camera must be expressed in the
- * hierarchy's local coordinates. Call {@link #dispatch(Camera, double, int,
- * int, Predicate)} on the renderer thread after the hierarchy's source page is
- * ready for the requested use.
+ * hierarchy's local coordinates. {@link DrawCover#Complete} is useful for
+ * conservative small or multiview batches that must retain off-camera casters;
+ * the primary camera still controls selection quality, and this does not
+ * provide dedicated shadow quality or streaming. The caller owns GPU view
+ * resources. Call {@link #dispatch(Camera, double, int, int, Predicate)} on
+ * the renderer thread after the hierarchy's source page is ready for the
+ * requested use.
  */
 public final class HeightfieldGpuSelection implements AutoCloseable {
+    /** Choose whether draw commands include frustum-culled cover patches. */
+    public enum DrawCover {
+        /** Draw only patches visible to the selection camera. */
+        Visible,
+        /** Draw the complete balanced cover, including off-camera patches. */
+        Complete
+    }
+
     private static final int NODE_CAPACITY = 85;
     private static final int LEAF_CAPACITY = 64;
     private static final int NODE_VECTORS = 6;
@@ -83,6 +95,7 @@ public final class HeightfieldGpuSelection implements AutoCloseable {
 
     private final Renderer renderer;
     private final HeightfieldHierarchy hierarchy;
+    private final DrawCover drawCover;
     private final List<HeightfieldHierarchy.Node> nodes;
     private final Map<HeightfieldHierarchy.Node, Integer> indices = new IdentityHashMap<>();
     private final BufferObject input;
@@ -103,11 +116,32 @@ public final class HeightfieldGpuSelection implements AutoCloseable {
      */
     public HeightfieldGpuSelection(AssetManager assetManager, Renderer renderer,
             HeightfieldHierarchy hierarchy) throws IOException {
+        this(assetManager, renderer, hierarchy, DrawCover.Visible);
+    }
+
+    /**
+     * Create the bounded GPU selection resources for a hierarchy and draw cover.
+     * {@link DrawCover#Complete} includes the full balanced patch cover in the
+     * indirect draw, which can preserve off-camera casters in conservative
+     * small or multiview batches. Selection quality still comes from the
+     * dispatch camera; this option does not add dedicated shadow quality or
+     * streaming behavior. The caller owns GPU view resources.
+     *
+     * @throws IllegalArgumentException if an argument is null or the hierarchy
+     *         exceeds fixed capacity
+     * @throws IllegalStateException if required renderer capabilities or limits
+     *         are unavailable
+     * @throws IOException if either compute shader asset cannot be read
+     */
+    public HeightfieldGpuSelection(AssetManager assetManager, Renderer renderer,
+            HeightfieldHierarchy hierarchy, DrawCover drawCover) throws IOException {
         if (assetManager == null || renderer == null || hierarchy == null) {
             throw new IllegalArgumentException("asset manager, renderer, and hierarchy are required");
         }
+        if (drawCover == null) throw new IllegalArgumentException("drawCover is required");
         this.renderer = renderer;
         this.hierarchy = hierarchy;
+        this.drawCover = drawCover;
         nodes = hierarchy.getNodes();
         if (nodes.isEmpty() || nodes.size() > NODE_CAPACITY) {
             throw new IllegalArgumentException("heightfield hierarchy must contain 1 to 85 nodes");
@@ -128,6 +162,8 @@ public final class HeightfieldGpuSelection implements AutoCloseable {
         commandShader = computeShader(assetManager, COMMAND_PATH, language);
         selectShader.getUniform("m_NodeCount").setValue(VarType.Int, nodes.size());
         commandShader.getUniform("m_IndexCount").setValue(VarType.Int, (int) indexCount);
+        commandShader.getUniform("m_CompleteCover").setValue(VarType.Boolean,
+                drawCover == DrawCover.Complete);
     }
 
     /**
@@ -200,7 +236,7 @@ public final class HeightfieldGpuSelection implements AutoCloseable {
         if (material == null) throw new IllegalArgumentException("material is required");
         material.setBoolean("UseHeightfieldInstances", true);
         material.setUniformBufferObject("PatchRecords", patchRecords);
-        material.setInt("PatchRecordBase", NODE_CAPACITY * 2);
+        material.setInt("PatchRecordBase", drawCover == DrawCover.Complete ? 0 : NODE_CAPACITY * 2);
         material.setInt("PatchRecordVectors", NODE_CAPACITY * 4);
         material.setInt("PageCells", hierarchy.getPage().getCells());
         material.setInt("PatchGridCells", hierarchy.getPatchCells());

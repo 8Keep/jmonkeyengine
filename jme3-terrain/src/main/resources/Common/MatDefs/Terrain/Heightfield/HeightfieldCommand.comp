@@ -7,8 +7,10 @@ layout(std430, binding=2) writeonly buffer IndirectCommand {
     uint words[5];
 };
 uniform int m_IndexCount;
+uniform bool m_CompleteCover;
 void main() {
-    uint instances = uint(clamp(floor(header.x + 0.5), 0.0, 64.0));
+    float count = m_CompleteCover ? header.z : header.x;
+    uint instances = uint(clamp(floor(count + 0.5), 0.0, 64.0));
     words[0] = uint(m_IndexCount);
     words[1] = instances;
     words[2] = 0u;

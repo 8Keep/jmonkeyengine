@@ -94,6 +94,7 @@ public final class TestHeightfieldGpuLandscape extends SimpleApplication {
     private final CountDownLatch finished = new CountDownLatch(1);
     private final Path output;
     private final boolean materialMode;
+    private final boolean completeCover;
     private volatile Throwable failure;
     private HeightfieldPage page;
     private HeightfieldHierarchy hierarchy;
@@ -106,15 +107,18 @@ public final class TestHeightfieldGpuLandscape extends SimpleApplication {
     private HeightfieldResidency.PageKey residentKey;
     private HeightfieldResidency.Handle rootHandle;
 
-    private TestHeightfieldGpuLandscape(Path output, boolean materialMode) {
+    private TestHeightfieldGpuLandscape(Path output, boolean materialMode, boolean completeCover) {
         this.output = output;
         this.materialMode = materialMode;
+        this.completeCover = completeCover;
+        if (completeCover && !materialMode) throw new IllegalArgumentException("Complete covers use --materials");
     }
 
     public static void main(String[] args) throws Exception {
         TestHeightfieldGpuLandscape app = new TestHeightfieldGpuLandscape(Paths.get(
                 args.length > 1 ? args[1] : "build/heightfield-gpu-landscape"),
-                args.length > 2 && "--materials".equals(args[2]));
+                args.length > 2 && "--materials".equals(args[2]),
+                args.length > 3 && "--complete".equals(args[3]));
         AppSettings settings = new AppSettings(true);
         settings.setRenderer(args.length > 0 ? args[0] : AppSettings.LWJGL_OPENGL45);
         settings.setResolution(WIDTH, HEIGHT);
@@ -199,7 +203,8 @@ public final class TestHeightfieldGpuLandscape extends SimpleApplication {
                 "canonical page has a current slot-zero generation");
         require(residency.pin(residentKey), "pin the canonical root page for the probe");
 
-        selection = new HeightfieldGpuSelection(assetManager, renderer, hierarchy);
+        selection = new HeightfieldGpuSelection(assetManager, renderer, hierarchy, completeCover
+                ? HeightfieldGpuSelection.DrawCover.Complete : HeightfieldGpuSelection.DrawCover.Visible);
         BufferObject gpuRecords = selection.getPatchRecords();
         BufferObject cpuRecords = buffer(RECORD_VECS * 16, 0);
         BufferObject command = selection.getCommand();
@@ -225,13 +230,14 @@ public final class TestHeightfieldGpuLandscape extends SimpleApplication {
                 .append("One live HeightfieldResidency pool slot (key revision=1,x=0,z=0,stride=1) uploads the shared fine source texture; every candidate patch uses that same page. Scenario revision labels are metadata echoes, not height edits.\n")
                 .append("RGBA32F linear readback; PNG uses clamp-to-[0,1] then IEC sRGB transfer; no tone mapper.\n")
                 .append("GPU hierarchy selector -> compact records -> compute indirect command -> indexed draw; CPU oracle uses ordinary instancing.\n");
+        summary.append("drawCover=").append(completeCover ? "complete" : "visible").append('\n');
         summary.append("shading=").append(materialMode ? "ordinary Heightfield PBR material, two direct lights and ambient fill" : "diagnostic fine-gradient diffuse").append('\n');
         for (Scenario scenario : scenarios) {
             Capture result = capture(renderer, scenario, gpuRecords, cpuRecords,
                     command, gpuDraw, cpuDraw, grid, heights, state, es);
             summary.append(scenario.name).append(" leaves=").append(result.leaves)
-                    .append(" gpuVisible=").append(result.gpuVisible)
-                    .append(" cpuVisible=").append(result.cpuVisible)
+                    .append(" gpuInstances=").append(result.gpuInstances)
+                    .append(" cpuInstances=").append(result.cpuInstances)
                     .append(" gpuErrorPixels=").append(result.gpuError)
                     .append(" cpuErrorPixels=").append(result.cpuError)
                     .append(" imageMaxError=").append(result.imageError)
@@ -274,7 +280,7 @@ public final class TestHeightfieldGpuLandscape extends SimpleApplication {
             selection.dispatch(scenario.camera, scenario.targetPixels, scenario.revision,
                     LEAF_LIMIT, node -> residency.isCurrent(frameRoot));
 
-            int cpuVisible = countVisible(scenario, cpuCover);
+            int cpuInstances = completeCover ? cpuCover.size() : countVisible(scenario, cpuCover);
             packCpuRecords(scenario, cpuCover, cpuRecords);
             cpuDraw.getBufferBlock("m_Selection").setBufferObject(BufferType.UniformBufferObject, cpuRecords);
             gpuDraw.getBufferBlock("m_Selection").setBufferObject(BufferType.UniformBufferObject, gpuRecords);
@@ -285,19 +291,19 @@ public final class TestHeightfieldGpuLandscape extends SimpleApplication {
             require(residency.isRetained(frameRoot), scenario.name + " page generation remains retained before drawing");
             if (materialMode) {
                 drawMaterial(renderer, scenario, gpuRecords, grid, heights, gpuTarget, 0, command, frameRoot.getSlot(), false);
-                drawMaterial(renderer, scenario, cpuRecords, grid, heights, cpuTarget, cpuVisible, null, frameRoot.getSlot(), false);
+                drawMaterial(renderer, scenario, cpuRecords, grid, heights, cpuTarget, cpuInstances, null, frameRoot.getSlot(), false);
                 drawMaterial(renderer, scenario, gpuRecords, grid, heights, gpuShadow, 0, command, frameRoot.getSlot(), true);
-                drawMaterial(renderer, scenario, cpuRecords, grid, heights, cpuShadow, cpuVisible, null, frameRoot.getSlot(), true);
+                drawMaterial(renderer, scenario, cpuRecords, grid, heights, cpuShadow, cpuInstances, null, frameRoot.getSlot(), true);
             } else {
                 drawGpu(renderer, scenario, gpuDraw, gpuRecords, grid, heights, state, gpuTarget, 0, true, command, frameRoot.getSlot());
-                drawGpu(renderer, scenario, cpuDraw, cpuRecords, grid, heights, state, cpuTarget, cpuVisible, false, command, frameRoot.getSlot());
+                drawGpu(renderer, scenario, cpuDraw, cpuRecords, grid, heights, state, cpuTarget, cpuInstances, false, command, frameRoot.getSlot());
             }
             submitFrame(renderer, lease);
             submitted = true;
             waitForFrames();
             // Diagnostic readback follows submission; drawing never needs a CPU count.
-            int gpuVisible = decodeCommand(renderer, command, es);
-            require(gpuVisible == cpuVisible, scenario.name + " GPU command count matches CPU visible cover count");
+            int gpuInstances = decodeCommand(renderer, command, es);
+            require(gpuInstances == cpuInstances, scenario.name + " GPU command count matches the chosen CPU draw cover");
             double gpuError = verifyGpuCover(renderer, scenario, gpuRecords, cpuCover, es);
             if (materialMode) verifyDepth(renderer, scenario, gpuTarget, cpuTarget, gpuShadow, cpuShadow, es);
             FloatBuffer gpuPixels = read(renderer, gpuTarget);
@@ -306,7 +312,7 @@ public final class TestHeightfieldGpuLandscape extends SimpleApplication {
             writePng(output.resolve(scenario.name + "-gpu.png"), gpuPixels);
             writePng(output.resolve(scenario.name + "-cpu.png"), cpuPixels);
             System.out.println("HEIGHTFIELD_GPU_LANDSCAPE_COMPARE scenario=" + scenario.name
-                    + " gpuVisible=" + gpuVisible + " cpuVisible=" + cpuVisible
+                    + " gpuInstances=" + gpuInstances + " cpuInstances=" + cpuInstances
                     + " imageMaxError=" + comparison.maxError + " differingPixels=" + comparison.differingPixels
                     + " terrainPixels=" + comparison.terrainPixels);
             require(comparison.terrainPixels > WIDTH * HEIGHT / 12,
@@ -315,12 +321,12 @@ public final class TestHeightfieldGpuLandscape extends SimpleApplication {
 
             require(gpuError <= scenario.targetPixels + 4.0 * Math.ulp((float) scenario.targetPixels),
                     scenario.name + " decoded GPU cover meets target");
-            require(gpuVisible > 1 && cpuVisible > 1, scenario.name + " actual GPU and CPU draws use multiple patch instances");
+            require(gpuInstances > 1 && cpuInstances > 1, scenario.name + " actual GPU and CPU draws use multiple patch instances");
             checks += comparison.compared;
             System.out.println("HEIGHTFIELD_GPU_LANDSCAPE scenario=" + scenario.name + " leaves=" + cpuCover.size()
-                    + " visible=" + gpuVisible + " terrainPixels=" + comparison.terrainPixels
+                    + " visible=" + gpuInstances + " terrainPixels=" + comparison.terrainPixels
                     + " imageMaxError=" + comparison.maxError + " checks=" + checks + " gles=" + es);
-            return new Capture(cpuCover.size(), gpuVisible, cpuVisible, gpuError, cpu.getMaximumPixels(),
+            return new Capture(cpuCover.size(), gpuInstances, cpuInstances, gpuError, cpu.getMaximumPixels(),
                     comparison.maxError, comparison.differingPixels, comparison.terrainPixels,
                     frameRoot.getSlot(), frameRoot.getGeneration(), true);
         } finally {
@@ -388,7 +394,7 @@ public final class TestHeightfieldGpuLandscape extends SimpleApplication {
         } else {
             material.setBoolean("UseHeightfieldInstances", true);
             material.setUniformBufferObject("PatchRecords", records);
-            material.setInt("PatchRecordBase", NODES * 2);
+            material.setInt("PatchRecordBase", completeCover ? 0 : NODES * 2);
             material.setInt("PatchRecordVectors", NODES * 4);
             material.setInt("PageCells", CELLS);
             material.setInt("PatchGridCells", PATCH_CELLS);
@@ -751,13 +757,13 @@ public final class TestHeightfieldGpuLandscape extends SimpleApplication {
         Comparison(float error,int different,int terrain,int compared){maxError=error;differingPixels=different;terrainPixels=terrain;this.compared=compared;}
     }
     private static final class Capture {
-        final int leaves,gpuVisible,cpuVisible,terrainPixels,differingPixels,slot;
+        final int leaves,gpuInstances,cpuInstances,terrainPixels,differingPixels,slot;
         final long generation;
         final boolean leaseCompleted;
         final double gpuError,cpuError;final float imageError;
-        Capture(int leaves,int gpuVisible,int cpuVisible,double gpuError,double cpuError,
-                float imageError,int differingPixels,int terrainPixels,int slot,long generation,boolean leaseCompleted){this.leaves=leaves;this.gpuVisible=gpuVisible;
-            this.cpuVisible=cpuVisible;this.gpuError=gpuError;this.cpuError=cpuError;this.imageError=imageError;
+        Capture(int leaves,int gpuInstances,int cpuInstances,double gpuError,double cpuError,
+                float imageError,int differingPixels,int terrainPixels,int slot,long generation,boolean leaseCompleted){this.leaves=leaves;this.gpuInstances=gpuInstances;
+            this.cpuInstances=cpuInstances;this.gpuError=gpuError;this.cpuError=cpuError;this.imageError=imageError;
             this.differingPixels=differingPixels;this.terrainPixels=terrainPixels;this.slot=slot;
             this.generation=generation;this.leaseCompleted=leaseCompleted;}
     }

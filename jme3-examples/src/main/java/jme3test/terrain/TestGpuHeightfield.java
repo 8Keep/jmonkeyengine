@@ -47,6 +47,7 @@ import com.jme3.renderer.Caps;
 import com.jme3.renderer.queue.RenderQueue.ShadowMode;
 import com.jme3.scene.Geometry;
 import com.jme3.scene.instancing.IndirectGeometry;
+import com.jme3.shadow.DirectionalLightVisibilityRenderer;
 import com.jme3.system.AppSettings;
 import com.jme3.terrain.heightfield.HeightfieldGpuSelection;
 import com.jme3.terrain.heightfield.HeightfieldGrid;
@@ -87,6 +88,8 @@ public final class TestGpuHeightfield extends SimpleApplication {
     private final CountDownLatch capturesFinished = new CountDownLatch(1);
     private volatile Throwable failure;
     private HeightfieldGpuSelection selection;
+    private DirectionalLightVisibilityRenderer visibility;
+    private boolean shadowsEnabled;
     private FrameBuffer captureTarget;
     private ScreenshotAppState screenshots;
     private int captureFrame;
@@ -95,17 +98,18 @@ public final class TestGpuHeightfield extends SimpleApplication {
     private boolean verifyCaptures;
     private boolean changeCameraAfterCapture;
 
-    private TestGpuHeightfield(boolean finiteRun, Path output) {
+    private TestGpuHeightfield(boolean finiteRun, Path output, boolean shadowsEnabled) {
         this.finiteRun = finiteRun;
         this.output = output;
+        this.shadowsEnabled = shadowsEnabled;
     }
 
     public static void main(String[] args) throws Exception {
-        if (args.length > 2) {
-            throw new IllegalArgumentException("Usage: TestGpuHeightfield [<renderer> [<output-directory>]]");
+        if (args.length > 3 || (args.length == 3 && !"--no-shadows".equals(args[2]))) {
+            throw new IllegalArgumentException("Usage: TestGpuHeightfield [<renderer> [<output-directory> [--no-shadows]]]");
         }
-        boolean finite = args.length == 2;
-        TestGpuHeightfield app = new TestGpuHeightfield(finite, finite ? Paths.get(args[1]) : null);
+        boolean finite = args.length >= 2;
+        TestGpuHeightfield app = new TestGpuHeightfield(finite, finite ? Paths.get(args[1]) : null, args.length < 3);
         AppSettings settings = new AppSettings(true);
         settings.setRenderer(args.length > 0 ? args[0] : AppSettings.ANGLE_GLES3);
         settings.setResolution(WIDTH, HEIGHT);
@@ -158,7 +162,10 @@ public final class TestGpuHeightfield extends SimpleApplication {
 
             HeightfieldPage page = createPage();
             HeightfieldHierarchy hierarchy = new HeightfieldHierarchy(page, PATCH_CELLS, 0);
-            selection = new HeightfieldGpuSelection(assetManager, renderer, hierarchy);
+            // A complete cover keeps off-camera casters in the sun's views.
+            // Primary-camera quality still controls this bounded shared cover.
+            selection = new HeightfieldGpuSelection(assetManager, renderer, hierarchy,
+                    HeightfieldGpuSelection.DrawCover.Complete);
 
             TextureArray heightPages = new TextureArray(java.util.Collections.singletonList(page.createImage()));
             heightPages.setMinFilter(Texture.MinFilter.NearestNoMipMaps);
@@ -168,7 +175,7 @@ public final class TestGpuHeightfield extends SimpleApplication {
             Geometry terrain = new IndirectGeometry("GPU selected terrain",
                     grid.createLodPatchMesh(hierarchy.getRoot()), selection.getCommand(), 0,
                     hierarchy.getRoot().getBound());
-            terrain.setShadowMode(ShadowMode.Off);
+            terrain.setShadowMode(ShadowMode.CastAndReceive);
             Material material = new Material(assetManager,
                     "Common/MatDefs/Terrain/Heightfield/Heightfield.j3md");
             material.setTexture("HeightPages", heightPages);
@@ -190,6 +197,13 @@ public final class TestGpuHeightfield extends SimpleApplication {
             rootNode.addLight(ambient);
             rootNode.attachChild(SkyFactory.createSky(assetManager, TestModernHeightfield.sky(),
                     SkyFactory.EnvMapType.CubeMap));
+
+            visibility = new DirectionalLightVisibilityRenderer(assetManager, 2048, 3);
+            visibility.setLight(sun);
+            visibility.setShadowIntensity(shadowsEnabled ? 1 : 0);
+            visibility.setShadowZExtend(220);
+            visibility.addReceiver(material);
+            viewPort.addProcessor(visibility);
 
             FilterPostProcessor post = new FilterPostProcessor(assetManager);
             post.setFrameBufferFormat(Image.Format.RGBA16F);
@@ -247,8 +261,9 @@ public final class TestGpuHeightfield extends SimpleApplication {
         inputManager.addMapping("HeightfieldOverview", new KeyTrigger(KeyInput.KEY_1));
         inputManager.addMapping("HeightfieldValley", new KeyTrigger(KeyInput.KEY_2));
         inputManager.addMapping("HeightfieldClose", new KeyTrigger(KeyInput.KEY_3));
+        inputManager.addMapping("HeightfieldShadows", new KeyTrigger(KeyInput.KEY_H));
         inputManager.addListener(cameraControls, "HeightfieldOverview", "HeightfieldValley",
-                "HeightfieldClose");
+                "HeightfieldClose", "HeightfieldShadows");
     }
 
     private final ActionListener cameraControls = new ActionListener() {
@@ -258,6 +273,10 @@ public final class TestGpuHeightfield extends SimpleApplication {
             if ("HeightfieldOverview".equals(name)) setCameraPose(0);
             else if ("HeightfieldValley".equals(name)) setCameraPose(1);
             else if ("HeightfieldClose".equals(name)) setCameraPose(2);
+            else if ("HeightfieldShadows".equals(name)) {
+                shadowsEnabled = !shadowsEnabled;
+                visibility.setShadowIntensity(shadowsEnabled ? 1 : 0);
+            }
         }
     };
 
@@ -265,8 +284,8 @@ public final class TestGpuHeightfield extends SimpleApplication {
         com.jme3.font.BitmapText text = new com.jme3.font.BitmapText(guiFont);
         text.setSize(16f);
         text.setText("GPU HEIGHTFIELD  |  1 overview  2 valley  3 close\n"
-                + "WASD/QZ move  |  hold left mouse and drag to look\n"
-                + "One immutable 128 m page from fixed source samples; no streaming. Shadows off.");
+                + "WASD/QZ move  |  hold left mouse and drag to look  |  H sun shadows\n"
+                + "One immutable 128 m page from fixed source samples; no streaming.");
         text.setLocalTranslation(16, cam.getHeight() - 16, 0);
         guiNode.attachChild(text);
     }
