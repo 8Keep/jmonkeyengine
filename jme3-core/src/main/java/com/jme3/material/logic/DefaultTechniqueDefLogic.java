@@ -41,6 +41,7 @@ import com.jme3.renderer.RenderManager;
 import com.jme3.renderer.Renderer;
 import com.jme3.scene.Geometry;
 import com.jme3.scene.Mesh;
+import com.jme3.scene.instancing.IndirectGeometry;
 import com.jme3.scene.instancing.InstancedGeometry;
 import com.jme3.shader.DefineList;
 import com.jme3.shader.Shader;
@@ -63,7 +64,11 @@ public class DefaultTechniqueDefLogic implements TechniqueDefLogic {
     public static void renderMeshFromGeometry(Renderer renderer, Geometry geom) {
         Mesh mesh = geom.getMesh();
         int lodLevel = geom.getLodLevel();
-        if (geom instanceof InstancedGeometry) {
+        if (geom instanceof IndirectGeometry) {
+            IndirectGeometry indirectGeom = (IndirectGeometry) geom;
+            renderer.renderMeshIndirect(mesh, lodLevel, indirectGeom.getCommandBuffer(),
+                    indirectGeom.getCommandOffset(), null);
+        } else if (geom instanceof InstancedGeometry) {
             InstancedGeometry instGeom = (InstancedGeometry) geom;
             int numVisibleInstances = instGeom.getNumVisibleInstances();
             if (numVisibleInstances > 0) {
