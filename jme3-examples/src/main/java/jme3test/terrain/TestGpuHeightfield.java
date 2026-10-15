@@ -73,7 +73,11 @@ import javax.imageio.ImageIO;
  *
  * <p>No arguments opens an interactive window. Press 1, 2, or 3 for overview,
  * valley, and close camera presets. Passing a renderer and output directory
- * takes those three views as PNG files and exits.
+ * takes those three views as PNG files and exits. Optional --profile records
+ * finite frame timings before screenshots; --no-shadows disables sun visibility
+ * while retaining shadow-map rendering for a color-only comparison. Combine
+ * --profile and --static-selection to measure unchanged draws with selection
+ * dispatched only once per camera preset.
  */
 public final class TestGpuHeightfield extends SimpleApplication {
     private static final int CELLS = 256;
@@ -81,10 +85,14 @@ public final class TestGpuHeightfield extends SimpleApplication {
     private static final float SPACING = .5f;
     private static final int WIDTH = 1280;
     private static final int HEIGHT = 800;
+    private static final int PROFILE_WARMUP = 60;
+    private static final int PROFILE_FRAMES_PER_VIEW = 120;
     private static final String[] CAPTURE_NAMES = {"overview", "valley", "close"};
 
     private final Path output;
     private final boolean finiteRun;
+    private final boolean profileRun;
+    private final boolean staticSelection;
     private final CountDownLatch capturesFinished = new CountDownLatch(1);
     private volatile Throwable failure;
     private HeightfieldGpuSelection selection;
@@ -97,19 +105,33 @@ public final class TestGpuHeightfield extends SimpleApplication {
     private int writtenCaptures;
     private boolean verifyCaptures;
     private boolean changeCameraAfterCapture;
+    private HeightfieldFrameTimings timings;
+    private int profileFrame;
+    private int drainFrames;
+    private boolean profileWritten;
+    private int profilePose = -1;
 
-    private TestGpuHeightfield(boolean finiteRun, Path output, boolean shadowsEnabled) {
+    private TestGpuHeightfield(boolean finiteRun, Path output, boolean shadowsEnabled,
+            boolean profileRun, boolean staticSelection) {
         this.finiteRun = finiteRun;
         this.output = output;
         this.shadowsEnabled = shadowsEnabled;
+        this.profileRun = profileRun;
+        this.staticSelection = staticSelection;
     }
 
     public static void main(String[] args) throws Exception {
-        if (args.length > 3 || (args.length == 3 && !"--no-shadows".equals(args[2]))) {
-            throw new IllegalArgumentException("Usage: TestGpuHeightfield [<renderer> [<output-directory> [--no-shadows]]]");
+        boolean shadows = true, profile = false, staticSelection = false;
+        for (int i = 2; i < args.length; i++) {
+            if ("--no-shadows".equals(args[i])) shadows = false;
+            else if ("--profile".equals(args[i])) profile = true;
+            else if ("--static-selection".equals(args[i])) staticSelection = true;
+            else throw new IllegalArgumentException("Usage: TestGpuHeightfield [<renderer> [<output-directory> [--no-shadows] [--profile [--static-selection]]]]");
         }
+        if (staticSelection && !profile) throw new IllegalArgumentException("--static-selection requires --profile");
         boolean finite = args.length >= 2;
-        TestGpuHeightfield app = new TestGpuHeightfield(finite, finite ? Paths.get(args[1]) : null, args.length < 3);
+        TestGpuHeightfield app = new TestGpuHeightfield(finite, finite ? Paths.get(args[1]) : null,
+                shadows, profile, staticSelection);
         AppSettings settings = new AppSettings(true);
         settings.setRenderer(args.length > 0 ? args[0] : AppSettings.ANGLE_GLES3);
         settings.setResolution(WIDTH, HEIGHT);
@@ -211,6 +233,11 @@ public final class TestGpuHeightfield extends SimpleApplication {
             post.addFilter(new KHRToneMapFilter());
             post.addFilter(new FXAAFilter());
             viewPort.addProcessor(post);
+            if (profileRun) {
+                timings = new HeightfieldFrameTimings(renderer, PROFILE_WARMUP);
+                // End queries after this viewport's shadow/main/post commands.
+                viewPort.addProcessor(timings);
+            }
 
             setCameraPose(0);
             if (!finiteRun) {
@@ -309,6 +336,35 @@ public final class TestGpuHeightfield extends SimpleApplication {
     public void simpleUpdate(float tpf) {
         if (selection == null || failure != null) return;
         try {
+            if (profileRun && !profileWritten) {
+                if (profileFrame < PROFILE_WARMUP + PROFILE_FRAMES_PER_VIEW * CAPTURE_NAMES.length) {
+                    int pose = Math.max(0, (profileFrame - PROFILE_WARMUP) / PROFILE_FRAMES_PER_VIEW);
+                    timings.beginFrame(CAPTURE_NAMES[pose]);
+                    setCameraPose(pose);
+                    profileFrame++;
+                    if (!staticSelection || profilePose != pose) {
+                        selection.dispatch(cam, 1.25, 1, 64, node -> true);
+                        profilePose = pose;
+                    }
+                    if (profileFrame == PROFILE_WARMUP + PROFILE_FRAMES_PER_VIEW * CAPTURE_NAMES.length) {
+                        timings.stopSampling();
+                    }
+                    return;
+                }
+                // Availability polling never waits for results. Keep rendering
+                // until all queries retire, then write outside measured frames.
+                if (!timings.isDrained()) {
+                    if (++drainFrames > 300) throw new IllegalStateException("GPU timing queries did not retire");
+                    selection.dispatch(cam, 1.25, 1, 64, node -> true);
+                    return;
+                }
+                timings.write(output);
+                profileWritten = true;
+                setCameraPose(0);
+                System.out.println("GPU_HEIGHTFIELD_PROFILE_PASS frames="
+                        + PROFILE_FRAMES_PER_VIEW * CAPTURE_NAMES.length + " warmup=" + PROFILE_WARMUP
+                        + " selection=" + (staticSelection ? "once-per-view" : "every-frame"));
+            }
             selection.dispatch(cam, 1.25, 1, 64, node -> true);
             if (!finiteRun) return;
             if (verifyCaptures) {
