@@ -30,8 +30,11 @@ uniform bool m_Reset;
 
 shared bool cover[85];
 shared bool attempted[85];
-shared bool assigned[85];
+shared bool desiredFiner[85];
+shared bool desiredAncestor[85];
+shared bool childrenReady[85];
 shared int liveRank[85];
+shared int normalizedRank[85];
 shared float interior[85];
 shared int activeParent;
 shared float alpha;
@@ -112,6 +115,14 @@ void main() {
         liveRank[lane] = m_Reset ? -1 : r;
         cover[lane] = !m_Reset && r >= 0 && lane < nodeCount;
         interior[lane] = 0.0;
+        desiredFiner[lane] = false;
+        desiredAncestor[lane] = false;
+        childrenReady[lane] = false;
+        if (lane < nodeCount) {
+            desiredFiner[lane] = desiredHasFiner(lane);
+            desiredAncestor[lane] = desiredContains(lane);
+            childrenReady[lane] = allChildrenReady(lane);
+        }
     }
     barrier();
 
@@ -166,7 +177,7 @@ void main() {
                     int bestLevel = 2147483647;
                     int bestRank = 2147483647;
                     for (int n=0; n<nodeCount; ++n) {
-                        if (!cover[n] || attempted[n] || !desiredHasFiner(n) || !allChildrenReady(n)) continue;
+                        if (!cover[n] || attempted[n] || !desiredFiner[n] || !childrenReady[n]) continue;
                         int level = nodes[n].meta.x;
                         int rank = liveRank[n];
                         if (level < bestLevel || (level == bestLevel && rank < bestRank)) {
@@ -212,7 +223,8 @@ void main() {
                     int parent = -1;
                     int parentLevel = -1;
                     for (int n=0; n<nodeCount; ++n) {
-                        if (attempted[n] || nodes[n].children.x < 0 || nodes[n].meta.y == 0 || !desiredContains(n)) continue;
+                        if (attempted[n] || nodes[n].children.x < 0 || nodes[n].meta.y == 0
+                                || !desiredAncestor[n]) continue;
                         bool allPresent = true;
                         for (int k=0; k<4; ++k) {
                             int child = nodes[n].children[k];
@@ -240,25 +252,24 @@ void main() {
             }
         }
 
-        // Keep a dense rank sequence while preserving insertion order.
-        for (int n=0; n<85; ++n) assigned[n] = false;
-        for (int r=0; r<64; ++r) {
-            int selected = -1;
-            int minimum = 2147483647;
-            for (int n=0; n<85; ++n) {
-                if (cover[n] && !assigned[n] && liveRank[n] >= 0 && liveRank[n] < minimum) {
-                    minimum = liveRank[n];
-                    selected = n;
-                }
-            }
-            if (selected >= 0) {
-                liveRank[selected] = r;
-                assigned[selected] = true;
-            }
-        }
         leafCount = 0;
         for (int i=0; i<85; ++i) if (cover[i]) ++leafCount;
     }
+    barrier();
+
+    // Count lower old ranks in parallel before any lane overwrites a rank.
+    if (lane < 85) {
+        int rank = 0;
+        if (cover[lane]) {
+            for (int other=0; other<85; ++other) {
+                if (cover[other] && (liveRank[other] < liveRank[lane]
+                        || (liveRank[other] == liveRank[lane] && other < lane))) ++rank;
+            }
+        }
+        normalizedRank[lane] = rank;
+    }
+    barrier();
+    if (lane < 85) liveRank[lane] = cover[lane] ? normalizedRank[lane] : -1;
     barrier();
 
     if (lane < 85) {
