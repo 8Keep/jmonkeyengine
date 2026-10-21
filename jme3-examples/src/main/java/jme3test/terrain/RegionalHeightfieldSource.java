@@ -34,8 +34,13 @@ package jme3test.terrain;
 import com.jme3.terrain.heightfield.HeightfieldSource;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.CancellationException;
 
-/** Bounded, deterministic scenic source shared by regional terrain examples. */
+/**
+ * Bounded, deterministic scenic source shared by regional terrain examples.
+ * Preparation is thread-confined; transfer ownership to the render thread
+ * only after preparation completes.
+ */
 final class RegionalHeightfieldSource implements HeightfieldSource {
     static final int CELLS = 1024;
     static final float SPACING = .5f;
@@ -60,10 +65,11 @@ final class RegionalHeightfieldSource implements HeightfieldSource {
     private int tileLoads;
     private long peakTransientFloatBytes;
     private long directSampleCount;
+    private long heightRequests;
 
     RegionalHeightfieldSource(long revision) {
-        if (revision != 0 && revision != 1) {
-            throw new IllegalArgumentException("synthetic source revision must be 0 or 1");
+        if (revision < 0) {
+            throw new IllegalArgumentException("synthetic source revision must be nonnegative");
         }
         this.revision = revision;
     }
@@ -80,6 +86,9 @@ final class RegionalHeightfieldSource implements HeightfieldSource {
 
     @Override
     public float getHeight(int x, int z) {
+        if (((++heightRequests) & 4095L) == 0) {
+            checkInterrupted();
+        }
         if (x < -1 || x > CELLS + 1 || z < -1 || z > CELLS + 1) {
             throw new IndexOutOfBoundsException("sample is outside the source and its one-fine-sample halo");
         }
@@ -133,8 +142,12 @@ final class RegionalHeightfieldSource implements HeightfieldSource {
     }
 
     private float[] loadTile(int tileX, int tileZ) {
+        checkInterrupted();
         float[] values = new float[TILE_CELLS * TILE_CELLS];
         for (int z = 0; z < TILE_CELLS; z++) {
+            if ((z & 7) == 0) {
+                checkInterrupted();
+            }
             for (int x = 0; x < TILE_CELLS; x++) {
                 int localX = tileX * TILE_CELLS + x;
                 int localZ = tileZ * TILE_CELLS + z;
@@ -148,13 +161,19 @@ final class RegionalHeightfieldSource implements HeightfieldSource {
         double worldX = x * (double) SPACING + SCENIC_OFFSET_X;
         double worldZ = z * (double) SPACING + SCENIC_OFFSET_Z;
         double height = ScenicHeightField.height(worldX, worldZ);
-        if (revision == 1) {
+        if ((revision & 1L) != 0) {
             double dx = x * (double) SPACING - EDIT_HILL_X;
             double dz = z * (double) SPACING - EDIT_HILL_Z;
             double radiusSquared = EDIT_HILL_RADIUS * EDIT_HILL_RADIUS;
             height += 20.0 * Math.exp(-0.5 * (dx * dx + dz * dz) / radiusSquared);
         }
         return (float) height;
+    }
+
+    private static void checkInterrupted() {
+        if (Thread.currentThread().isInterrupted()) {
+            throw new CancellationException("regional heightfield preparation interrupted");
+        }
     }
 
     private final class PointSampleView implements HeightfieldSource {
@@ -170,10 +189,12 @@ final class RegionalHeightfieldSource implements HeightfieldSource {
 
         @Override
         public float getHeight(int x, int z) {
+            if (((++directSampleCount) & 4095L) == 0) {
+                checkInterrupted();
+            }
             if (x < -1 || x > CELLS + 1 || z < -1 || z > CELLS + 1) {
                 throw new IndexOutOfBoundsException("sample is outside the source and its one-fine-sample halo");
             }
-            directSampleCount++;
             return sampleHeight(x, z);
         }
 
