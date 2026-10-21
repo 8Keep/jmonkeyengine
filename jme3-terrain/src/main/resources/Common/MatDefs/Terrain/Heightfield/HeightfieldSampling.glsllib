@@ -2,10 +2,6 @@
 precision highp sampler2DArray;
 #endif
 
-#if defined(HEIGHTFIELD_SOURCE_GRADIENTS) && (!defined(HEIGHTFIELD_NODE_PAGES) || !defined(HEIGHTFIELD_INSTANCES))
-#error HEIGHTFIELD_SOURCE_GRADIENTS requires HEIGHTFIELD_NODE_PAGES and HEIGHTFIELD_INSTANCES
-#endif
-
 // Instance records use the same page uniforms and LOD reconstruction as the
 // ordinary path. The caller supplies the matching page/patch uniforms, record
 // range, and indirect instance count for each batch.
@@ -25,11 +21,17 @@ layout(std140) uniform m_HeightfieldPageBindings {
 #endif
 #endif
 
+#if defined(HEIGHTFIELD_SOURCE_GRADIENTS) && !defined(HEIGHTFIELD_LOD)
+#error HEIGHTFIELD_SOURCE_GRADIENTS requires HEIGHTFIELD_LOD
+#endif
+
 uniform sampler2DArray m_HeightPages;
 uniform int m_HeightLayer;
 uniform float m_SampleSpacing;
 #ifdef HEIGHTFIELD_SOURCE_GRADIENTS
 uniform sampler2DArray m_HeightGradientPages;
+// Canonical fine-sample spacing, independent of this decimated page's spacing.
+uniform float m_SourceSampleSpacing;
 #endif
 
 #ifdef HEIGHTFIELD_LOD
@@ -117,12 +119,21 @@ vec3 Heightfield_lodGradient(ivec2 globalGrid, bool parent) {
                 (back * 0.5 - front * 0.5) / float(stride));
 #endif
 #else
+#ifdef HEIGHTFIELD_SOURCE_GRADIENTS
+    // Ordinary per-node LOD uses one layer for both surfaces. The child's
+    // canonical gradient page contains its shared parent coordinates too.
+    ivec2 gradientGrid = Heightfield_readablePageGrid(globalGrid);
+    vec2 canonicalGradient = texelFetch(m_HeightGradientPages,
+            ivec3(gradientGrid + ivec2(1), m_HeightLayer), 0).rg;
+    return vec3(canonicalGradient.x, m_SourceSampleSpacing, canonicalGradient.y);
+#else
     float left = Heightfield_readGlobalHeight(globalGrid + ivec2(-1, 0));
     float right = Heightfield_readGlobalHeight(globalGrid + ivec2(1, 0));
     float back = Heightfield_readGlobalHeight(globalGrid + ivec2(0, -1));
     float front = Heightfield_readGlobalHeight(globalGrid + ivec2(0, 1));
     return vec3(left * 0.5 - right * 0.5, m_SampleSpacing,
                 back * 0.5 - front * 0.5);
+#endif
 #endif
 }
 

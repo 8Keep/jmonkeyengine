@@ -20,9 +20,14 @@ MaterialDef Heightfield {
         // Physical node-local halo pages; requires instance records and live bindings.
         Boolean UseHeightfieldNodePages : false
         // Optional canonical height-slope samples aligned with node-page layers.
-        // Supported only with UseHeightfieldNodePages; RG stores dx,dz.
+        // RG stores canonical half-height differences dx,dz. Node-page gradients
+        // use SampleSpacing; ordinary per-node LOD materials use this canonical
+        // source spacing for the normal's vertical component.
         Boolean UseHeightfieldSourceGradients : false
         TextureArray HeightGradientPages -LINEAR
+        // Positive finite spacing of the canonical fine source samples. Required
+        // when source gradients are enabled on ordinary (non-instance) LOD pages.
+        Float SourceSampleSpacing : 1.0
         UniformBufferObject HeightfieldPageBindings
         UniformBufferObject PatchRecords
         // Offset in vec4 record units (the header is outside this array).

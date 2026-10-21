@@ -48,6 +48,7 @@ import com.jme3.renderer.ViewPort;
 import com.jme3.renderer.queue.RenderQueue;
 import com.jme3.renderer.queue.RenderQueue.ShadowMode;
 import com.jme3.shadow.DirectionalLightShadowFilter;
+import com.jme3.shadow.DirectionalLightVisibilityRenderer;
 import com.jme3.scene.Geometry;
 import com.jme3.scene.Mesh;
 import com.jme3.scene.Spatial;
@@ -65,6 +66,7 @@ import com.jme3.terrain.heightfield.HeightfieldLod.Patch;
 import com.jme3.terrain.heightfield.HeightfieldLod.Selection;
 import com.jme3.terrain.heightfield.HeightfieldLod.Transition;
 import com.jme3.terrain.heightfield.HeightfieldPage;
+import com.jme3.terrain.heightfield.HeightfieldSource;
 import com.jme3.terrain.heightfield.HeightfieldReconstruction;
 import com.jme3.terrain.heightfield.HeightfieldResidency;
 import com.jme3.terrain.heightfield.HeightfieldResidency.PageKey;
@@ -116,12 +118,17 @@ import javax.imageio.ImageIO;
  * Add --source-gradients to preserve canonical source lighting in node pages;
  * height and gradient payloads share publication, generations and frame leases.
  * The default CPU mode also exercises gradual transitions, edits and recreation.
+ * --large-region uses a 512 m tiled source without a dense heightmap, CPU
+ * selection, canonical gradients and a geometry pool bounded to 128 pages.
+ * Its finite tour retains the same failure/edit/recreation checks, but uses
+ * rectangle-cover checks rather than a full-region bitmap or dense GPU oracle.
+ * Source preparation remains synchronous; this is not a production scheduler.
  */
 public final class TestHeightfieldStreaming extends SimpleApplication {
-    private static final int CELLS = 128, PATCH_CELLS = 16, CAPACITY = 32;
+    private static final int CELLS = 128, PATCH_CELLS = 16, DEFAULT_CAPACITY = 32;
     private static final int PAGE_BYTES = (PATCH_CELLS + 3) * (PATCH_CELLS + 3) * Float.BYTES;
     private static final float SPACING = .5f, TRANSITION_STEP = .25f;
-    private static final int PATCH_BUDGET = 16, MAX_FRAMES = 720, MAX_JOBS = 12;
+    private static final int DEFAULT_PATCH_BUDGET = 16, MAX_FRAMES = 720, MAX_JOBS = 12;
     private static final int PROFILE_WARMUP = 60, MAX_PROFILE_STAGE_SAMPLES = 4096;
     private static final double PIXEL_TARGET = 1.5;
     private final Path output;
@@ -129,6 +136,13 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     private final boolean gpuTransitionsMode;
     private final boolean profileMode;
     private final boolean sourceGradientMode;
+    private final boolean largeRegionMode;
+    private final int capacity, patchBudget;
+    private HeightfieldGrid patchGrid;
+    private List<Node> demandOrder;
+    private final List<Geometry> spareGeometry = new ArrayList<>();
+    private int createdGeometry, peakActiveGeometry;
+    private HeightfieldSource source, pendingSource;
     private final long pageBytes;
     private final List<Long> feedbackPollNanos = new ArrayList<>(MAX_PROFILE_STAGE_SAMPLES);
     private final List<Long> jobUploadNanos = new ArrayList<>(MAX_PROFILE_STAGE_SAMPLES);
@@ -155,6 +169,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     private HeightfieldGpuTransitions gpuTransitions;
     private HeightfieldGpuCoverFeedback gpuFeedback;
     private HeightfieldFrameTimings timings;
+    private DirectionalLightVisibilityRenderer regionalVisibility;
     private Geometry gpuGeometry;
     private Mesh gpuPatchMesh;
     private Material gpuMaterial;
@@ -184,12 +199,15 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     private List<Node> pendingOracleNodes = Collections.emptyList();
 
     private TestHeightfieldStreaming(Path output, boolean gpuSelectionMode,
-            boolean gpuTransitionsMode, boolean profileMode, boolean sourceGradientMode) {
+            boolean gpuTransitionsMode, boolean profileMode, boolean sourceGradientMode, boolean largeRegionMode) {
         this.output = output;
         this.gpuSelectionMode = gpuSelectionMode;
         this.gpuTransitionsMode = gpuTransitionsMode;
         this.profileMode = profileMode;
         this.sourceGradientMode = sourceGradientMode;
+        this.largeRegionMode = largeRegionMode;
+        capacity = largeRegionMode ? 128 : DEFAULT_CAPACITY;
+        patchBudget = largeRegionMode ? 64 : DEFAULT_PATCH_BUDGET;
         this.pageBytes = PAGE_BYTES * (sourceGradientMode ? 3L : 1L);
     }
 
@@ -200,23 +218,28 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         boolean gpuSelectionMode = false;
         boolean gpuTransitionsMode = false;
         boolean profileMode = false;
-        boolean sourceGradientMode = false;
+        boolean sourceGradientMode = false, largeRegionMode = false;
         for (String arg : args) {
             if ("--gpu-selection".equals(arg)) gpuSelectionMode = true;
             else if ("--gpu-transitions".equals(arg)) gpuTransitionsMode = true;
             else if ("--profile".equals(arg)) profileMode = true;
             else if ("--source-gradients".equals(arg)) sourceGradientMode = true;
+            else if ("--large-region".equals(arg)) largeRegionMode = true;
             else if (arg.startsWith("--")) throw new IllegalArgumentException("Unknown option: " + arg);
             else positional.add(arg);
         }
-        if (gpuTransitionsMode || sourceGradientMode) gpuSelectionMode = true;
+        if (largeRegionMode && (gpuSelectionMode || gpuTransitionsMode)) {
+            throw new IllegalArgumentException("--large-region uses CPU selection; the GPU ABI remains capped at 85 nodes");
+        }
+        if (largeRegionMode) sourceGradientMode = true;
+        else if (gpuTransitionsMode || sourceGradientMode) gpuSelectionMode = true;
         if (positional.size() > 2) throw new IllegalArgumentException("Expected renderer and optional output directory");
         String rendererName = positional.isEmpty() ? AppSettings.ANGLE_GLES3 : positional.get(0);
         Path output = positional.size() > 1 ? Paths.get(positional.get(1)) : null;
         if (profileMode && output == null) throw new IllegalArgumentException("--profile requires an output directory");
         if (!assertions) throw new IllegalStateException("Streaming control requires -ea");
         TestHeightfieldStreaming app = new TestHeightfieldStreaming(output, gpuSelectionMode,
-                gpuTransitionsMode, profileMode, sourceGradientMode);
+                gpuTransitionsMode, profileMode, sourceGradientMode, largeRegionMode);
         AppSettings settings = new AppSettings(true);
         settings.setRenderer(rendererName);
         settings.setResolution(960, 640);
@@ -247,13 +270,20 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             flyCam.setMoveSpeed(24);
             flyCam.setDragToRotate(true);
             HeightfieldGrid.requireSupported(renderer);
+            patchGrid = new HeightfieldGrid(PATCH_CELLS);
             residency = new HeightfieldResidency(PATCH_CELLS, pageBytes,
-                    new HeightfieldResidency.Limits(CAPACITY, MAX_JOBS, MAX_JOBS * pageBytes,
+                    new HeightfieldResidency.Limits(capacity, MAX_JOBS, MAX_JOBS * pageBytes,
                             6L * pageBytes, 2, 2L * pageBytes, 12, 12));
             atlas = createAtlas();
             if (sourceGradientMode) gradientAtlas = createGradientAtlas();
-            page = makePage(0);
-            hierarchy = new HeightfieldHierarchy(page, PATCH_CELLS, 0);
+            if (largeRegionMode) {
+                source = new RegionalHeightfieldSource(0);
+                hierarchy = measureRegion(source, 0);
+            } else {
+                page = makePage(0);
+                source = page;
+                hierarchy = new HeightfieldHierarchy(page, PATCH_CELLS, 0);
+            }
             installRoot(hierarchy, revision);
             rebuildScene();
             if (this.gpuSelectionMode) initializeGpuSelection();
@@ -274,7 +304,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     private TextureArray createAtlas(boolean gradients) {
         List<Image> layers = new ArrayList<>();
         float[] zeros = new float[(PATCH_CELLS + 3) * (PATCH_CELLS + 3)];
-        for (int slot = 0; slot < CAPACITY; slot++) {
+        for (int slot = 0; slot < capacity; slot++) {
             HeightfieldPage empty = new HeightfieldPage(PATCH_CELLS, SPACING, zeros,
                     gradients ? new float[zeros.length * 2] : null);
             layers.add(gradients ? empty.createGradientImage() : empty.createImage());
@@ -313,6 +343,17 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     }
 
     private HeightfieldPage prepare(Node node, long sourceRevision) {
+        return prepare(node, sourceRevision, sourceRevision == revision ? source : pendingSource);
+    }
+
+    private HeightfieldPage prepare(Node node, long sourceRevision, HeightfieldSource snapshot) {
+        if (largeRegionMode) {
+            require(snapshot != null && ((RegionalHeightfieldSource) snapshot).getRevision() == sourceRevision,
+                    "preparation retains its immutable source snapshot");
+            HeightfieldSource samples = ((RegionalHeightfieldSource) snapshot).pageSamples(node.getStride());
+            return HeightfieldPage.fromSource(samples, node.getOriginX(), node.getOriginZ(),
+                    PATCH_CELLS, node.getStride(), sourceGradientMode);
+        }
         int side = PATCH_CELLS + 3, stride = node.getStride();
         float[] samples = new float[side * side];
         float[] gradients = sourceGradientMode ? new float[samples.length * 2] : null;
@@ -344,46 +385,76 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         require(residency.ready(root) != null && residency.pin(root), "ready root pinned before drawing");
     }
 
+    private HeightfieldHierarchy measureRegion(HeightfieldSource snapshot, long sourceRevision) {
+        long begin = System.nanoTime();
+        HeightfieldHierarchy result = HeightfieldHierarchy.fromSource(snapshot, PATCH_CELLS, sourceRevision, 0);
+        System.out.printf(Locale.ROOT,
+                "HEIGHTFIELD_REGION_METADATA revision=%d cells=%d nodes=%d constructionMs=%.3f retainedDenseHeightBytes=0%n",
+                sourceRevision, result.getCells(), result.getNodes().size(), (System.nanoTime() - begin) / 1e6);
+        return result;
+    }
+
     private void rebuildScene() {
         for (Node node : displayed) rootNode.detachChild(geometryByNode.get(node));
         displayed.clear();
+        if (largeRegionMode) spareGeometry.addAll(geometryByNode.values());
         geometryByNode.clear();
         if (gpuProbe != null) gpuProbe.close();
-        gpuProbe = output == null || profileMode ? null
+        gpuProbe = output == null || profileMode ? null : largeRegionMode
+                ? HeightfieldLodGpuProbe.forSource(assetManager, renderManager, renderer, source, atlas)
                 : new HeightfieldLodGpuProbe(assetManager, renderManager, renderer, page);
         lod = new HeightfieldLod(hierarchy);
         transition = new Transition(hierarchy);
-        if (gpuSelectionMode) return; // The GPU batch owns one mesh; retain only the CPU oracle here.
-        HeightfieldGrid grid = new HeightfieldGrid(PATCH_CELLS);
-        for (Node node : hierarchy.getNodes()) {
-            Geometry geometry = new Geometry("stream-" + node.getOriginX() + "-" + node.getOriginZ()
-                    + "-" + node.getStride(), grid.createLodPatchMesh(node));
-            Vector3f origin = new Vector3f(node.getOriginX() * SPACING, 0, node.getOriginZ() * SPACING);
-            BoundingBox bound = node.getBound();
-            bound.setCenter(bound.getCenter().subtract(origin));
-            geometry.getMesh().setBound(bound);
-            geometry.setLocalTranslation(origin);
-            geometry.setShadowMode(ShadowMode.CastAndReceive);
-            // Capture.postFrame precedes ForwardPipeline's Translucent queue;
-            // this atlas is sampled only by opaque terrain and its earlier shadows.
-            geometry.setQueueBucket(RenderQueue.Bucket.Opaque);
-            Material material = new Material(assetManager, "Common/MatDefs/Terrain/Heightfield/Heightfield.j3md");
-            material.setTexture("HeightPages", atlas);
-            material.setFloat("SampleSpacing", SPACING * node.getStride());
-            material.setBoolean("UseHeightfieldLod", true);
-            material.setInt("PageCells", PATCH_CELLS);
-            material.setInt("PatchGridCells", PATCH_CELLS);
-            material.setVector2("PageLatticeOrigin", new Vector2f(
-                    node.getOriginX() / node.getStride(), node.getOriginZ() / node.getStride()));
-            material.setVector2("PatchLatticeOrigin", new Vector2f(0, 0));
-            material.setInt("SampleStride", 1);
-            material.setFloat("SnowLine", 7.8f);
-            material.setFloat("SnowFade", 1.5f);
-            material.setColor("GrassColor", new ColorRGBA(.12f, .20f, .075f, 1));
-            material.setColor("RockColor", new ColorRGBA(.29f, .26f, .22f, 1));
-            material.setColor("SnowColor", new ColorRGBA(.83f, .87f, .9f, 1));
-            geometry.setMaterial(material);
-            geometryByNode.put(node, geometry);
+        demandOrder = hierarchy.getNodes();
+        if (largeRegionMode) {
+            demandOrder = new ArrayList<>(demandOrder);
+            demandOrder.sort(java.util.Comparator.comparingInt(Node::getLevel));
+        }
+        if (gpuSelectionMode || largeRegionMode) return;
+        for (Node node : hierarchy.getNodes()) geometryByNode.put(node, createPatchGeometry(node));
+    }
+
+    private Geometry createPatchGeometry(Node node) {
+        Geometry geometry = new Geometry("stream-patch", patchGrid.createLodPatchMesh(node));
+        geometry.setShadowMode(ShadowMode.CastAndReceive);
+        // Opaque terrain and shadows finish before Capture.postFrame fences it.
+        geometry.setQueueBucket(RenderQueue.Bucket.Opaque);
+        Material material = new Material(assetManager, "Common/MatDefs/Terrain/Heightfield/Heightfield.j3md");
+        material.setBoolean("UseHeightfieldLod", true);
+        material.setInt("PageCells", PATCH_CELLS);
+        material.setInt("PatchGridCells", PATCH_CELLS);
+        material.setVector2("PatchLatticeOrigin", new Vector2f(0, 0));
+        material.setInt("SampleStride", 1);
+        material.setFloat("SnowLine", largeRegionMode ? 210f : 7.8f);
+        material.setFloat("SnowFade", largeRegionMode ? 35f : 1.5f);
+        material.setColor("GrassColor", new ColorRGBA(.12f, .20f, .075f, 1));
+        material.setColor("RockColor", new ColorRGBA(.29f, .26f, .22f, 1));
+        material.setColor("SnowColor", new ColorRGBA(.83f, .87f, .9f, 1));
+        geometry.setMaterial(material);
+        if (regionalVisibility != null) regionalVisibility.addReceiver(material);
+        configurePatchGeometry(geometry, node);
+        if (largeRegionMode) {
+            createdGeometry++;
+            require(createdGeometry <= capacity, "geometry pool is bounded by physical page capacity");
+        }
+        return geometry;
+    }
+
+    private void configurePatchGeometry(Geometry geometry, Node node) {
+        Vector3f origin = new Vector3f(node.getOriginX() * SPACING, 0, node.getOriginZ() * SPACING);
+        BoundingBox bound = node.getBound();
+        bound.setCenter(bound.getCenter().subtract(origin));
+        geometry.getMesh().setBound(bound);
+        geometry.setLocalTranslation(origin);
+        Material material = geometry.getMaterial();
+        material.setTexture("HeightPages", atlas);
+        material.setFloat("SampleSpacing", SPACING * node.getStride());
+        material.setVector2("PageLatticeOrigin", new Vector2f(
+                node.getOriginX() / node.getStride(), node.getOriginZ() / node.getStride()));
+        if (largeRegionMode) {
+            material.setTexture("HeightGradientPages", gradientAtlas);
+            material.setBoolean("UseHeightfieldSourceGradients", true);
+            material.setFloat("SourceSampleSpacing", SPACING);
         }
     }
 
@@ -399,7 +470,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         HeightfieldGpuCoverFeedback feedback = null;
         Mesh patchMesh = null;
         try {
-            pageBindings = new HeightfieldGpuPageBindings(renderer, targetHierarchy, CAPACITY);
+            pageBindings = new HeightfieldGpuPageBindings(renderer, targetHierarchy, capacity);
             if (gpuTransitionsMode) {
                 transitions = new HeightfieldGpuTransitions(assetManager, renderer, targetHierarchy);
                 feedback = new HeightfieldGpuCoverFeedback(assetManager, renderer, targetHierarchy);
@@ -562,7 +633,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                 retiringStorage = false;
             }
             double target = output == null ? PIXEL_TARGET : requestedPixels(frame);
-            Selection ideal = lod.select(cam, target, PATCH_BUDGET, node -> true);
+            Selection ideal = lod.select(cam, target, patchBudget, node -> true);
             Set<PageKey> retained = new LinkedHashSet<>();
             if (gpuTransitionsMode) {
                 if (gpuFeedbackPending) {
@@ -582,15 +653,16 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             // Parent-first ordering keeps coarse fallback and sibling transactions useful.
             Set<PageKey> idealAncestors = new LinkedHashSet<>();
             for (Node leaf : ideal.getLeaves()) addAncestors(idealAncestors, leaf, revision);
-            for (Node node : hierarchy.getNodes()) {
+            for (Node node : demandOrder) {
                 if (idealAncestors.contains(key(node, revision))) wanted.add(key(node, revision));
             }
-            if (frame >= 150 && frame < 205) {
+            if (frame >= 150 && frame < (largeRegionMode ? 280 : 205)) {
                 // Deliberately retain more desired cache pages than the atlas can
                 // hold. This is a finite capacity-pressure test, not useful prefetch.
-                for (Node node : hierarchy.getNodes()) {
+                int pressurePages = 0;
+                for (Node node : largeRegionMode ? demandOrder : hierarchy.getNodes()) {
                     wanted.add(key(node, revision));
-                    if (wanted.size() >= CAPACITY + 8) break;
+                    if (largeRegionMode ? ++pressurePages >= capacity + 8 : wanted.size() >= capacity + 8) break;
                 }
             }
             for (Node node : hierarchy.getNodes()) {
@@ -619,9 +691,9 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                     Handle handle = residency.ready(key(node, revision));
                     return handle == null ? -1 : handle.getSlot();
                 });
-                currentSelection = lod.select(cam, target, PATCH_BUDGET, gpuPageBindings::isReady);
+                currentSelection = lod.select(cam, target, patchBudget, gpuPageBindings::isReady);
             } else {
-                currentSelection = lod.select(cam, target, PATCH_BUDGET,
+                currentSelection = lod.select(cam, target, patchBudget,
                         node -> residency.ready(key(node, revision)) != null);
             }
             if (profileMode) oracleNanos += System.nanoTime() - oracleStart;
@@ -634,7 +706,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                     pendingOracleNodes = oracleNodes(transition.getPatches());
                     if (profileMode) oracleNanos += System.nanoTime() - oracleStart;
                     gpuDispatchStart = profileMode ? System.nanoTime() : 0;
-                    gpuTransitions.dispatch(cam, target, (int) revision, PATCH_BUDGET,
+                    gpuTransitions.dispatch(cam, target, (int) revision, patchBudget,
                             TRANSITION_STEP, gpuPageBindings::isReady);
                     gpuFeedbackPending = true;
                     pendingFeedbackSequence = ++gpuDispatchSequence;
@@ -681,7 +753,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             } else if (gpuSelectionMode) {
                 if (!profileMode || frame <= MAX_FRAMES) {
                     gpuDispatchStart = profileMode ? System.nanoTime() : 0;
-                    gpuSelection.dispatch(cam, target, (int) revision, PATCH_BUDGET, gpuPageBindings::isReady);
+                    gpuSelection.dispatch(cam, target, (int) revision, patchBudget, gpuPageBindings::isReady);
                     if (profileMode) {
                         recordStage(gpuDispatchNanos, System.nanoTime() - gpuDispatchStart, true);
                     }
@@ -695,7 +767,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                     verifyGpuTransitionRecords(patches);
                 } else if (gpuSelectionMode) {
                     verifyGpuPageRecords(patches);
-                } else {
+                } else if (gpuProbe != null && (!largeRegionMode || frame == 350 || frame == 530)) {
                     for (Patch patch : patches) {
                         Handle handle = residency.ready(key(patch.getNode(), revision));
                         HeightfieldLodGpuProbe.Verification result = gpuProbe.verifyNodePage(patch,
@@ -722,7 +794,10 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             Node node = findNode(candidate);
             require(node != null, "request matches an immutable source node");
             requestedAt.put(candidate, frame);
-            jobs.add(new Job(request, node, candidate.revision, frame + (candidate.revision != revision ? 8 : 2 + node.getLevel() * 2)));
+            int levelDelay = largeRegionMode ? Math.min(node.getLevel(), 2) : node.getLevel();
+            jobs.add(new Job(request, node, candidate.revision,
+                    frame + (candidate.revision != revision ? 8 : 2 + levelDelay * 2),
+                    candidate.revision == revision ? source : pendingSource));
             if (!injectedCancellation && frame > 15 && node.getLevel() > 0) {
                 require(residency.cancel(request), "explicit cancellation accepted");
                 injectedCancellation = true;
@@ -751,7 +826,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                 continue;
             }
             boolean accepted = residency.complete(job.request, job.payload == null
-                    ? (job.payload = prepare(job.node, job.revision)) : job.payload);
+                    ? (job.payload = prepare(job.node, job.revision, job.source)) : job.payload);
             if (accepted || !residency.isPending(job.request)) {
                 if (!accepted) staleResults++;
                 iterator.remove();
@@ -793,8 +868,14 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     }
 
     private void beginEdit() {
-        pendingPage = makePage(revision + 1);
-        pendingHierarchy = new HeightfieldHierarchy(pendingPage, PATCH_CELLS, 0);
+        if (largeRegionMode) {
+            pendingSource = new RegionalHeightfieldSource(revision + 1);
+            pendingHierarchy = measureRegion(pendingSource, revision + 1);
+        } else {
+            pendingPage = makePage(revision + 1);
+            pendingSource = pendingPage;
+            pendingHierarchy = new HeightfieldHierarchy(pendingPage, PATCH_CELLS, 0);
+        }
         // Admission is retried by schedule(), with this root ahead of ordinary
         // refinement. The pinned old cover remains visible under queue pressure.
     }
@@ -819,6 +900,8 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         retireGpuResources();
         hierarchy = pendingHierarchy;
         page = pendingPage;
+        source = pendingSource;
+        pendingSource = null;
         pendingHierarchy = null;
         pendingPage = null;
         revision++;
@@ -843,6 +926,8 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         residency.unpin(key(old.getRoot(), oldRevision));
         hierarchy = pendingHierarchy;
         page = pendingPage;
+        source = pendingSource;
+        pendingSource = null;
         pendingHierarchy = null;
         pendingPage = null;
         revision++;
@@ -862,9 +947,11 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         // before replacing it, so whole retired arrays cannot escape our budget.
         require(residency.stats().frames == 0, "old storage leases drained before replacement");
         discardAtlas();
+        if (gradientAtlas != null) discardAtlas(gradientAtlas);
         residency.reset();
         obsolete.clear();
         atlas = createAtlas();
+        if (sourceGradientMode) gradientAtlas = createGradientAtlas();
         installRoot(hierarchy, revision);
         rebuildScene();
         recreations++;
@@ -937,9 +1024,22 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
 
     private void syncDrawSet(List<Patch> patches) {
         Set<Node> next = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (Patch patch : patches) next.add(patch.getNode());
+        if (largeRegionMode) {
+            for (Node prior : displayed) if (!next.contains(prior)) {
+                Geometry old = geometryByNode.remove(prior);
+                rootNode.detachChild(old);
+                spareGeometry.add(old);
+            }
+        }
         for (Patch patch : patches) {
             Node node = patch.getNode();
-            next.add(node);
+            if (largeRegionMode && !geometryByNode.containsKey(node)) {
+                Geometry geometry = spareGeometry.isEmpty() ? createPatchGeometry(node)
+                        : spareGeometry.remove(spareGeometry.size() - 1);
+                configurePatchGeometry(geometry, node);
+                geometryByNode.put(node, geometry);
+            }
             Handle handle = residency.ready(key(node, revision));
             require(handle != null && residency.isRetained(handle), "draw references a retained slot generation");
             Material material = geometryByNode.get(node).getMaterial();
@@ -951,9 +1051,12 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             material.setFloat("EdgeMorphNorth", patch.getEdgeMorph(3));
             if (!displayed.contains(node)) rootNode.attachChild(geometryByNode.get(node));
         }
-        for (Node prior : displayed) if (!next.contains(prior)) rootNode.detachChild(geometryByNode.get(prior));
+        if (!largeRegionMode) for (Node prior : displayed) if (!next.contains(prior)) {
+            rootNode.detachChild(geometryByNode.get(prior));
+        }
         displayed.clear();
         displayed.addAll(next);
+        peakActiveGeometry = Math.max(peakActiveGeometry, next.size());
     }
 
     private void convergeOracle(Selection desired) {
@@ -1011,7 +1114,12 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         feedbackReads++;
     }
 
-    private static String timingPhase(int frame) {
+    private String timingPhase(int frame) {
+        if (largeRegionMode) {
+            if (frame >= 150 && frame < 280) return "region-pressure";
+            if (frame < 61 || frame >= 210 && frame < 291 || frame >= 460 && frame < 501) return "region-overview";
+            return frame < 210 ? "region-moving" : "region-close";
+        }
         if (frame < 31) return "overview";
         if (frame < 211) return "valley";
         if (frame < 291) return "overview";
@@ -1095,45 +1203,62 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         peakReady = Math.max(peakReady, stats.readySlots);
         peakRetired = Math.max(peakRetired, stats.retiredSlots);
         peakFrames = Math.max(peakFrames, stats.frames);
-        if (stats.readySlots + stats.retiredSlots == CAPACITY) fullAtlasFrames++;
+        if (stats.readySlots + stats.retiredSlots == capacity) fullAtlasFrames++;
         require(stats.requests <= MAX_JOBS && stats.queuedBytes <= MAX_JOBS * pageBytes
                 && stats.preparedBytes <= 6L * pageBytes && stats.retiredSlots <= 12
-                && stats.readySlots + stats.retiredSlots <= CAPACITY && stats.frames <= 12
+                && stats.readySlots + stats.retiredSlots <= capacity && stats.frames <= 12
                 && jobs.size() <= MAX_JOBS, "independent residency/preparation/frame budgets hold");
         require(residency.ready(key(hierarchy.getRoot(), revision)) != null, "root fallback remains ready");
     }
 
     private void verifyFrame(List<Patch> patches) {
-        int[] coverage = new int[CELLS * CELLS];
+        int[] coverage = largeRegionMode ? null : new int[CELLS * CELLS];
+        long area = 0;
+        boolean verifySamples = !largeRegionMode || !profileMode && isCaptureFrame(frame);
         for (Patch patch : patches) {
             Node node = patch.getNode();
             Handle handle = residency.ready(key(node, revision));
             require(handle != null, "all cover pages share current ready revision");
             HeightfieldPage payload = residency.get(handle);
-            for (int z = 0; z <= PATCH_CELLS; z++) for (int x = 0; x <= PATCH_CELLS; x++) {
-                require(payload.getHeight(x, z) == page.getHeight(node.getOriginX() + x * node.getStride(),
+            if (verifySamples) for (int z = 0; z <= PATCH_CELLS; z++) for (int x = 0; x <= PATCH_CELLS; x++) {
+                require(payload.getHeight(x, z) == source.getHeight(node.getOriginX() + x * node.getStride(),
                         node.getOriginZ() + z * node.getStride()), "node payload retains exact canonical samples");
                 if (sourceGradientMode) {
                     int gx = node.getOriginX() + x * node.getStride();
                     int gz = node.getOriginZ() + z * node.getStride();
-                    require(payload.getSourceGradientX(x, z) == page.getHeight(gx - 1, gz) * .5f
-                            - page.getHeight(gx + 1, gz) * .5f
-                            && payload.getSourceGradientZ(x, z) == page.getHeight(gx, gz - 1) * .5f
-                            - page.getHeight(gx, gz + 1) * .5f,
+                    require(payload.getSourceGradientX(x, z) == source.getHeight(gx - 1, gz) * .5f
+                            - source.getHeight(gx + 1, gz) * .5f
+                            && payload.getSourceGradientZ(x, z) == source.getHeight(gx, gz - 1) * .5f
+                            - source.getHeight(gx, gz + 1) * .5f,
                             "height and gradient payloads share the canonical revision");
                 }
             }
-            for (int z = node.getOriginZ(); z < node.getOriginZ() + node.getSpan(); z++) {
+            if (largeRegionMode) {
+                require(node.getOriginX() >= 0 && node.getOriginZ() >= 0
+                        && node.getOriginX() + node.getSpan() <= source.getCells()
+                        && node.getOriginZ() + node.getSpan() <= source.getCells(), "patch remains in the source");
+                area += (long) node.getSpan() * node.getSpan();
+                for (Patch other : patches) {
+                    Node b = other.getNode();
+                    if (b == node) continue;
+                    boolean overlap = Math.max(node.getOriginX(), b.getOriginX())
+                            < Math.min(node.getOriginX() + node.getSpan(), b.getOriginX() + b.getSpan())
+                            && Math.max(node.getOriginZ(), b.getOriginZ())
+                            < Math.min(node.getOriginZ() + node.getSpan(), b.getOriginZ() + b.getSpan());
+                    require(!overlap, "regional cover rectangles do not overlap");
+                }
+            } else for (int z = node.getOriginZ(); z < node.getOriginZ() + node.getSpan(); z++) {
                 for (int x = node.getOriginX(); x < node.getOriginX() + node.getSpan(); x++) coverage[z * CELLS + x]++;
             }
         }
-        for (int count : coverage) require(count == 1, "draw cover owns every cell exactly once");
+        if (largeRegionMode) require(area == (long) source.getCells() * source.getCells(), "regional cover owns the whole source");
+        else for (int count : coverage) require(count == 1, "draw cover owns every cell exactly once");
     }
 
     private void printMetrics(List<Patch> patches, double target) {
         String mode = gpuTransitionsMode ? "gpu-transitions" : gpuSelectionMode ? "gpu-selection" : "cpu";
         System.out.println("HEIGHTFIELD_STREAM frame=" + frame + " revision=" + revision
-                + " mode=" + mode
+                + " mode=" + mode + " largeRegion=" + largeRegionMode
                 + " cpuOraclePatches=" + patches.size() + " target=" + target
                 + " cpuOraclePixels=" + currentSelection.getMaximumPixels()
                 + (gpuSelectionMode ? " gpuInstanceCount=GPU-owned" : "")
@@ -1165,14 +1290,19 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                 && (!gpuTransitionsMode || peakRetiredGpuBundles > 0 && retiredGpuBundlesClosed > 0)
                 && fullAtlasFrames > 0 && (!gpuTransitionsMode || feedbackReads > 0 && !gpuFeedbackPending)
                 && (!profileMode || profileWritten),
-                "finite control exercised failures, cancellation, stale work, pressure and fences");
+                "finite control exercised failures, cancellation, stale work, pressure and fences"
+                        + " preparationFailures=" + preparationFailures + " uploadFailures=" + uploadFailures
+                        + " cancellations=" + cancellations + " stale=" + staleResults
+                        + " lifecycle=" + sourceLifecyclePassed + " retired=" + peakRetired
+                        + " frames=" + peakFrames + " waiting=" + waitingFrames
+                        + " fenceSignaled=" + fenceSignaled + " fullAtlas=" + fullAtlasFrames + " peakReady=" + peakReady);
         Collections.sort(publicationLatency);
         int p50 = percentile(.5), p95 = percentile(.95), maximum = percentile(1);
         String mode = gpuTransitionsMode ? "gpu-transitions" : gpuSelectionMode ? "gpu-selection" : "cpu";
         System.out.println((profileMode ? "HEIGHTFIELD_STREAM_PROFILE_PASS"
                 : gpuTransitionsMode ? "HEIGHTFIELD_STREAM_GPU_TRANSITIONS_PASS"
                 : gpuSelectionMode ? "HEIGHTFIELD_STREAM_GPU_SELECTION_PASS" : "HEIGHTFIELD_STREAM_PASS")
-                + " mode=" + mode
+                + " mode=" + mode + " largeRegion=" + largeRegionMode
                 + " frames=" + frame + " checks=" + checks
                 + (profileMode ? " timingWarmup=" + PROFILE_WARMUP
                 + " timingSamples=" + (MAX_FRAMES - PROFILE_WARMUP)
@@ -1184,7 +1314,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                 + " peakPreparedBytes=" + peakPreparedBytes + " peakReady=" + peakReady
                 + " peakRetired=" + peakRetired + " peakFrames=" + peakFrames
                 + " sourceRevision=" + revision + " edits=" + edits + " recreations=" + recreations
-                + " sourceGradients=" + sourceGradientMode + " atlasPayloadBytes=" + (CAPACITY * pageBytes)
+                + " sourceGradients=" + sourceGradientMode + " atlasPayloadBytes=" + (capacity * pageBytes)
                 + " publicationFrameLatencyP50=" + p50 + " p95=" + p95 + " max=" + maximum
                 + " gpuChannels=" + comparedChannels + " maxGpuError=" + maximumGpuError
                 + " waitingFrames=" + waitingFrames + " fullAtlasFrames=" + fullAtlasFrames
@@ -1199,6 +1329,15 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                 + " feedbackNativePendingPolls=" + feedbackNativePendingPolls
                 + " feedbackSkippedDispatches=" + feedbackSkippedDispatches
                 + " feedbackArtificialDelaySkipped=" + artificialFeedbackDelaySkipped : ""));
+        if (largeRegionMode) {
+            RegionalHeightfieldSource regional = (RegionalHeightfieldSource) source;
+            System.out.println("HEIGHTFIELD_REGION_PASS cells=" + source.getCells()
+                    + " nodes=" + hierarchy.getNodes().size() + " peakActiveGeometry=" + peakActiveGeometry
+                    + " pooledGeometry=" + createdGeometry + " geometryLimit=" + capacity
+                    + " sourceCachedFloatBytes=" + regional.getCachedFloatBytes()
+                    + " sourceTransientFloatBytes=" + regional.getPeakTransientFloatBytes()
+                    + " sourceTileLoads=" + regional.getTileLoads() + " directSamples=" + regional.getDirectSampleCount());
+        }
         completed.countDown();
     }
     private int percentile(double p) {
@@ -1220,9 +1359,11 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         final Node node;
         final long revision;
         final int due;
+        final HeightfieldSource source;
         HeightfieldPage payload;
-        Job(Request request, Node node, long revision, int due) {
+        Job(Request request, Node node, long revision, int due, HeightfieldSource source) {
             this.request = request; this.node = node; this.revision = revision; this.due = due;
+            this.source = source;
         }
     }
     private static final class GpuResourceBundle {
@@ -1273,6 +1414,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         @Override public void close() { renderer.deleteFence(fence); }
     }
     private void addLightingAndCapture() {
+        if (largeRegionMode) viewPort.setBackgroundColor(new ColorRGBA(.42f, .56f, .70f, 1));
         DirectionalLight sun = new DirectionalLight();
         sun.setDirection(new Vector3f(-.55f, -1f, -.42f).normalizeLocal());
         sun.setColor(new ColorRGBA(1.25f, 1.18f, 1.03f, 1));
@@ -1284,10 +1426,18 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         FilterPostProcessor post = new FilterPostProcessor(assetManager);
         post.setFrameBufferFormat(Image.Format.RGBA16F);
         post.setFrameBufferDepthFormat(Image.Format.Depth24);
-        DirectionalLightShadowFilter shadows = new DirectionalLightShadowFilter(assetManager, 1024, 3);
-        shadows.setLight(sun);
-        shadows.setShadowIntensity(.45f);
-        post.addFilter(shadows);
+        if (largeRegionMode) {
+            regionalVisibility = new DirectionalLightVisibilityRenderer(assetManager, 2048, 3);
+            regionalVisibility.setLight(sun);
+            regionalVisibility.setShadowZExtend(1400);
+            regionalVisibility.setShadowIntensity(1);
+            viewPort.addProcessor(regionalVisibility);
+        } else {
+            DirectionalLightShadowFilter shadows = new DirectionalLightShadowFilter(assetManager, 1024, 3);
+            shadows.setLight(sun);
+            shadows.setShadowIntensity(.45f);
+            post.addFilter(shadows);
+        }
         post.addFilter(new KHRToneMapFilter());
         post.addFilter(new FXAAFilter());
         viewPort.addProcessor(post);
@@ -1310,6 +1460,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
 
     private final class CameraPath {
         void apply(int f) {
+            if (largeRegionMode) { applyRegion(f); return; }
             float aspect = (float) cam.getWidth() / cam.getHeight();
             if (f >= 391 && f < 501) {
                 cam.setParallelProjection(true);
@@ -1340,6 +1491,35 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             } else {
                 cam.setLocation(new Vector3f(82, 38, 75));
                 cam.lookAt(new Vector3f(32, 2, 32), Vector3f.UNIT_Y);
+            }
+        }
+
+        private void applyRegion(int f) {
+            float aspect = (float) cam.getWidth() / cam.getHeight();
+            cam.setParallelProjection(false);
+            cam.setFrustumPerspective(55, aspect, .5f, 2200f);
+            if (f < 61 || f >= 210 && f < 291 || f >= 460 && f < 501) {
+                cam.setLocation(new Vector3f(256, 650, -300));
+                cam.lookAt(new Vector3f(256, 110, 256), Vector3f.UNIT_Y);
+            } else if (f < 210) {
+                float t = Math.min(1, (f - 61) / 149f);
+                float x = 45 + 350 * t, z = 50 + 120 * t;
+                float y = source.getHeight(Math.round(x / SPACING), Math.round(z / SPACING)) + 24;
+                // Readiness may temporarily draw a much coarser surface. Keep
+                // the camera above its conservative bound while pages arrive.
+                for (Patch patch : transition.getPatches()) {
+                    Node node = patch.getNode();
+                    if (x >= node.getOriginX() * SPACING && x <= (node.getOriginX() + node.getSpan()) * SPACING
+                            && z >= node.getOriginZ() * SPACING && z <= (node.getOriginZ() + node.getSpan()) * SPACING) {
+                        BoundingBox bound = node.getBound();
+                        y = Math.max(y, bound.getCenter().y + bound.getYExtent() + 24);
+                    }
+                }
+                cam.setLocation(new Vector3f(x, y, z));
+                cam.lookAt(new Vector3f(x + 60, y + 15, z + 110), Vector3f.UNIT_Y);
+            } else {
+                cam.setLocation(new Vector3f(400, 360, -150));
+                cam.lookAt(new Vector3f(230, 140, 280), Vector3f.UNIT_Y);
             }
         }
     }
