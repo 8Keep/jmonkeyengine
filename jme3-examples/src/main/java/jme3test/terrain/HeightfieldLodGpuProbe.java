@@ -53,6 +53,7 @@ import com.jme3.terrain.heightfield.HeightfieldHierarchy.Node;
 import com.jme3.terrain.heightfield.HeightfieldLod.Patch;
 import com.jme3.terrain.heightfield.HeightfieldPage;
 import com.jme3.terrain.heightfield.HeightfieldReconstruction;
+import com.jme3.terrain.heightfield.HeightfieldSource;
 import com.jme3.texture.FrameBuffer;
 import com.jme3.texture.Image;
 import com.jme3.texture.Texture;
@@ -82,10 +83,11 @@ public final class HeightfieldLodGpuProbe implements AutoCloseable {
     private final RenderManager renderManager;
     private final Renderer renderer;
     private final AssetManager assetManager;
-    private final HeightfieldPage page;
+    private final HeightfieldSource page;
     private final TextureArray heightPages;
     private final int heightLayer;
     private final boolean ownsHeightPages;
+    private final boolean nodePagesOnly;
     private final Material material;
     private final com.jme3.scene.Node scene = new com.jme3.scene.Node("heightfield-lod-probe-scene");
 
@@ -106,27 +108,40 @@ public final class HeightfieldLodGpuProbe implements AutoCloseable {
     /** Creates and owns a one-layer source array from {@code page}. */
     public HeightfieldLodGpuProbe(AssetManager assetManager, RenderManager renderManager,
             Renderer renderer, HeightfieldPage page) {
-        this(assetManager, renderManager, renderer, page, createPageArray(page), 0, true);
+        this(assetManager, renderManager, renderer, page, createPageArray(page), 0, true, false);
     }
 
     /** Uses the indicated layer of a caller-owned source array. */
     public HeightfieldLodGpuProbe(AssetManager assetManager, RenderManager renderManager,
             Renderer renderer, HeightfieldPage page, TextureArray heightPages, int heightLayer) {
-        this(assetManager, renderManager, renderer, page, heightPages, heightLayer, false);
+        this(assetManager, renderManager, renderer, page, heightPages, heightLayer, false, false);
     }
 
     private HeightfieldLodGpuProbe(AssetManager assetManager, RenderManager renderManager,
-            Renderer renderer, HeightfieldPage page, TextureArray heightPages, int heightLayer,
-            boolean ownsHeightPages) {
+            Renderer renderer, HeightfieldSource page, TextureArray heightPages, int heightLayer,
+            boolean ownsHeightPages, boolean nodePagesOnly) {
         if (assetManager == null || renderManager == null || renderer == null || page == null
                 || heightPages == null || renderer != renderManager.getRenderer()) {
-            throw new IllegalArgumentException("matching managers, renderer, page, and texture array are required");
+            throw new IllegalArgumentException("matching managers, renderer, source, and texture array are required");
         }
         Image image = heightPages.getImage();
-        if (image == null || image.getWidth() != page.getTextureSize()
-                || image.getHeight() != page.getTextureSize() || heightLayer < 0
+        if (image == null || heightLayer < 0
                 || (image.getData() != null && heightLayer >= image.getData().size())) {
-            throw new IllegalArgumentException("texture array layer must match the supplied page dimensions");
+            throw new IllegalArgumentException("texture array and layer must be available");
+        }
+        if (nodePagesOnly) {
+            float extent = page.getCells() * page.getSampleSpacing();
+            if (page.getCells() < 1 || page.getCells() > (1 << 20)
+                    || !Float.isFinite(page.getSampleSpacing()) || page.getSampleSpacing() <= 0
+                    || !Float.isFinite(extent) || extent <= 0
+                    || image.getWidth() < 4 || image.getHeight() < 4) {
+                throw new IllegalArgumentException("finite source extent and a node-page texture array are required");
+            }
+        } else {
+            int textureSize = ((HeightfieldPage) page).getTextureSize();
+            if (image.getWidth() != textureSize || image.getHeight() != textureSize) {
+                throw new IllegalArgumentException("texture array dimensions must match the supplied page");
+            }
         }
         this.renderManager = renderManager;
         this.renderer = renderer;
@@ -135,6 +150,7 @@ public final class HeightfieldLodGpuProbe implements AutoCloseable {
         this.heightPages = heightPages;
         this.heightLayer = heightLayer;
         this.ownsHeightPages = ownsHeightPages;
+        this.nodePagesOnly = nodePagesOnly;
         material = new Material(assetManager, MATERIAL_PATH);
         material.setTexture("HeightPages", heightPages);
         material.setInt("HeightLayer", heightLayer);
@@ -142,6 +158,17 @@ public final class HeightfieldLodGpuProbe implements AutoCloseable {
         material.setBoolean("UseHeightfieldLod", true);
         material.setInt("PageCells", page.getCells());
         material.setVector2("PageLatticeOrigin", new Vector2f(0, 0));
+    }
+
+    /**
+     * Creates a borrowed-atlas probe for canonical sources too large to retain
+     * as one dense page. This instance supports {@link #verifyNodePage} only.
+     */
+    static HeightfieldLodGpuProbe forSource(AssetManager assetManager,
+            RenderManager renderManager, Renderer renderer, HeightfieldSource source,
+            TextureArray atlas) {
+        return new HeightfieldLodGpuProbe(assetManager, renderManager, renderer,
+                source, atlas, 0, false, true);
     }
 
     private static TextureArray createPageArray(HeightfieldPage page) {
@@ -221,6 +248,9 @@ public final class HeightfieldLodGpuProbe implements AutoCloseable {
             FrameBuffer resumeTarget, boolean morphs) {
         int stride = morphs ? 4 : 2;
         requireOpen();
+        if (nodePagesOnly) {
+            throw new IllegalStateException("source-backed probe supports node-page verification only");
+        }
         if (patches == null || patches.isEmpty() || records == null || command == null || pageBindings == null || atlas == null
                 || recordBase < 0 || (long) recordBase + patches.size() * (long) stride > 340
                 || records.getData() == null || records.getData().limit() < 341 * 16
@@ -258,6 +288,9 @@ public final class HeightfieldLodGpuProbe implements AutoCloseable {
 
     private Verification verifyPatches(List<Patch> patches, FrameBuffer resumeTarget, int recordBase, int recordStride) {
         requireOpen();
+        if (nodePagesOnly) {
+            throw new IllegalStateException("source-backed probe supports node-page verification only");
+        }
         if (patches == null) {
             throw new IllegalArgumentException("patch metadata is required");
         }
