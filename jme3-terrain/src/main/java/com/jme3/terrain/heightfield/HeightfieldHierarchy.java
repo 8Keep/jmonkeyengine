@@ -38,18 +38,21 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * Immutable nested triangle surfaces over one canonical height page.
- * This small CPU reference hierarchy measures error against the retained fine
- * triangle surface, not an unsampled analytic landscape. It automatically
- * includes a conservative local float-reconstruction allowance in addition
- * to the ideal integer-lattice surface error. Extra source, filter,
- * quantization, edit, or backend uncertainty must be supplied explicitly.
- * Independently filtered payloads are not supported by this reconstruction
- * contract.
+ * Immutable hierarchy of nested triangle surfaces over a canonical heightfield.
+ * Error metadata compares ideal triangle surfaces against the canonical fine
+ * triangle surface. The hierarchy adds a local float-reconstruction allowance;
+ * additional source, filter, quantization, edit, or backend uncertainty belongs
+ * in {@code additionalWorldError}. Independently filtered payloads are not
+ * supported by this nested reconstruction contract.
  */
 public final class HeightfieldHierarchy {
+    private static final int MAX_REGION_INDEX = 1 << 20;
+    private static final long MAX_NODES = 1_000_000L;
+
     private final HeightfieldPage page;
-    private final int patchCells;
+    private final int cells, patchCells;
+    private final float spacing;
+    private final long sourceRevision;
     private final double additionalError;
     private final Node root;
     private final List<Node> nodes;
@@ -68,21 +71,99 @@ public final class HeightfieldHierarchy {
      * contract below.
      */
     public HeightfieldHierarchy(HeightfieldPage page, int patchCells, double additionalWorldError) {
-        if (page == null || !powerOfTwo(page.getCells()) || patchCells < 2
-                || !powerOfTwo(patchCells) || patchCells > page.getCells()
-                || Double.isNaN(additionalWorldError) || additionalWorldError < 0) {
-            throw new IllegalArgumentException("power-of-two page/patch dimensions and nonnegative uncertainty required");
-        }
+        if (page == null) throw new IllegalArgumentException("page is required");
+        validateDimensions(page.getCells(), patchCells, page.getSampleSpacing(), additionalWorldError);
         this.page = page;
+        cells = page.getCells();
+        spacing = page.getSampleSpacing();
         this.patchCells = patchCells;
+        sourceRevision = 0;
         additionalError = additionalWorldError;
-        root = new Node(null, 0, 0, page.getCells(), 0);
+        root = new Node(null, 0, 0, cells, 0,
+                (x, z, span, stride) -> measure(page, x, z, span, stride), null);
         List<Node> ordered = new ArrayList<>();
         collect(root, ordered);
         nodes = Collections.unmodifiableList(ordered);
     }
 
-    public HeightfieldPage getPage() { return page; }
+    private HeightfieldHierarchy(int cells, int patchCells, float spacing, long sourceRevision,
+            double additionalWorldError, MetadataProvider provider) {
+        validateDimensions(cells, patchCells, spacing, additionalWorldError);
+        if (provider == null) throw new IllegalArgumentException("metadata provider is required");
+        if (sourceRevision < 0) throw new IllegalArgumentException("source revision must be nonnegative");
+        this.page = null;
+        this.cells = cells;
+        this.patchCells = patchCells;
+        this.spacing = spacing;
+        this.sourceRevision = sourceRevision;
+        this.additionalError = additionalWorldError;
+        root = new Node(null, 0, 0, cells, 0, provider, null);
+        List<Node> ordered = new ArrayList<>();
+        collect(root, ordered);
+        nodes = Collections.unmodifiableList(ordered);
+    }
+
+    /** Build from exact or conservative canonical-surface metadata, retaining no provider. */
+    public static HeightfieldHierarchy fromMetadata(int cells, int patchCells, float spacing,
+            long sourceRevision, double additionalWorldError, MetadataProvider provider) {
+        return new HeightfieldHierarchy(cells, patchCells, spacing, sourceRevision,
+                additionalWorldError, provider);
+    }
+
+    /**
+     * Measure metadata from one immutable fine source without retaining it.
+     * This exhaustive CPU reference scans fine samples at each level; production
+     * sources can prepare/cache metadata offline and use {@link #fromMetadata}.
+     * The caller keeps source revision and extracted residency payloads coherent.
+     */
+    public static HeightfieldHierarchy fromSource(HeightfieldSource source, int patchCells,
+            long sourceRevision, double additionalWorldError) {
+        if (source == null) throw new IllegalArgumentException("source is required");
+        return fromMetadata(source.getCells(), patchCells, source.getSampleSpacing(),
+                sourceRevision, additionalWorldError,
+                (x, z, span, stride) -> measure(source, x, z, span, stride));
+    }
+
+    private static NodeMetadata measure(HeightfieldSource source, int x, int z, int span, int stride) {
+        float minimum = Float.POSITIVE_INFINITY, maximum = Float.NEGATIVE_INFINITY;
+        for (int j = z; j <= z + span; j++) for (int i = x; i <= x + span; i++) {
+            float height = source.getHeight(i, j);
+            minimum = Math.min(minimum, height);
+            maximum = Math.max(maximum, height);
+        }
+        double stable = HeightfieldReconstruction.maximumError(source, x, z, span, stride);
+        double parent = span == source.getCells() ? 0
+                : HeightfieldReconstruction.maximumError(source, x, z, span, 2 * stride);
+        return new NodeMetadata(minimum, maximum, stable, parent);
+    }
+
+    private static void validateDimensions(int cells, int patchCells, float spacing, double extra) {
+        if (!powerOfTwo(cells) || cells > MAX_REGION_INDEX || patchCells < 2
+                || !powerOfTwo(patchCells) || patchCells > cells
+                || !Float.isFinite(spacing) || spacing <= 0
+                || !Float.isFinite(cells * spacing)
+                || Double.isNaN(extra) || extra < 0) {
+            throw new IllegalArgumentException("power-of-two dimensions, finite positive extent, and nonnegative uncertainty required");
+        }
+        long count = 0, level = 1;
+        int span = cells;
+        while (true) {
+            count += level;
+            if (count > MAX_NODES) throw new IllegalArgumentException("hierarchy exceeds 1,000,000 nodes");
+            if (span == patchCells) break;
+            span /= 2;
+            level *= 4;
+        }
+    }
+
+    public boolean hasCanonicalPage() { return page != null; }
+    public HeightfieldPage getPage() {
+        if (page == null) throw new IllegalStateException("metadata-only hierarchy has no canonical page");
+        return page;
+    }
+    public int getCells() { return cells; }
+    public float getSampleSpacing() { return spacing; }
+    public long getSourceRevision() { return sourceRevision; }
     public int getPatchCells() { return patchCells; }
     public Node getRoot() { return root; }
     public List<Node> getNodes() { return nodes; }
@@ -93,42 +174,66 @@ public final class HeightfieldHierarchy {
         for (Node child : node.children) collect(child, result);
     }
 
+    /**
+     * Immutable node summary. Errors are exact or conservative bounds in world
+     * height units against the canonical fine triangle surface: stable compares
+     * this node's ideal triangle surface, while parent compares the surface at
+     * twice this node's stride. The root has no parent, so its parent error is
+     * unused and may be zero. Positive infinity means the error is unbounded.
+     */
+    public static final class NodeMetadata {
+        private final float minimumHeight, maximumHeight;
+        private final double stableSurfaceError, parentSurfaceError;
+        public NodeMetadata(float minimumHeight, float maximumHeight,
+                double stableSurfaceError, double parentSurfaceError) {
+            if (!Float.isFinite(minimumHeight) || !Float.isFinite(maximumHeight)
+                    || minimumHeight > maximumHeight
+                    || Double.isNaN(stableSurfaceError) || stableSurfaceError < 0
+                    || Double.isNaN(parentSurfaceError) || parentSurfaceError < 0) {
+                throw new IllegalArgumentException("finite ordered heights and nonnegative error bounds required");
+            }
+            this.minimumHeight = minimumHeight;
+            this.maximumHeight = maximumHeight;
+            this.stableSurfaceError = stableSurfaceError;
+            this.parentSurfaceError = parentSurfaceError;
+        }
+        public float getMinimumHeight() { return minimumHeight; }
+        public float getMaximumHeight() { return maximumHeight; }
+        public double getStableSurfaceError() { return stableSurfaceError; }
+        public double getParentSurfaceError() { return parentSurfaceError; }
+    }
+
+    /** Supplies metadata in canonical integer lattice coordinates. */
+    @FunctionalInterface
+    public interface MetadataProvider {
+        NodeMetadata metadata(int x, int z, int span, int stride);
+    }
+
     /** A fixed-size grid displaced at a power-of-two sample stride. */
     public final class Node {
         private final Node parent;
         private final int x, z, span, level, stride;
         private final List<Node> children;
         private final BoundingBox bound;
+        private final NodeMetadata metadata;
         private final double stableError, morphError;
-        private final double floatReconstructionError;
 
-        private Node(Node parent, int x, int z, int span, int level) {
-            this.parent = parent;
-            this.x = x;
-            this.z = z;
-            this.span = span;
-            this.level = level;
+        private Node(Node parent, int x, int z, int span, int level,
+                MetadataProvider provider, NodeMetadata parentData) {
+            this.parent = parent; this.x = x; this.z = z; this.span = span; this.level = level;
             stride = span / patchCells;
-            float min = Float.POSITIVE_INFINITY, max = Float.NEGATIVE_INFINITY;
-            for (int j = z; j <= z + span; j++) {
-                for (int i = x; i <= x + span; i++) {
-                    float h = page.getHeight(i, j);
-                    min = Math.min(min, h);
-                    max = Math.max(max, h);
-                }
-            }
-            float spacing = page.getSampleSpacing();
-            floatReconstructionError = localFloatReconstructionError(
-                    Math.max(Math.abs(min), Math.abs(max)), Math.max(x + span, z + span) * spacing);
-            double idealStableError = HeightfieldReconstruction.maximumError(page, x, z, span, stride);
-            stableError = idealStableError + floatReconstructionError + additionalError;
-            // Every moved triangle stays in its original parent triangle in
-            // x/z. Its residual from the parent plane is bounded by E; the
-            // fine reference is also within E. This bounds vertical error by 2E.
-            // Float reconstruction is a comparison allowance and is added once.
+            NodeMetadata data = provider.metadata(x, z, span, stride);
+            validateMetadata(data, parentData);
+            metadata = data;
+            float min = data.minimumHeight, max = data.maximumHeight;
+            double floatError = localFloatReconstructionError(Math.max(Math.abs(min), Math.abs(max)),
+                    Math.max(x + span, z + span) * spacing);
+            stableError = data.stableSurfaceError + floatError + additionalError;
+            // Both morphed vertices and the fine reference deviate from the
+            // parent plane by at most its error E, so their comparison is 2E.
+            // The float comparison allowance is charged only once.
             morphError = parent == null ? stableError
-                    : 2 * HeightfieldReconstruction.maximumError(page, x, z, span, 2 * stride)
-                    + floatReconstructionError + additionalError;
+                    : 2 * data.parentSurfaceError + floatError + additionalError;
             float[] lower = {x * spacing, min, z * spacing};
             float[] upper = {(x + span) * spacing, max, (z + span) * spacing};
             Vector3f center = new Vector3f();
@@ -141,19 +246,34 @@ public final class HeightfieldHierarchy {
                 extent[axis] = e < radius ? Math.nextUp(e) : e;
             }
             bound = new BoundingBox(center, extent[0], extent[1], extent[2]);
-            if (stride == 1) {
-                children = Collections.emptyList();
-            } else {
+            if (stride == 1) children = Collections.emptyList();
+            else {
                 int half = span / 2;
                 List<Node> four = new ArrayList<>(4);
-                four.add(new Node(this, x, z, half, level + 1));
-                four.add(new Node(this, x + half, z, half, level + 1));
-                four.add(new Node(this, x, z + half, half, level + 1));
-                four.add(new Node(this, x + half, z + half, half, level + 1));
+                four.add(new Node(this, x, z, half, level + 1, provider, data));
+                four.add(new Node(this, x + half, z, half, level + 1, provider, data));
+                four.add(new Node(this, x, z + half, half, level + 1, provider, data));
+                four.add(new Node(this, x + half, z + half, half, level + 1, provider, data));
                 children = Collections.unmodifiableList(four);
             }
         }
 
+        private void validateMetadata(NodeMetadata data, NodeMetadata parentData) {
+            if (data == null || !Float.isFinite(data.minimumHeight) || !Float.isFinite(data.maximumHeight)
+                    || data.minimumHeight > data.maximumHeight
+                    || !Float.isFinite((float) (((double) data.maximumHeight - data.minimumHeight) * .5))
+                    || Double.isNaN(data.stableSurfaceError) || data.stableSurfaceError < 0
+                    || Double.isNaN(data.parentSurfaceError) || data.parentSurfaceError < 0) {
+                throw new IllegalArgumentException("invalid hierarchy metadata at " + x + "," + z + "," + span);
+            }
+            if (parentData != null && (data.minimumHeight < parentData.minimumHeight
+                    || data.maximumHeight > parentData.maximumHeight)) {
+                throw new IllegalArgumentException("child height range escapes parent at " + x + "," + z + "," + span);
+            }
+        }
+
+        /** Uninflated source metadata suitable for a later metadata-only rebuild. */
+        public NodeMetadata getMetadata() { return metadata; }
         public int getOriginX() { return x; }
         public int getOriginZ() { return z; }
         public int getSpan() { return span; }
@@ -174,7 +294,7 @@ public final class HeightfieldHierarchy {
      * A deliberately loose local allowance for conversion and convex morph
      * reconstruction under correctly rounded IEEE-754 binary32 arithmetic
      * with gradual underflow. A physical coordinate is formed by multiplying
-     * an exactly representable lattice index (at most 256) by float spacing;
+     * an exactly representable lattice index (at most 2^20) by float spacing;
      * a morph then uses one subtraction, two products, and one addition. For a
      * scalar magnitude bounded by M, charge one full ULP(M) for coordinate
      * conversion and at most five for the rounded weight/products/sum. Charge

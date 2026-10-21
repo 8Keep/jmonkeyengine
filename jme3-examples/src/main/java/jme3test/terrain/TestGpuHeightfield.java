@@ -94,6 +94,8 @@ import javax.imageio.ImageIO;
  * --surface-cache adds resident, height-aware material pages with filtered mips.
  * E replaces matching height and surface resources together; construction is
  * synchronous and is not a streamed material-production budget.
+ * --metadata-only builds the hierarchy without retaining its source page; the
+ * demo still owns one dense page for upload and retains the 85-node GPU limit.
  */
 public final class TestGpuHeightfield extends SimpleApplication {
     private static final int CELLS = 256;
@@ -116,6 +118,7 @@ public final class TestGpuHeightfield extends SimpleApplication {
     private final boolean cpuSelection;
     private final boolean smoothLod;
     private final boolean surfaceCache;
+    private final boolean metadataOnly;
     private float transitionStep;
     private final CountDownLatch capturesFinished = new CountDownLatch(1);
     private volatile Throwable failure;
@@ -143,7 +146,7 @@ public final class TestGpuHeightfield extends SimpleApplication {
 
     private TestGpuHeightfield(boolean finiteRun, Path output, boolean shadowsEnabled,
             boolean profileRun, boolean staticSelection, boolean editTour, boolean cpuSelection,
-            boolean smoothLod, boolean surfaceCache) {
+            boolean smoothLod, boolean surfaceCache, boolean metadataOnly) {
         this.finiteRun = finiteRun;
         this.output = output;
         this.shadowsEnabled = shadowsEnabled;
@@ -153,11 +156,12 @@ public final class TestGpuHeightfield extends SimpleApplication {
         this.cpuSelection = cpuSelection;
         this.smoothLod = smoothLod;
         this.surfaceCache = surfaceCache;
+        this.metadataOnly = metadataOnly;
     }
 
     public static void main(String[] args) throws Exception {
         boolean shadows = true, profile = false, staticSelection = false, editTour = false, cpu = false, smooth = false;
-        boolean surfaceCache = false;
+        boolean surfaceCache = false, metadataOnly = false;
         String rendererName = AppSettings.ANGLE_GLES3;
         Path output = null;
         int positional = 0;
@@ -169,12 +173,13 @@ public final class TestGpuHeightfield extends SimpleApplication {
             else if ("--cpu-selection".equals(arg)) cpu = true;
             else if ("--smooth-lod".equals(arg)) smooth = true;
             else if ("--surface-cache".equals(arg)) surfaceCache = true;
+            else if ("--metadata-only".equals(arg)) metadataOnly = true;
             else if (!arg.startsWith("--") && positional < 2) {
                 if (positional == 0) rendererName = arg;
                 else output = Paths.get(arg);
                 positional++;
             }
-            else throw new IllegalArgumentException("Usage: TestGpuHeightfield [<renderer> [<output-directory>]] [--cpu-selection | --smooth-lod] [--surface-cache] [--no-shadows] [--profile [--static-selection] | --edit-tour]");
+            else throw new IllegalArgumentException("Usage: TestGpuHeightfield [<renderer> [<output-directory>]] [--cpu-selection | --smooth-lod] [--surface-cache] [--metadata-only] [--no-shadows] [--profile [--static-selection] | --edit-tour]");
         }
         if (staticSelection && !profile) throw new IllegalArgumentException("--static-selection requires --profile");
         if (smooth && (cpu || staticSelection)) {
@@ -186,7 +191,7 @@ public final class TestGpuHeightfield extends SimpleApplication {
             throw new IllegalArgumentException("--edit-tour requires an output directory and cannot be combined with --profile or --static-selection");
         }
         TestGpuHeightfield app = new TestGpuHeightfield(finite, output,
-                shadows, profile, staticSelection, editTour, cpu, smooth, surfaceCache);
+                shadows, profile, staticSelection, editTour, cpu, smooth, surfaceCache, metadataOnly);
         AppSettings settings = new AppSettings(true);
         settings.setRenderer(rendererName);
         settings.setResolution(WIDTH, HEIGHT);
@@ -235,6 +240,7 @@ public final class TestGpuHeightfield extends SimpleApplication {
             HeightfieldGrid.requireSupported(renderer);
             System.out.println("HEIGHTFIELD_SELECTION_MODE cpu=" + cpuSelection
                     + " smooth=" + smoothLod + " surfaceCache=" + surfaceCache
+                    + " metadataOnly=" + metadataOnly
                     + " computeCap=" + renderer.getCaps().contains(Caps.ComputeShader)
                     + " indirectCap=" + renderer.getCaps().contains(Caps.IndexedIndirectDraw));
             setDisplayFps(false);
@@ -336,7 +342,9 @@ public final class TestGpuHeightfield extends SimpleApplication {
         ScenicSurfacePages nextSurfaces = null;
         try {
             HeightfieldPage page = createPage(edited);
-            HeightfieldHierarchy hierarchy = new HeightfieldHierarchy(page, PATCH_CELLS, 0);
+            HeightfieldHierarchy hierarchy = metadataOnly
+                    ? HeightfieldHierarchy.fromSource(page, PATCH_CELLS, label, 0)
+                    : new HeightfieldHierarchy(page, PATCH_CELLS, 0);
             if (smoothLod) {
                 nextTransitions = new HeightfieldGpuTransitions(assetManager, renderer, hierarchy);
             } else if (!cpuSelection) {
