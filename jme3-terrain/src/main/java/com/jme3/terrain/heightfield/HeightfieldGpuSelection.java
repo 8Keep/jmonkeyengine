@@ -256,9 +256,9 @@ public final class HeightfieldGpuSelection implements AutoCloseable {
         material.setUniformBufferObject("PatchRecords", patchRecords);
         material.setInt("PatchRecordBase", drawCover == DrawCover.Complete ? 0 : NODE_CAPACITY * 2);
         material.setInt("PatchRecordVectors", NODE_CAPACITY * 4);
-        material.setInt("PageCells", hierarchy.getPage().getCells());
+        material.setInt("PageCells", hierarchy.getCells());
         material.setInt("PatchGridCells", hierarchy.getPatchCells());
-        material.setFloat("SampleSpacing", hierarchy.getPage().getSampleSpacing());
+        material.setFloat("SampleSpacing", hierarchy.getSampleSpacing());
     }
 
     /** Hierarchy used to construct this selection helper. */

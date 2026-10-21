@@ -45,6 +45,11 @@ public final class HeightfieldReconstruction {
      * is {@code x == z} in that cell's local coordinates.
      */
     public static double height(HeightfieldPage page, double x, double z, int stride) {
+        return height((HeightfieldSource) page, x, z, stride);
+    }
+
+    /** Same reconstruction contract for an independently tiled canonical source. */
+    public static double height(HeightfieldSource page, double x, double z, int stride) {
         requireStride(page, stride);
         if (!Double.isFinite(x) || !Double.isFinite(z)
                 || x < 0 || z < 0 || x > page.getCells() || z > page.getCells()) {
@@ -74,6 +79,12 @@ public final class HeightfieldReconstruction {
      */
     public static double maximumError(HeightfieldPage page, int originX, int originZ,
             int span, int stride) {
+        return maximumError((HeightfieldSource) page, originX, originZ, span, stride);
+    }
+
+    /** Same reconstruction contract for an independently tiled canonical source. */
+    public static double maximumError(HeightfieldSource page, int originX, int originZ,
+            int span, int stride) {
         requireStride(page, stride);
         int cells = page.getCells();
         if (span <= 0 || originX < 0 || originZ < 0
@@ -101,6 +112,12 @@ public final class HeightfieldReconstruction {
      * page's local units; {@code store} is reused when non-null.
      */
     public static Vector3f morphVertex(HeightfieldPage page, int x, int z,
+            int stride, float alpha, Vector3f store) {
+        return morphVertex((HeightfieldSource) page, x, z, stride, alpha, store);
+    }
+
+    /** Same reconstruction contract for an independently tiled canonical source. */
+    public static Vector3f morphVertex(HeightfieldSource page, int x, int z,
             int stride, float alpha, Vector3f store) {
         requireStride(page, stride);
         int cells = page.getCells();
@@ -159,12 +176,13 @@ public final class HeightfieldReconstruction {
         return mixed;
     }
 
-    private static void requireStride(HeightfieldPage page, int stride) {
+    private static void requireStride(HeightfieldSource page, int stride) {
         if (page == null) {
             throw new IllegalArgumentException("page must not be null");
         }
         int cells = page.getCells();
-        if (stride <= 0 || (stride & (stride - 1)) != 0 || stride > cells || cells % stride != 0) {
+        if (cells < 1 || cells > (1 << 20) || stride <= 0
+                || (stride & (stride - 1)) != 0 || stride > cells || cells % stride != 0) {
             throw new IllegalArgumentException("stride must be a power of two dividing page cells");
         }
     }

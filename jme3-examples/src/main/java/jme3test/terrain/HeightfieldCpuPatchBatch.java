@@ -115,9 +115,9 @@ final class HeightfieldCpuPatchBatch implements AutoCloseable {
         material.setUniformBufferObject("PatchRecords", patchRecords);
         material.setInt("PatchRecordBase", 0);
         material.setInt("PatchRecordVectors", NODE_CAPACITY * 4);
-        material.setInt("PageCells", hierarchy.getPage().getCells());
+        material.setInt("PageCells", hierarchy.getCells());
         material.setInt("PatchGridCells", hierarchy.getPatchCells());
-        material.setFloat("SampleSpacing", hierarchy.getPage().getSampleSpacing());
+        material.setFloat("SampleSpacing", hierarchy.getSampleSpacing());
     }
 
     InstancedGeometry getGeometry() {

@@ -55,7 +55,7 @@ import java.nio.ByteOrder;
  * halo gradients from the same source lattice, including samples beyond the
  * height halo where needed, so adjacent pages agree at shared coordinates.
  */
-public final class HeightfieldPage {
+public final class HeightfieldPage implements HeightfieldSource {
     private final int cells;
     private final float spacing;
     private final float[] samples;
@@ -119,6 +119,52 @@ public final class HeightfieldPage {
         }
         minimum = low;
         maximum = high;
+    }
+
+    /**
+     * Extract a stride-aligned page from one immutable canonical source revision.
+     * The owner keys this payload with the same revision as its hierarchy.
+     * Coarse halos outside the region repeat the nearest retained fine-halo
+     * sample; interior shared coordinates always sample the same source point.
+     * Optional gradients retain canonical one-fine-sample differences, independent
+     * of this page's coarser physical spacing.
+     */
+    public static HeightfieldPage fromSource(HeightfieldSource source, int originX, int originZ,
+            int cells, int stride, boolean includeSourceGradients) {
+        if (source == null || source.getCells() < 1 || source.getCells() > (1 << 20)
+                || cells < 2 || cells > 256 || stride < 1 || (stride & (stride - 1)) != 0
+                || originX < 0 || originZ < 0 || originX % stride != 0 || originZ % stride != 0) {
+            throw new IllegalArgumentException("source, bounded page dimensions and aligned power-of-two stride required");
+        }
+        int sourceCells = source.getCells();
+        long span = (long) cells * stride;
+        float spacing = source.getSampleSpacing() * stride;
+        if (span > sourceCells || originX > sourceCells - span || originZ > sourceCells - span
+                || !Float.isFinite(source.getSampleSpacing()) || source.getSampleSpacing() <= 0
+                || !Float.isFinite(spacing) || !Float.isFinite(cells * spacing)) {
+            throw new IllegalArgumentException("page must fit the source with finite physical spacing and extent");
+        }
+        int side = cells + 3;
+        float[] heights = new float[side * side];
+        float[] gradients = includeSourceGradients ? new float[heights.length * 2] : null;
+        for (int z = -1; z <= cells + 1; z++) for (int x = -1; x <= cells + 1; x++) {
+            int gx = originX + x * stride;
+            int gz = originZ + z * stride;
+            int index = (z + 1) * side + x + 1;
+            heights[index] = sourceHeight(source, gx, gz, sourceCells);
+            if (gradients != null) {
+                gradients[2 * index] = sourceHeight(source, gx - 1, gz, sourceCells) * .5f
+                        - sourceHeight(source, gx + 1, gz, sourceCells) * .5f;
+                gradients[2 * index + 1] = sourceHeight(source, gx, gz - 1, sourceCells) * .5f
+                        - sourceHeight(source, gx, gz + 1, sourceCells) * .5f;
+            }
+        }
+        return new HeightfieldPage(cells, spacing, heights, gradients);
+    }
+
+    private static float sourceHeight(HeightfieldSource source, int x, int z, int cells) {
+        return source.getHeight(Math.max(-1, Math.min(cells + 1, x)),
+                Math.max(-1, Math.min(cells + 1, z)));
     }
 
     public int getCells() {
