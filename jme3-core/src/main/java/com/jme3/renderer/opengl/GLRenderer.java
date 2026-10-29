@@ -3455,6 +3455,7 @@ public final class GLRenderer implements Renderer {
             logger.log(Level.WARNING, "Incompatible texture subimage");
         }
         int target = convertTextureType(tex.getType(), pixels.getMultiSamples(), -1);
+        bindTextureAndUnit(target, tex.getImage(), textureUnitIndex);
         texUtil.uploadSubTexture(target, pixels, 0, x, y,
                 0, 0, pixels.getWidth(), pixels.getHeight(), linearizeSrgbImages, tex.getImage().getColorSpace());
     }
@@ -3483,6 +3484,7 @@ public final class GLRenderer implements Renderer {
             logger.log(Level.WARNING, "Incompatible texture subimage");
         }
         int target = convertTextureType(dest.getType(), src.getMultiSamples(), -1);
+        bindTextureAndUnit(target, dest.getImage(), textureUnitIndex);
         texUtil.uploadSubTexture(target, src, 0, destX, destY,
                 srcX, srcY, areaW, areaH, linearizeSrgbImages, dest.getImage().getColorSpace());
     }
@@ -3507,6 +3509,9 @@ public final class GLRenderer implements Renderer {
         } catch (TextureUnitException exception) {
             throw new IllegalStateException("Renderer has no texture unit zero", exception);
         }
+        // setTexture may reuse unit zero's cached binding without making that
+        // unit active. Subimage writes must target the actual active unit.
+        bindTextureAndUnit(GLExt.GL_TEXTURE_2D_ARRAY_EXT, dest.getImage(), 0);
         texUtil.uploadArrayLayer(pixels, format, layer, x, y);
     }
 
