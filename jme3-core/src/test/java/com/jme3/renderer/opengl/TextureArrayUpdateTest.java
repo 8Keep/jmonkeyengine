@@ -38,9 +38,11 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.jme3.renderer.Caps;
+import com.jme3.renderer.TextureUnitException;
 import com.jme3.texture.Image;
 import com.jme3.texture.Texture;
 import com.jme3.texture.TextureArray;
+import com.jme3.texture.Texture2D;
 import com.jme3.texture.image.ColorSpace;
 import com.jme3.util.BufferUtils;
 import java.lang.reflect.InvocationHandler;
@@ -52,7 +54,9 @@ import java.nio.FloatBuffer;
 import java.nio.IntBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -188,6 +192,45 @@ public class TextureArrayUpdateTest {
         assertEquals(GL.GL_UNSIGNED_BYTE, update.type);
         assertEquals(1, update.offsetZ);
         assertArrayEquals(new byte[]{(byte) 255, 0, 0, 0, (byte) 255, 0}, update.data);
+    }
+
+    @Test
+    public void everySubImageUpdateActivatesUnitZeroAndTargetsItsDestination() throws TextureUnitException {
+        RecordingGl gl = new RecordingGl("OpenGL ES 3.0");
+        GLRenderer renderer = gl.renderer(true);
+        Image patch = image(Image.Format.RGBA8, 1, 1, bytes(4, (byte) 0x5a), ColorSpace.Linear);
+
+        Texture2D deprecatedDestination = new Texture2D(image(
+                Image.Format.RGBA8, 2, 2, bytes(16, (byte) 1), ColorSpace.Linear));
+        assertSubImageTargetsUnitZero(gl, renderer, deprecatedDestination, () ->
+                renderer.modifyTexture((Texture) deprecatedDestination, patch, 0, 0));
+
+        Texture2D destination2d = new Texture2D(image(
+                Image.Format.RGBA8, 2, 2, bytes(16, (byte) 2), ColorSpace.Linear));
+        assertSubImageTargetsUnitZero(gl, renderer, destination2d, () ->
+                renderer.modifyTexture(destination2d, patch, 0, 0, 0, 0, 1, 1));
+
+        TextureArray destinationArray = textureArray(Image.Format.RGBA8, 2, 2,
+                new ArrayList<>(Arrays.asList(bytes(16, (byte) 3), bytes(16, (byte) 4))), ColorSpace.Linear);
+        assertSubImageTargetsUnitZero(gl, renderer, destinationArray, () ->
+                renderer.modifyTexture(destinationArray, patch, 1, 0, 0));
+    }
+
+    private void assertSubImageTargetsUnitZero(RecordingGl gl, GLRenderer renderer,
+                                               Texture destination, Runnable update) throws TextureUnitException {
+        renderer.setTexture(0, destination);
+        Texture2D otherTexture = new Texture2D(image(
+                Image.Format.RGBA8, 1, 1, bytes(4, (byte) 0x33), ColorSpace.Linear));
+        renderer.setTexture(3, otherTexture);
+        gl.clearCalls();
+
+        update.run();
+
+        Upload upload = gl.lastSubImage();
+        assertEquals(GL.GL_TEXTURE0, upload.activeTexture,
+                "subimage upload must reactivate unit zero after cached setTexture binding");
+        assertEquals(destination.getImage().getId(), upload.boundTexture,
+                "subimage upload must target the destination bound on unit zero");
     }
 
     @Test
@@ -383,6 +426,8 @@ public class TextureArrayUpdateTest {
         int width;
         int height;
         int depth = 1;
+        int activeTexture;
+        int boundTexture;
         byte[] data;
     }
 
@@ -391,6 +436,8 @@ public class TextureArrayUpdateTest {
         private final List<String> calls = new ArrayList<>();
         private final List<Upload> arrayAllocations = new ArrayList<>();
         private final List<Upload> subImages = new ArrayList<>();
+        private final Map<String, Integer> boundTextures = new HashMap<>();
+        private int activeTexture = GL.GL_TEXTURE0;
         private boolean closed;
         private boolean failNextSubImage;
         private int subImage3dCalls;
@@ -462,6 +509,12 @@ public class TextureArrayUpdateTest {
                 case "glGenTextures":
                     ((IntBuffer) args[0]).put(0, nextTextureId++);
                     return null;
+                case "glActiveTexture":
+                    activeTexture = (Integer) args[0];
+                    return null;
+                case "glBindTexture":
+                    boundTextures.put(bindingKey(activeTexture, (Integer) args[0]), (Integer) args[1]);
+                    return null;
                 case "glGenVertexArrays":
                     ((IntBuffer) args[0]).put(0, 1);
                     return null;
@@ -469,9 +522,10 @@ public class TextureArrayUpdateTest {
                     Upload allocation = record(name, args);
                     arrayAllocations.add(allocation);
                     return null;
+                case "glTexSubImage2D":
                 case "glTexSubImage3D":
                     Upload upload = record(name, args);
-                    subImage3dCalls++;
+                    if (name.endsWith("3D")) subImage3dCalls++;
                     subImages.add(upload);
                     if (failNextSubImage) {
                         failNextSubImage = false;
@@ -503,8 +557,10 @@ public class TextureArrayUpdateTest {
             Upload upload = new Upload();
             upload.target = (Integer) args[0];
             upload.level = (Integer) args[1];
+            upload.activeTexture = activeTexture;
+            upload.boundTexture = boundTextures.getOrDefault(bindingKey(activeTexture, upload.target), 0);
             boolean subImage = name.contains("Sub");
-            if (subImage) {
+            if (subImage && name.endsWith("3D")) {
                 upload.offsetX = (Integer) args[2];
                 upload.offsetY = (Integer) args[3];
                 upload.offsetZ = (Integer) args[4];
@@ -513,6 +569,13 @@ public class TextureArrayUpdateTest {
                 upload.depth = (Integer) args[7];
                 upload.format = (Integer) args[8];
                 upload.type = (Integer) args[9];
+            } else if (subImage) {
+                upload.offsetX = (Integer) args[2];
+                upload.offsetY = (Integer) args[3];
+                upload.width = (Integer) args[4];
+                upload.height = (Integer) args[5];
+                upload.format = (Integer) args[6];
+                upload.type = (Integer) args[7];
             } else {
                 upload.internal = (Integer) args[2];
                 upload.width = (Integer) args[3];
@@ -529,6 +592,10 @@ public class TextureArrayUpdateTest {
                 upload.data = bytes;
             }
             return upload;
+        }
+
+        private String bindingKey(int unit, int target) {
+            return unit + ":" + target;
         }
 
         @Override
