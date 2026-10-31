@@ -1,0 +1,24 @@
+MaterialDef AtmosphereSkyCube {
+    MaterialParameters {
+        Vector2 AtmosphereRadii
+        Vector4 Rayleigh
+        Vector4 Mie
+        Vector3 GroundAlbedo
+        Texture2D TransmittanceMap -LINEAR
+        Texture2D MultipleScatteringMap -LINEAR
+        Int CubeFace
+        Float ObserverHeight
+        Vector3 SunDirection
+        Float SolarIrradiance
+        Boolean MultipleScattering
+    }
+    Technique {
+        VertexShader GLSL300 GLSL150 : MatDefs/AtmospherePass.vert
+        FragmentShader GLSL300 GLSL150 : MatDefs/AtmosphereSkyCube.frag
+        RenderState {
+            FaceCull Off
+            DepthWrite Off
+            DepthTest Off
+        }
+    }
+}

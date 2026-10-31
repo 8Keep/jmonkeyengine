@@ -1,0 +1,16 @@
+MaterialDef AtmosphereTransmittance {
+    MaterialParameters {
+        Vector2 AtmosphereRadii
+        Vector4 Rayleigh
+        Vector4 Mie
+    }
+    Technique {
+        VertexShader GLSL300 GLSL150 : MatDefs/AtmospherePass.vert
+        FragmentShader GLSL300 GLSL150 : MatDefs/AtmosphereTransmittance.frag
+        RenderState {
+            FaceCull Off
+            DepthWrite Off
+            DepthTest Off
+        }
+    }
+}

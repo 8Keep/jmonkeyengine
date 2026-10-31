@@ -1,0 +1,18 @@
+MaterialDef AtmosphereMultipleScattering {
+    MaterialParameters {
+        Vector2 AtmosphereRadii
+        Vector4 Rayleigh
+        Vector4 Mie
+        Vector3 GroundAlbedo
+        Texture2D TransmittanceMap -LINEAR
+    }
+    Technique {
+        VertexShader GLSL300 GLSL150 : MatDefs/AtmospherePass.vert
+        FragmentShader GLSL300 GLSL150 : MatDefs/AtmosphereMultipleScattering.frag
+        RenderState {
+            FaceCull Off
+            DepthWrite Off
+            DepthTest Off
+        }
+    }
+}

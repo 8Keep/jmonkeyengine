@@ -29,6 +29,10 @@
 package jme3test.terrain;
 
 import com.jme3.app.SimpleApplication;
+import com.jme3.asset.AssetEventListener;
+import com.jme3.asset.AssetKey;
+import com.jme3.material.MatParamOverride;
+import com.jme3.renderer.Camera;
 import com.jme3.math.ColorRGBA;
 import com.jme3.math.Vector3f;
 import com.jme3.renderer.Renderer;
@@ -44,13 +48,16 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
-/** Finite native-renderer validation of cubemap direction and solar-disk sampling. */
+/** Finite native validation of sky direction, transport and failed-bake recovery. */
 public final class TestReferenceAtmosphereSky extends SimpleApplication {
     private static final int SIZE = 65;
     private final CountDownLatch finished = new CountDownLatch(1);
     private final List<Probe> probes = new ArrayList<>();
-    private ReferenceAtmosphereSky sky;
+    private AtmosphereSky sky;
+    private boolean gpuMode;
+    private float sunElevation = 55;
     private ClearSkyAtmosphere atmosphere;
+    private ClearSkyAtmosphere validationAtmosphere;
     private FrameBuffer target;
     private int probeIndex;
     private int completedFrames;
@@ -62,6 +69,12 @@ public final class TestReferenceAtmosphereSky extends SimpleApplication {
 
     public static void main(String[] args) throws Exception {
         TestReferenceAtmosphereSky app = new TestReferenceAtmosphereSky();
+        for (String argument : args) {
+            if ("--gpu".equals(argument)) app.gpuMode = true;
+            else if (argument.startsWith("--sun-elevation=")) {
+                app.sunElevation = Float.parseFloat(argument.substring("--sun-elevation=".length()));
+            }
+        }
         AppSettings settings = new AppSettings(true);
         settings.setRenderer(args.length > 0 ? args[0] : AppSettings.ANGLE_GLES3);
         settings.setResolution(SIZE, SIZE);
@@ -79,7 +92,8 @@ public final class TestReferenceAtmosphereSky extends SimpleApplication {
         if (app.failure != null) {
             throw new IllegalStateException("Atmosphere sky render check failed", app.failure);
         }
-        System.out.println("REFERENCE_ATMOSPHERE_SKY_PASS probes=" + app.probes.size());
+        System.out.println((app.gpuMode ? "GPU_ATMOSPHERE_SKY_PASS" : "REFERENCE_ATMOSPHERE_SKY_PASS")
+                + " probes=" + app.probes.size());
     }
 
     @Override
@@ -94,14 +108,21 @@ public final class TestReferenceAtmosphereSky extends SimpleApplication {
             flyCam.setEnabled(false);
             setDisplayFps(false);
             setDisplayStatView(false);
-            atmosphere = new ClearSkyAtmosphere(55, 53);
-            sky = new ReferenceAtmosphereSky(assetManager, atmosphere);
-            rootNode.attachChild(sky.getSpatial());
-
+            atmosphere = new ClearSkyAtmosphere(sunElevation, 53);
+            validationAtmosphere = gpuMode ? new ClearSkyAtmosphere(sunElevation, 53, 96, 96) : atmosphere;
             target = new FrameBuffer(SIZE, SIZE, 1);
             target.addColorTarget(FrameBuffer.FrameBufferTarget.newTarget(Image.Format.RGBA32F));
             target.setDepthTarget(FrameBuffer.FrameBufferTarget.newTarget(Image.Format.Depth24));
             viewPort.setOutputFrameBuffer(target);
+            renderer.setFrameBuffer(target);
+            renderManager.setCamera(cam, false, SIZE, SIZE);
+            if (gpuMode) verifyPartialBakeFailure();
+            sky = gpuMode ? new GpuAtmosphereSky(assetManager, renderManager, cam, atmosphere,
+                    false, Vector3f.ZERO) : new ReferenceAtmosphereSky(assetManager, atmosphere);
+            if (renderer.getCurrentFrameBuffer() != target || renderManager.getCurrentCamera() != cam) {
+                throw new IllegalStateException("atmosphere generation did not restore the physical target and camera");
+            }
+            rootNode.attachChild(sky.getSpatial());
 
             Vector3f sun = atmosphere.getSunDirection(new Vector3f()).normalizeLocal();
             Vector3f oppositeAzimuth = new Vector3f(-sun.x, sun.y, -sun.z).normalizeLocal();
@@ -120,9 +141,9 @@ public final class TestReferenceAtmosphereSky extends SimpleApplication {
     private void addProbe(String name, Vector3f direction, float fovDegrees, boolean solar) {
         direction.normalizeLocal();
         Vector3f up = Math.abs(direction.dot(Vector3f.UNIT_Y)) > .98f ? Vector3f.UNIT_Z : Vector3f.UNIT_Y;
-        ColorRGBA expected = atmosphere.skyRadiance(direction, new ColorRGBA());
+        ColorRGBA expected = validationAtmosphere.skyRadiance(direction, new ColorRGBA());
         if (solar) {
-            ColorRGBA irradiance = atmosphere.getSunIrradiance(new ColorRGBA());
+            ColorRGBA irradiance = validationAtmosphere.getSunIrradiance(new ColorRGBA());
             float omega = (float) (2 * Math.PI * (1 - Math.cos(.004675)));
             expected.addLocal(irradiance.mult(1f / omega));
         }
@@ -149,6 +170,8 @@ public final class TestReferenceAtmosphereSky extends SimpleApplication {
             if (probeIndex == probes.size()) {
                 sky.getSpatial().removeFromParent();
                 sky.close(renderer); // readback has drained the final sky draw.
+                sky = null;
+                if (gpuMode) verifyGpuTransport();
                 renderer.deleteFrameBuffer(target);
                 target = null;
                 viewPort.setOutputFrameBuffer(null);
@@ -158,6 +181,94 @@ public final class TestReferenceAtmosphereSky extends SimpleApplication {
             }
         } catch (Throwable error) {
             fail(error);
+        }
+    }
+
+    private void verifyPartialBakeFailure() {
+        Camera priorCamera = renderManager.getCurrentCamera();
+        FrameBuffer priorTarget = renderer.getCurrentFrameBuffer();
+        List<MatParamOverride> overrides = new ArrayList<>(renderManager.getForcedMatParams());
+        IllegalStateException injected = new IllegalStateException("injected atmosphere second-pass failure");
+        AssetEventListener fault = new AssetEventListener() {
+            @Override public void assetLoaded(AssetKey key) { }
+            @Override public void assetDependencyNotFound(AssetKey parent, AssetKey dependency) { }
+            @Override public void assetRequested(AssetKey key) {
+                if ("MatDefs/AtmosphereMultipleScattering.j3md".equals(key.getName())) throw injected;
+            }
+        };
+        assetManager.addAssetEventListener(fault);
+        try {
+            GpuAtmosphereSky unexpected = new GpuAtmosphereSky(assetManager, renderManager, cam, atmosphere, true);
+            unexpected.close(renderer);
+            throw new IllegalStateException("atmosphere failure was not injected");
+        } catch (RuntimeException failure) {
+            if (failure != injected) throw failure;
+        } finally {
+            assetManager.removeAssetEventListener(fault);
+        }
+        if (renderer.getCurrentFrameBuffer() != priorTarget || renderManager.getCurrentCamera() != priorCamera
+                || !renderManager.getForcedMatParams().equals(overrides)) {
+            throw new IllegalStateException("failed atmosphere bake changed caller state");
+        }
+        System.out.println("GPU_ATMOSPHERE_FAILURE_PASS after=transmittance callerState=preserved");
+    }
+
+    private void verifyGpuTransport() {
+        // The GUI viewport may be the preceding frame's active camera. Compare
+        // with the actual caller state rather than assuming the main camera.
+        Camera priorCamera = renderManager.getCurrentCamera();
+        FrameBuffer priorTarget = renderer.getCurrentFrameBuffer();
+        GpuAtmosphereSky generated = new GpuAtmosphereSky(assetManager, renderManager, cam, atmosphere, true);
+        sky = generated;
+        try {
+            if (renderer.getCurrentFrameBuffer() != priorTarget || renderManager.getCurrentCamera() != priorCamera) {
+                throw new IllegalStateException("multiple-scattering bake changed its caller target/camera");
+            }
+            ClearSkyAtmosphere.ModelParameters model = ClearSkyAtmosphere.modelParameters();
+            for (double altitude : new double[]{0, 200, 10_000, 50_000}) {
+                for (double cosine : new double[]{-.1, .01, .2, 1}) {
+                    double radius = model.groundRadiusMeters() + altitude;
+                    double[] expected = model.sunTransmittance(radius, cosine, 96);
+                    ColorRGBA actual = generated.sampleTransmission(radius, cosine, new ColorRGBA());
+                    float[] channels = {actual.r, actual.g, actual.b};
+                    for (int c = 0; c < 3; c++) {
+                        double tolerance = .003 + .02 * expected[c];
+                        if (Math.abs(channels[c] - expected[c]) > tolerance) {
+                            throw new IllegalStateException("GPU transmission differs at altitude=" + altitude
+                                    + " cosine=" + cosine + " channel=" + c + " expected=" + expected[c]
+                                    + " actual=" + channels[c]);
+                        }
+                    }
+                }
+            }
+            AtmosphereMultipleScatteringReference reference = new AtmosphereMultipleScatteringReference(128, 96);
+            for (int[] point : new int[][]{{0, 0}, {16, 0}, {24, 0}, {31, 0}, {16, 2}, {24, 8}, {31, 24}}) {
+                int x = point[0], y = point[1];
+                double radius = model.groundRadiusMeters()
+                        + (model.topRadiusMeters() - model.groundRadiusMeters()) * y / (GpuAtmosphereSky.MULTIPLE_SIZE - 1);
+                double cosine = 2.0 * x / (GpuAtmosphereSky.MULTIPLE_SIZE - 1) - 1;
+                AtmosphereMultipleScatteringReference.Result expected = reference.evaluate(radius, cosine, .3);
+                ColorRGBA actual = generated.capturedMultiple(x, y, new ColorRGBA());
+                double[] values = {actual.r, actual.g, actual.b};
+                double transfer = 0;
+                for (int c = 0; c < 3; c++) {
+                    transfer = Math.max(transfer, expected.transfer(c));
+                    double tolerance = .0003 + .06 * expected.psi(c);
+                    if (Math.abs(values[c] - expected.psi(c)) > tolerance) {
+                        throw new IllegalStateException("GPU multiple scattering differs at " + x + "," + y
+                                + " channel=" + c + " expected=" + expected.psi(c) + " actual=" + values[c]);
+                    }
+                }
+                if (Math.abs(actual.a - transfer) > .02) {
+                    throw new IllegalStateException("GPU multiple scattering transfer differs at " + x + "," + y);
+                }
+                System.out.printf("ATMOSPHERE_MULTIPLE_PROBE x=%d y=%d psi=%s maxTransfer=%.7g%n", x, y, actual, transfer);
+            }
+            System.out.println("GPU_ATMOSPHERE_TRANSPORT_PASS transmissionRays=16 multiplePoints=7 payloadBytes="
+                    + generated.getEncodedBytes() + " generationMs=" + generated.getGenerationMillis());
+        } finally {
+            generated.close(renderer);
+            sky = null;
         }
     }
 

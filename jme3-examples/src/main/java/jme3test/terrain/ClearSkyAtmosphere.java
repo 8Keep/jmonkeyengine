@@ -54,6 +54,7 @@ public final class ClearSkyAtmosphere {
     private static final double[] RAYLEIGH_SCATTERING = {5.8e-6, 1.35e-5, 3.31e-5};
     private static final double[] MIE_SCATTERING = {2.0e-5, 2.0e-5, 2.0e-5};
     private static final double[] MIE_EXTINCTION = {2.1e-5, 2.1e-5, 2.1e-5};
+    private static final ModelParameters MODEL_PARAMETERS = new ModelParameters();
     private final double sx, sy, sz;
     private final int viewSteps, sunSteps;
 
@@ -77,6 +78,7 @@ public final class ClearSkyAtmosphere {
         if (store == null) store = new Vector3f();
         return store.set((float) sx, (float) sy, (float) sz);
     }
+
 
     /** Direct normal irradiance at the fixed 200 m observer, relative broad-band units. */
     public ColorRGBA getSunIrradiance(ColorRGBA store) {
@@ -152,26 +154,94 @@ public final class ClearSkyAtmosphere {
 
     /** Beer-Lambert transmittance with trapezoidal density per finite segment. */
     private double[] sunTransmittance(double r, double mu) {
-        if (groundHit(r, mu)) return new double[]{0, 0, 0};
-        double disc = r * r * (mu * mu - 1) + TOP_RADIUS_METERS * TOP_RADIUS_METERS;
-        double length = Math.max(0, -r * mu + Math.sqrt(Math.max(0, disc)));
-        double h0 = Math.max(0, r - GROUND_RADIUS_METERS);
-        double rr0 = Math.exp(-h0 / RAYLEIGH_SCALE_HEIGHT_METERS), rm0 = Math.exp(-h0 / MIE_SCALE_HEIGHT_METERS);
-        double[] tau = {0, 0, 0};
-        double previousDistance = 0.0;
-        for (int i = 1; i <= sunSteps; i++) {
-            double fraction = (double) i / sunSteps;
-            double d = length * fraction * fraction;
-            double segmentLength = d - previousDistance;
-            double radius = Math.sqrt(Math.max(0, r * r + 2 * r * mu * d + d * d));
-            double h = Math.max(0, radius - GROUND_RADIUS_METERS), rr = Math.exp(-h / RAYLEIGH_SCALE_HEIGHT_METERS), rm = Math.exp(-h / MIE_SCALE_HEIGHT_METERS);
-            for (int c = 0; c < 3; c++) tau[c] += extinction(c, .5 * (rr0 + rr), .5 * (rm0 + rm)) * segmentLength;
-            rr0 = rr; rm0 = rm; previousDistance = d;
-        }
-        return new double[]{Math.exp(-tau[0]), Math.exp(-tau[1]), Math.exp(-tau[2])};
+        return MODEL_PARAMETERS.sunTransmittance(r, mu, sunSteps);
     }
     private static double extinction(int channel, double rayleighDensity, double mieDensity) {
         return RAYLEIGH_SCATTERING[channel] * rayleighDensity + MIE_EXTINCTION[channel] * mieDensity;
+    }
+
+    /** Immutable scalar access to the model used by CPU references and shader hosts. */
+    static ModelParameters modelParameters() {
+        return MODEL_PARAMETERS;
+    }
+
+    static final class ModelParameters {
+        private ModelParameters() { }
+
+        double groundRadiusMeters() { return GROUND_RADIUS_METERS; }
+        double topRadiusMeters() { return TOP_RADIUS_METERS; }
+        double observerAltitudeMeters() { return OBSERVER_ALTITUDE_METERS; }
+        double rayleighScaleHeightMeters() { return RAYLEIGH_SCALE_HEIGHT_METERS; }
+        double mieScaleHeightMeters() { return MIE_SCALE_HEIGHT_METERS; }
+        double mieAsymmetry() { return MIE_ASYMMETRY; }
+        double solarIrradiance() { return SOLAR_IRRADIANCE; }
+        double rayleighScattering(int channel) { return RAYLEIGH_SCATTERING[channel]; }
+        double mieScattering(int channel) { return MIE_SCATTERING[channel]; }
+        double mieExtinction(int channel) { return MIE_EXTINCTION[channel]; }
+        double rayleighDensity(double altitudeMeters) {
+            return Math.exp(-Math.max(0, altitudeMeters) / RAYLEIGH_SCALE_HEIGHT_METERS);
+        }
+        double mieDensity(double altitudeMeters) {
+            return Math.exp(-Math.max(0, altitudeMeters) / MIE_SCALE_HEIGHT_METERS);
+        }
+        double extinction(int channel, double rayleighDensity, double mieDensity) {
+            return ClearSkyAtmosphere.extinction(channel, rayleighDensity, mieDensity);
+        }
+        double scattering(int channel, double rayleighDensity, double mieDensity) {
+            return RAYLEIGH_SCATTERING[channel] * rayleighDensity
+                    + MIE_SCATTERING[channel] * mieDensity;
+        }
+        boolean groundHit(double radius, double cosineZenith) {
+            return ClearSkyAtmosphere.groundHit(radius, cosineZenith);
+        }
+        double distanceToBoundary(double radius, double cosineZenith) {
+            return ClearSkyAtmosphere.boundary(radius, cosineZenith);
+        }
+
+        /** Fill caller storage with RGB Beer-Lambert transmission; no model arrays escape. */
+        void sunTransmittance(double radius, double cosineZenith, int steps, double[] store) {
+            if (steps < 1 || store == null || store.length < 3) {
+                throw new IllegalArgumentException("positive integration steps and three-channel storage required");
+            }
+            if (groundHit(radius, cosineZenith)) {
+                store[0] = store[1] = store[2] = 0;
+                return;
+            }
+            double disc = radius * radius * (cosineZenith * cosineZenith - 1)
+                    + TOP_RADIUS_METERS * TOP_RADIUS_METERS;
+            double length = Math.max(0, -radius * cosineZenith + Math.sqrt(Math.max(0, disc)));
+            double h0 = Math.max(0, radius - GROUND_RADIUS_METERS);
+            double rr0 = Math.exp(-h0 / RAYLEIGH_SCALE_HEIGHT_METERS);
+            double rm0 = Math.exp(-h0 / MIE_SCALE_HEIGHT_METERS);
+            double tauR = 0, tauG = 0, tauB = 0;
+            double previousDistance = 0.0;
+            for (int i = 1; i <= steps; i++) {
+                double fraction = (double) i / steps;
+                double d = length * fraction * fraction;
+                double segmentLength = d - previousDistance;
+                double sampleRadius = Math.sqrt(Math.max(0, radius * radius
+                        + 2 * radius * cosineZenith * d + d * d));
+                double h = Math.max(0, sampleRadius - GROUND_RADIUS_METERS);
+                double rr = Math.exp(-h / RAYLEIGH_SCALE_HEIGHT_METERS);
+                double rm = Math.exp(-h / MIE_SCALE_HEIGHT_METERS);
+                double avgR = .5 * (rr0 + rr), avgM = .5 * (rm0 + rm);
+                tauR += extinction(0, avgR, avgM) * segmentLength;
+                tauG += extinction(1, avgR, avgM) * segmentLength;
+                tauB += extinction(2, avgR, avgM) * segmentLength;
+                rr0 = rr;
+                rm0 = rm;
+                previousDistance = d;
+            }
+            store[0] = Math.exp(-tauR);
+            store[1] = Math.exp(-tauG);
+            store[2] = Math.exp(-tauB);
+        }
+
+        double[] sunTransmittance(double radius, double cosineZenith, int steps) {
+            double[] result = new double[3];
+            sunTransmittance(radius, cosineZenith, steps, result);
+            return result;
+        }
     }
     /** Normalized Cornette-Shanks aerosol phase function. */
     private static double miePhase(double nu) {

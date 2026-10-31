@@ -51,11 +51,13 @@ import java.util.ArrayList;
 import java.util.List;
 
 /** Fixed, single-scattering atmospheric sky reference for the terrain example. */
-public final class ReferenceAtmosphereSky {
+public final class ReferenceAtmosphereSky implements AtmosphereSky {
     private static final int SIZE = 64;
     private static final float SOLAR_RADIUS = 0.004675f;
     private static final float SOLAR_SOLID_ANGLE = (float) (2 * Math.PI * (1 - Math.cos(SOLAR_RADIUS)));
 
+    private final ColorRGBA sunIrradiance;
+    private final ColorRGBA diffuseFill;
     private final Image image;
     private final ArrayList<ByteBuffer> cpuFaces;
     private final TextureCubeMap cubeMap;
@@ -67,6 +69,8 @@ public final class ReferenceAtmosphereSky {
     /** Builds the original linear HDR cube on the calling thread. */
     public ReferenceAtmosphereSky(AssetManager assetManager, ClearSkyAtmosphere atmosphere) {
         long started = System.nanoTime();
+        sunIrradiance = atmosphere.getSunIrradiance(new ColorRGBA());
+        diffuseFill = atmosphere.diffuseFill(new ColorRGBA());
         List<ByteBuffer> faces = new ArrayList<>(6);
         Vector3f direction = new Vector3f();
         ColorRGBA radiance = new ColorRGBA();
@@ -145,6 +149,12 @@ public final class ReferenceAtmosphereSky {
         store.normalizeLocal();
     }
 
+    public ColorRGBA getSunIrradiance(ColorRGBA store) {
+        return (store == null ? new ColorRGBA() : store).set(sunIrradiance);
+    }
+    public ColorRGBA getDiffuseFill(ColorRGBA store) {
+        return (store == null ? new ColorRGBA() : store).set(diffuseFill);
+    }
     public Spatial getSpatial() { return spatial; }
     public long getEncodedBytes() { return (long) texelCount * 4 * Float.BYTES; }
     public long getGenerationMillis() { return generationMillis; }

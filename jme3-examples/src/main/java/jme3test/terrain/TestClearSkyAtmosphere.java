@@ -75,6 +75,34 @@ public final class TestClearSkyAtmosphere {
 
         ColorRGBA fill = high.diffuseFill(null);
         check(finite(fill) && fill.r > 0 && fill.g > 0 && fill.b > 0, "diffuse fill is positive");
+
+        ClearSkyAtmosphere.ModelParameters model = ClearSkyAtmosphere.modelParameters();
+        double radius = model.groundRadiusMeters() + 200;
+        AtmosphereMultipleScatteringReference coarseReference = new AtmosphereMultipleScatteringReference();
+        AtmosphereMultipleScatteringReference.Result coarseResult =
+                coarseReference.evaluate(radius, .75, .3);
+        AtmosphereMultipleScatteringReference.Result noGround =
+                coarseReference.evaluate(radius, .75, 0);
+        AtmosphereMultipleScatteringReference.Result denseResult =
+                new AtmosphereMultipleScatteringReference(128, 96).evaluate(radius, .75, .3);
+        for (int channel = 0; channel < 3; channel++) {
+            double psi = coarseResult.psi(channel);
+            double secondOrder = coarseResult.secondOrder(channel);
+            double transfer = coarseResult.transfer(channel);
+            check(Double.isFinite(psi) && psi >= secondOrder && secondOrder > 0,
+                    "second-order isotropic source and geometric-series result are finite");
+            check(Double.isFinite(transfer) && transfer >= 0 && transfer < 1,
+                    "unit scattering-transfer factor remains below one");
+            check(noGround.transfer(channel) == transfer && noGround.psi(channel) < psi,
+                    "ground reflection affects second-order source but not transfer");
+            check(relative(psi, denseResult.psi(channel)) < .25
+                    && relative(transfer, denseResult.transfer(channel)) < .08,
+                    "64/32 reference converges toward 128/96 integration");
+        }
+        double[] exposedTransfer = coarseResult.transferRgb();
+        exposedTransfer[0] = -1;
+        check(coarseResult.transfer(0) >= 0, "diagnostic channel arrays are defensive copies");
+
         boolean rejected = false;
         try { high.skyRadiance(new Vector3f(Float.NaN, 1, 0), null); }
         catch (IllegalArgumentException expected) { rejected = true; }
@@ -90,6 +118,9 @@ public final class TestClearSkyAtmosphere {
     }
     private static double relative(float a, float b) {
         return Math.abs(a - b) / Math.max(1.0e-8, Math.max(Math.abs(a), Math.abs(b)));
+    }
+    private static double relative(double a, double b) {
+        return Math.abs(a - b) / Math.max(1.0e-12, Math.max(Math.abs(a), Math.abs(b)));
     }
     private static void check(boolean ok, String message) {
         if (!ok) throw new IllegalStateException(message);
