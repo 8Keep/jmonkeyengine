@@ -85,6 +85,7 @@ final class GpuAtmosphereSky implements AtmosphereSky {
     private final ColorRGBA diffuseFill = new ColorRGBA(0, 0, 0, 1);
     private FloatBuffer capturedTransmittance, capturedMultiple;
     private final long generationMillis;
+    private final boolean higherOrders;
     private boolean closed;
 
     GpuAtmosphereSky(AssetManager assets, RenderManager manager, Camera restoreCamera,
@@ -102,6 +103,7 @@ final class GpuAtmosphereSky implements AtmosphereSky {
         }
         this.renderer = manager.getRenderer();
         this.atmosphere = atmosphere;
+        this.higherOrders = higherOrders;
         if (!renderer.getCaps().contains(Caps.FloatTextureFilter)
                 || !renderer.getCaps().contains(Caps.FloatColorBufferRGBA)) {
             throw new UnsupportedOperationException("GPU atmosphere requires filtered RGBA32F render targets");
@@ -203,6 +205,30 @@ final class GpuAtmosphereSky implements AtmosphereSky {
         }
         spatial = result;
         generationMillis = (System.nanoTime() - started) / 1_000_000;
+    }
+
+    void requireLiveRenderer(Renderer consumer) {
+        checkOwner();
+        if (consumer != renderer) throw new IllegalArgumentException("atmosphere requires its creating renderer");
+    }
+
+    Material createAerialMaterial(AssetManager assets) {
+        checkOwner();
+        Material result = material(assets, "AtmosphereAerial", Vector3f.ZERO);
+        result.setTexture("TransmittanceMap", transmittance);
+        result.setTexture("MultipleScatteringMap", multipleScattering);
+        result.setVector3("SunDirection", atmosphere.getSunDirection(new Vector3f()));
+        result.setFloat("SolarIrradiance", (float) model.solarIrradiance());
+        result.setBoolean("MultipleScattering", higherOrders);
+        return result;
+    }
+
+    ColorRGBA sampleMultiple(double radiusMeters, double cosineSunZenith, ColorRGBA store) {
+        checkOwner();
+        return sample(capturedMultiple, MULTIPLE_SIZE, MULTIPLE_SIZE,
+                .5 + .5 * cosineSunZenith,
+                (radiusMeters - model.groundRadiusMeters())
+                        / (model.topRadiusMeters() - model.groundRadiusMeters()), store);
     }
 
     private static boolean validAlbedo(float x) { return Float.isFinite(x) && x >= 0 && x <= 1; }

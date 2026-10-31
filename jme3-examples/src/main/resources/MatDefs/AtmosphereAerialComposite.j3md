@@ -1,0 +1,23 @@
+MaterialDef AtmosphereAerialComposite {
+    MaterialParameters {
+        Int BoundDrawBuffer
+        Int NumSamples
+        Int NumSamplesDepth
+        Texture2D Texture
+        Texture2D DepthTexture
+        Texture2D AerialMap -LINEAR
+        Vector2 FrustumNearFar
+        Boolean ParallelProjection
+        Float MaxDepthMeters
+    }
+    Technique {
+        VertexShader GLSL300 GLSL150 : Common/MatDefs/Post/Post.vert
+        FragmentShader GLSL300 GLSL150 : MatDefs/AtmosphereAerialComposite.frag
+        WorldParameters { }
+        Defines {
+            BOUND_DRAW_BUFFER : BoundDrawBuffer
+            RESOLVE_MS : NumSamples
+            RESOLVE_DEPTH_MS : NumSamplesDepth
+        }
+    }
+}

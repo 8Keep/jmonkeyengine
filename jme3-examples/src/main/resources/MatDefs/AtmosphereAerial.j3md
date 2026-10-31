@@ -1,0 +1,30 @@
+MaterialDef AtmosphereAerial {
+    MaterialParameters {
+        Vector2 AtmosphereRadii
+        Vector4 Rayleigh
+        Vector4 Mie
+        Texture2D TransmittanceMap -LINEAR
+        Texture2D MultipleScatteringMap -LINEAR
+        Vector3 SunDirection
+        Float SolarIrradiance
+        Boolean MultipleScattering
+        Vector3 CameraOrigin
+        Vector3 CameraForward
+        Vector3 CameraRight
+        Vector3 CameraUp
+        // Left, right, bottom, top bounds at FrustumNear meters.
+        Vector4 Frustum
+        Float FrustumNear
+        Boolean ParallelProjection
+        Float MaxDepthMeters
+    }
+    Technique {
+        VertexShader GLSL300 GLSL150 : MatDefs/AtmospherePass.vert
+        FragmentShader GLSL300 GLSL150 : MatDefs/AtmosphereAerial.frag
+        RenderState {
+            FaceCull Off
+            DepthWrite Off
+            DepthTest Off
+        }
+    }
+}
