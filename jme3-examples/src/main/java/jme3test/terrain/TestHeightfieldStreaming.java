@@ -407,9 +407,15 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                 app.stop(false);
                 throw new IllegalStateException("Streaming control exceeded " + timeoutSeconds + " seconds", app.failure);
             }
-            app.stop(true);
-            if (app.failure != null) throw new IllegalStateException("Streaming control failed", app.failure);
-            if (!app.cleanupComplete) throw new IllegalStateException("Streaming render resources were not released");
+        } else {
+            // Keep main alive until normal closure or an error. Display creation
+            // happens on the render thread and must not silently exit successfully.
+            app.completed.await();
+        }
+        app.stop(true);
+        if (app.failure != null) throw new IllegalStateException("Streaming control failed", app.failure);
+        if (output != null && !app.cleanupComplete) {
+            throw new IllegalStateException("Streaming render resources were not released");
         }
     }
 
@@ -422,7 +428,11 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             if (failure == null) fail(error);
             else failure.addSuppressed(error);
         } finally {
-            super.destroy();
+            try {
+                super.destroy();
+            } finally {
+                completed.countDown();
+            }
         }
     }
 
@@ -1823,6 +1833,9 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     private void fail(Throwable error) {
         failure = error;
         error.printStackTrace();
+        // The render-thread uncaught handler checks the close flag immediately
+        // after this callback. Set it before waking main, which waits for teardown.
+        stop(false);
         completed.countDown();
     }
     private static final class InjectedUploadFailure extends RuntimeException { }
