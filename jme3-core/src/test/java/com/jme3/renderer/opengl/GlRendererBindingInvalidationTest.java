@@ -359,7 +359,8 @@ public class GlRendererBindingInvalidationTest {
         assertEquals(defaultId, driver.readFramebuffer);
         assertEquals(defaultId, driver.context.boundFBO);
         assertNull(driver.context.boundFB);
-        assertSame(override, driver.renderer.getCurrentFrameBuffer());
+        // The physical default is current; an override is only a pending selection.
+        assertNull(driver.renderer.getCurrentFrameBuffer());
         assertEquals(-1, override.getId());
         assertEquals(0, driver.countCalls("glGenFramebuffersEXT"));
         assertEquals(0, driver.countCalls("glGenRenderbuffersEXT"));
@@ -392,9 +393,12 @@ public class GlRendererBindingInvalidationTest {
         assertEquals(77, driver.readFramebuffer);
         assertEquals(77, driver.context.boundFBO);
         assertNull(driver.context.boundFB);
-        assertSame(override, driver.renderer.getCurrentFrameBuffer());
+        // The physical default is current; an override is only a pending selection.
+        assertNull(driver.renderer.getCurrentFrameBuffer());
         assertEquals(0, driver.countCalls("glGenFramebuffersEXT"));
         assertEquals(0, driver.countCalls("glGenRenderbuffersEXT"));
+        driver.renderer.setFrameBuffer(null);
+        assertSame(override, driver.renderer.getCurrentFrameBuffer());
     }
 
     @ParameterizedTest

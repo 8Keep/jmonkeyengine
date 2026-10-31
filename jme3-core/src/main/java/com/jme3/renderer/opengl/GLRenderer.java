@@ -4144,6 +4144,8 @@ public final class GLRenderer implements Renderer {
                 // the cached weak referent may already have been collected.
                 if (ref != null && caps.contains(Caps.MeshInstancing)) {
                     glext.glVertexAttribDivisorARB(i, 0);
+                    context.boundAttribDivisors[i] = 0;
+                    vertexAttribDivisorsInvalid[i] = false;
                 }
                 context.boundAttribs[i] = null;
             }

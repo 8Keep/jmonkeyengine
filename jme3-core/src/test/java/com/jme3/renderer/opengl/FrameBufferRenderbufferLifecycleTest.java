@@ -59,7 +59,7 @@ class FrameBufferRenderbufferLifecycleTest {
         renderer.getLimits().put(Limits.RenderBufferSize, 256);
         textureUtil(renderer).initialize(renderer.getCaps());
 
-        FrameBuffer first = framebuffer(31);
+        FrameBuffer first = framebuffer();
         renderer.updateFrameBufferAttachment(first, first.getColorTarget());
         int deletedId = first.getColorTarget().getId();
         assertEquals(19, deletedId);
@@ -73,7 +73,7 @@ class FrameBufferRenderbufferLifecycleTest {
         renderer.deleteFrameBuffer(first);
         assertEquals(0, context.boundRB);
 
-        FrameBuffer second = framebuffer(32);
+        FrameBuffer second = framebuffer();
         renderer.updateFrameBufferAttachment(second, second.getColorTarget());
         assertEquals(deletedId, second.getColorTarget().getId());
 
@@ -87,10 +87,9 @@ class FrameBufferRenderbufferLifecycleTest {
         assertTrue(secondAttachIndex > secondStorageIndex);
     }
 
-    private static FrameBuffer framebuffer(int id) {
+    private static FrameBuffer framebuffer() {
         FrameBuffer result = new FrameBuffer(8, 8, 1);
         result.addColorTarget(FrameBuffer.FrameBufferTarget.newTarget(Image.Format.RGBA8));
-        result.setId(id);
         return result;
     }
 
@@ -108,6 +107,7 @@ class FrameBufferRenderbufferLifecycleTest {
 
     private static final class RecordingGl implements InvocationHandler {
         final List<String> events = new ArrayList<>();
+        int nextFrameBuffer = 31;
 
         GLRenderer renderer() {
             GL gl = (GL) Proxy.newProxyInstance(GL.class.getClassLoader(),
@@ -122,6 +122,9 @@ class FrameBufferRenderbufferLifecycleTest {
         @Override
         public Object invoke(Object proxy, java.lang.reflect.Method method, Object[] args) {
             switch (method.getName()) {
+                case "glGenFramebuffersEXT":
+                    ((IntBuffer) args[0]).put(0, nextFrameBuffer++);
+                    return null;
                 case "glGenRenderbuffersEXT":
                     ((IntBuffer) args[0]).put(0, 19);
                     events.add("gen-renderbuffer:19");

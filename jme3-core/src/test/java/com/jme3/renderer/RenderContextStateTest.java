@@ -95,6 +95,7 @@ public class RenderContextStateTest {
         context.attribIndexList.copyNewToOld();
         WeakReference<BufferObject> previousBuffer = new WeakReference<>(null);
         context.boundBO[0] = previousBuffer;
+        context.boundSSBO[0] = previousBuffer;
 
         context.reset();
 
@@ -119,8 +120,9 @@ public class RenderContextStateTest {
         assertEquals(0, context.textureIndexList.newLen);
         assertEquals(0, context.attribIndexList.oldLen);
         assertEquals(0, context.attribIndexList.newLen);
-        // The legacy reset did not change boundBO; this revision preserves that scope.
-        assertSame(previousBuffer, context.boundBO[0]);
+        // Uniform and shader-storage buffers have independent binding caches.
+        assertNull(context.boundBO[0]);
+        assertNull(context.boundSSBO[0]);
     }
 
     @Test
