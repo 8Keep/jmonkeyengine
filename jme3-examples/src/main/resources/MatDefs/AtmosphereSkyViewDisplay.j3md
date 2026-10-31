@@ -1,0 +1,27 @@
+MaterialDef AtmosphereSkyViewDisplay {
+    MaterialParameters {
+        Texture2D SkyViewMap -LINEAR
+        Vector3 ViewUp
+        Vector3 ViewForward
+        Vector3 ViewSide
+        Float HorizonElevation
+        Vector3 SunDirection
+        Color SolarRadiance
+    }
+    Technique {
+        VertexShader GLSL300 GLSL150 : MatDefs/AtmospherePass.vert
+        FragmentShader GLSL300 GLSL150 : MatDefs/AtmosphereSkyViewDisplay.frag
+        WorldParameters {
+            ProjectionMatrix
+            ProjectionMatrixInverse
+            ViewMatrixInverse
+            ViewPort
+        }
+        RenderState {
+            FaceCull Off
+            DepthWrite Off
+            DepthTest On
+            DepthFunc Equal
+        }
+    }
+}

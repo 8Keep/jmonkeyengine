@@ -152,6 +152,63 @@ final class AtmosphereSegmentReference {
                 transmittance[0], transmittance[1], transmittance[2]);
     }
 
+    /**
+     * Integrate a complete sky ray to the planet or atmosphere boundary. Ground
+     * hits include only direct Lambertian solar reflection, matching the sky
+     * cube boundary model; no ambient ground or higher-order ground term is
+     * added. Ground albedo is linear RGB in [0,1].
+     */
+    Result evaluateSky(Vector3f originMeters, Vector3f direction, int segments,
+            MultipleScatteringSource higherOrders, Vector3f groundAlbedo) {
+        if (!finite(originMeters) || !finite(direction) || !finite(groundAlbedo)
+                || groundAlbedo.x < 0 || groundAlbedo.x > 1
+                || groundAlbedo.y < 0 || groundAlbedo.y > 1
+                || groundAlbedo.z < 0 || groundAlbedo.z > 1) {
+            throw new IllegalArgumentException("finite origin, direction, and albedo in [0,1] required");
+        }
+        double dx = direction.x, dy = direction.y, dz = direction.z;
+        double directionLength = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (!(directionLength > 0) || !Double.isFinite(directionLength)) {
+            throw new IllegalArgumentException("view direction must be nonzero");
+        }
+        dx /= directionLength;
+        dy /= directionLength;
+        dz /= directionLength;
+
+        double px = originMeters.x;
+        double py = originMeters.y + model.groundRadiusMeters();
+        double pz = originMeters.z;
+        double radius = Math.sqrt(px * px + py * py + pz * pz);
+        if (!Double.isFinite(radius) || radius < model.groundRadiusMeters()
+                || radius > model.topRadiusMeters()) {
+            throw new IllegalArgumentException("origin must lie within the spherical atmosphere");
+        }
+        double radialCosine = clamp((px * dx + py * dy + pz * dz) / radius, -1, 1);
+        double distance = model.distanceToBoundary(radius, radialCosine);
+        Result transport = evaluate(originMeters, direction, distance, segments, higherOrders);
+        if (!model.groundHit(radius, radialCosine)) return transport;
+
+        double groundX = px + distance * dx;
+        double groundY = py + distance * dy;
+        double groundZ = pz + distance * dz;
+        double groundLength = Math.sqrt(groundX * groundX + groundY * groundY + groundZ * groundZ);
+        double groundCosineSun = Math.max(0, (groundX * sunX + groundY * sunY + groundZ * sunZ) / groundLength);
+        if (!(groundCosineSun > 0)) return transport;
+
+        double[] groundSunTransmittance = new double[3];
+        model.sunTransmittance(model.groundRadiusMeters(), groundCosineSun,
+                SUN_TRANSMITTANCE_STEPS, groundSunTransmittance);
+        double groundScale = model.solarIrradiance() * groundCosineSun / PI;
+        return new Result(
+                transport.radianceRed + groundScale * groundAlbedo.x * groundSunTransmittance[0]
+                        * transport.transmittanceRed,
+                transport.radianceGreen + groundScale * groundAlbedo.y * groundSunTransmittance[1]
+                        * transport.transmittanceGreen,
+                transport.radianceBlue + groundScale * groundAlbedo.z * groundSunTransmittance[2]
+                        * transport.transmittanceBlue,
+                transport.transmittanceRed, transport.transmittanceGreen, transport.transmittanceBlue);
+    }
+
     private static double miePhase(double cosine, double asymmetry) {
         double g2 = asymmetry * asymmetry;
         double denominator = Math.max(1.0e-12, 1 + g2 - 2 * asymmetry * cosine);

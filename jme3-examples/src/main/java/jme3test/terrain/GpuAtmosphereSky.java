@@ -86,6 +86,7 @@ final class GpuAtmosphereSky implements AtmosphereSky {
     private FloatBuffer capturedTransmittance, capturedMultiple;
     private final long generationMillis;
     private final boolean higherOrders;
+    private final Vector3f groundAlbedo;
     private boolean closed;
 
     GpuAtmosphereSky(AssetManager assets, RenderManager manager, Camera restoreCamera,
@@ -104,6 +105,7 @@ final class GpuAtmosphereSky implements AtmosphereSky {
         this.renderer = manager.getRenderer();
         this.atmosphere = atmosphere;
         this.higherOrders = higherOrders;
+        this.groundAlbedo = groundAlbedo.clone();
         if (!renderer.getCaps().contains(Caps.FloatTextureFilter)
                 || !renderer.getCaps().contains(Caps.FloatColorBufferRGBA)) {
             throw new UnsupportedOperationException("GPU atmosphere requires filtered RGBA32F render targets");
@@ -128,7 +130,7 @@ final class GpuAtmosphereSky implements AtmosphereSky {
             manager.setForcedTechnique(null);
             manager.setForcedRenderState(null);
             manager.getForcedMatParams().clear();
-            Material transmissionPass = material(assets, "AtmosphereTransmittance", groundAlbedo);
+            Material transmissionPass = material(assets, "AtmosphereTransmittance", this.groundAlbedo);
             FrameBuffer target = target(transmittance, -1);
             targets.add(target);
             ByteBuffer transmission = drawRead(manager, passCamera, quad, transmissionPass, target);
@@ -136,7 +138,7 @@ final class GpuAtmosphereSky implements AtmosphereSky {
             transmittance.getImage().setData(transmission);
             capturedTransmittance = transmission.asFloatBuffer();
 
-            Material multiplePass = material(assets, "AtmosphereMultipleScattering", groundAlbedo);
+            Material multiplePass = material(assets, "AtmosphereMultipleScattering", this.groundAlbedo);
             multiplePass.setTexture("TransmittanceMap", transmittance);
             target = target(multipleScattering, -1);
             targets.add(target);
@@ -145,7 +147,7 @@ final class GpuAtmosphereSky implements AtmosphereSky {
             multipleScattering.getImage().setData(multiple);
             capturedMultiple = multiple.asFloatBuffer();
 
-            Material skyPass = material(assets, "AtmosphereSkyCube", groundAlbedo);
+            Material skyPass = material(assets, "AtmosphereSkyCube", this.groundAlbedo);
             skyPass.setTexture("TransmittanceMap", transmittance);
             skyPass.setTexture("MultipleScatteringMap", multipleScattering);
             skyPass.setFloat("ObserverHeight", (float) (model.observerAltitudeMeters() / 1000));
@@ -212,9 +214,20 @@ final class GpuAtmosphereSky implements AtmosphereSky {
         if (consumer != renderer) throw new IllegalArgumentException("atmosphere requires its creating renderer");
     }
 
+    Vector3f getSunDirection(Vector3f store) { checkOwner(); return atmosphere.getSunDirection(store); }
+    Vector3f getGroundAlbedo(Vector3f store) { checkOwner(); return store.set(groundAlbedo); }
+
     Material createAerialMaterial(AssetManager assets) {
+        return createViewMaterial(assets, "AtmosphereAerial");
+    }
+
+    Material createSkyViewMaterial(AssetManager assets) {
+        return createViewMaterial(assets, "AtmosphereSkyView");
+    }
+
+    private Material createViewMaterial(AssetManager assets, String definition) {
         checkOwner();
-        Material result = material(assets, "AtmosphereAerial", Vector3f.ZERO);
+        Material result = material(assets, definition, groundAlbedo);
         result.setTexture("TransmittanceMap", transmittance);
         result.setTexture("MultipleScatteringMap", multipleScattering);
         result.setVector3("SunDirection", atmosphere.getSunDirection(new Vector3f()));

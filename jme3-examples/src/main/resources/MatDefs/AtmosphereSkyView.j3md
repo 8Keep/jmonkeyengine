@@ -1,0 +1,27 @@
+MaterialDef AtmosphereSkyView {
+    MaterialParameters {
+        Vector2 AtmosphereRadii
+        Vector4 Rayleigh
+        Vector4 Mie
+        Vector3 GroundAlbedo
+        Texture2D TransmittanceMap -LINEAR
+        Texture2D MultipleScatteringMap -LINEAR
+        Vector3 ViewUp
+        Vector3 ViewForward
+        Vector3 ViewSide
+        Float ObserverAltitudeKm
+        Float HorizonElevation
+        Vector3 SunDirection
+        Float SolarIrradiance
+        Boolean MultipleScattering
+    }
+    Technique {
+        VertexShader GLSL300 GLSL150 : MatDefs/AtmospherePass.vert
+        FragmentShader GLSL300 GLSL150 : MatDefs/AtmosphereSkyView.frag
+        RenderState {
+            FaceCull Off
+            DepthWrite Off
+            DepthTest Off
+        }
+    }
+}
