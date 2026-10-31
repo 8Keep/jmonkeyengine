@@ -51,6 +51,7 @@ final class RegionalSurfaceSource implements HeightfieldSurfacePage.Source {
     private static final double OFFSET_Z = 200;
 
     // Channels: linear albedo RGB, tangent normal XYZ, roughness, semantic ID.
+    private final int regionCells;
     private final RegionalHeightfieldSource heights;
     private final LinkedHashMap<Long, float[]> tiles = new LinkedHashMap<Long, float[]>(80, .75f, true) {
         @Override
@@ -61,9 +62,21 @@ final class RegionalSurfaceSource implements HeightfieldSurfacePage.Source {
     private long composedSamples;
     private long peakMaterialTransientBytes;
 
+    static long maximumCacheBytes(int regionCells) {
+        return TILE_LIMIT * TILE_BYTES + RegionalHeightfieldSource.maximumCacheBytes(regionCells);
+    }
+
     RegionalSurfaceSource(long revision) {
+        this(RegionalSurfaceCache.REGION_CELLS, revision);
+    }
+
+    RegionalSurfaceSource(int regionCells, long revision) {
+        if (regionCells != 1024 && regionCells != 2048) {
+            throw new IllegalArgumentException("regional surface source supports 1024 or 2048 canonical cells");
+        }
         if (revision < 0) throw new IllegalArgumentException("revision must be nonnegative");
-        this.heights = new RegionalHeightfieldSource(revision);
+        this.regionCells = regionCells;
+        this.heights = new RegionalHeightfieldSource(regionCells, revision);
     }
 
     @Override
@@ -168,11 +181,11 @@ final class RegionalSurfaceSource implements HeightfieldSurfacePage.Source {
 
     /** Bilinear height lookup at fine-lattice cell centers, clamped to terrain. */
     private double heightAt(double cellX, double cellZ) {
-        double x = Math.max(0, Math.min(RegionalHeightfieldSource.CELLS, cellX));
-        double z = Math.max(0, Math.min(RegionalHeightfieldSource.CELLS, cellZ));
+        double x = Math.max(0, Math.min(regionCells, cellX));
+        double z = Math.max(0, Math.min(regionCells, cellZ));
         int x0 = (int) Math.floor(x), z0 = (int) Math.floor(z);
-        int x1 = Math.min(x0 + 1, RegionalHeightfieldSource.CELLS);
-        int z1 = Math.min(z0 + 1, RegionalHeightfieldSource.CELLS);
+        int x1 = Math.min(x0 + 1, regionCells);
+        int z1 = Math.min(z0 + 1, regionCells);
         double fx = x - x0, fz = z - z0;
         double a = heights.getHeight(x0, z0) * (1 - fx) + heights.getHeight(x1, z0) * fx;
         double b = heights.getHeight(x0, z1) * (1 - fx) + heights.getHeight(x1, z1) * fx;

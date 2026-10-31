@@ -47,12 +47,13 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 final class RegionalPagePreparation implements AutoCloseable {
     private static final int SOURCE_CACHE_LIMIT = 2;
-    private static final long TILE_CACHE_LIMIT_BYTES = 2L * 64 * 64 * 64 * Float.BYTES;
+    private final long tileCacheLimitBytes;
     private static final long CLOSE_WAIT_SECONDS = 5;
 
     private final Thread ownerThread = Thread.currentThread();
     private final int patchCells;
     private final int maxJobs;
+    private final int regionCells;
     private final ThreadPoolExecutor executor;
     private final LinkedHashMap<Long, RegionalHeightfieldSource> sources =
             new LinkedHashMap<Long, RegionalHeightfieldSource>(4, .75f, true) {
@@ -73,14 +74,23 @@ final class RegionalPagePreparation implements AutoCloseable {
     private boolean closed;
 
     RegionalPagePreparation(int patchCells, int maxJobs) {
+        this(patchCells, maxJobs, RegionalHeightfieldSource.CELLS);
+    }
+
+    RegionalPagePreparation(int patchCells, int maxJobs, int regionCells) {
         if (patchCells < 2 || patchCells > 256 || (patchCells & (patchCells - 1)) != 0) {
             throw new IllegalArgumentException("patchCells must be a power of two from 2 to 256");
+        }
+        if ((regionCells != 1024 && regionCells != 2048) || patchCells > regionCells) {
+            throw new IllegalArgumentException("regionCells must be 1024 or 2048 and at least patchCells");
         }
         if (maxJobs < 1) {
             throw new IllegalArgumentException("maxJobs must be positive");
         }
         this.patchCells = patchCells;
         this.maxJobs = maxJobs;
+        this.regionCells = regionCells;
+        tileCacheLimitBytes = SOURCE_CACHE_LIMIT * RegionalHeightfieldSource.maximumCacheBytes(regionCells);
         ThreadFactory factory = runnable -> {
             Thread thread = new Thread(runnable, "regional-heightfield-pages");
             thread.setDaemon(true);
@@ -106,8 +116,8 @@ final class RegionalPagePreparation implements AutoCloseable {
         final int span = node.getSpan();
         if ((long) span != (long) patchCells * stride || stride < 1 || (stride & (stride - 1)) != 0
                 || originX < 0 || originZ < 0
-                || (long) originX + span > RegionalHeightfieldSource.CELLS
-                || (long) originZ + span > RegionalHeightfieldSource.CELLS
+                || (long) originX + span > regionCells
+                || (long) originZ + span > regionCells
                 || originX % stride != 0 || originZ % stride != 0) {
             throw new IllegalArgumentException("node must be a stride-aligned patch within the regional source");
         }
@@ -150,7 +160,7 @@ final class RegionalPagePreparation implements AutoCloseable {
     private RegionalHeightfieldSource sourceFor(long revision) {
         RegionalHeightfieldSource source = sources.get(revision);
         if (source == null) {
-            source = new RegionalHeightfieldSource(revision);
+            source = new RegionalHeightfieldSource(regionCells, revision);
             sources.put(revision, source);
         }
         return source;
@@ -187,8 +197,8 @@ final class RegionalPagePreparation implements AutoCloseable {
     void assertBounds() {
         checkOwner();
         if (executor.getMaximumPoolSize() != 1 || executor.getQueue().size() > maxJobs
-                || cachedSourceCount > SOURCE_CACHE_LIMIT || cachedFloatBytes > TILE_CACHE_LIMIT_BYTES
-                || peakCachedFloatBytes > TILE_CACHE_LIMIT_BYTES) {
+                || cachedSourceCount > SOURCE_CACHE_LIMIT || cachedFloatBytes > tileCacheLimitBytes
+                || peakCachedFloatBytes > tileCacheLimitBytes) {
             throw new IllegalStateException("regional page preparation exceeded a worker or source-cache bound");
         }
     }

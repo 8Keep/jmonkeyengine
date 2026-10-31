@@ -61,7 +61,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ExecutionException;
 
 /**
- * Bounded material residency for one synthetic 512 metre region.
+ * Bounded material residency for one finite synthetic region.
  * Surface pages use canonical 0.5 metre cells and remain independent
  * of the terrain geometry page cache. All renderer and residency operations
  * belong to the thread that constructs this object.
@@ -70,6 +70,8 @@ final class RegionalSurfaceCache implements AutoCloseable {
     static final float CANONICAL_SPACING = 0.5f;
     static final int REGION_CELLS = 1024;
     static final float REGION_METRES = REGION_CELLS * CANONICAL_SPACING;
+    private static final int TABLE_CELL_CELLS = 64;
+    private static final int ROOTS_PER_AXIS = 4;
     static final int PAGE_RESOLUTION = 64;
     static final int MIP_COUNT = 3;
     static final int PHYSICAL_SIDE = 68;
@@ -77,12 +79,15 @@ final class RegionalSurfaceCache implements AutoCloseable {
     static final int LAYER_COUNT = SLOT_COUNT * MIP_COUNT;
     private static final int FINE_REQUEST_LIMIT = 16;
     private static final long PADDED_PAGE_BYTES = (long) PHYSICAL_SIDE * PHYSICAL_SIDE * 25 * MIP_COUNT;
-    private static final long FIXED_ATLAS_BYTES = (long) LAYER_COUNT * PHYSICAL_SIDE * PHYSICAL_SIDE * 25
-            + 16L * 16 * 4 * Float.BYTES;
     private static final long MAX_UPLOAD_PAYLOAD_BYTES = PADDED_PAGE_BYTES * 2;
-    private static final long MAX_SOURCE_CACHE_BYTES = 18L * 1024 * 1024;
+    private final long maxSourceCacheBytes;
 
     private final Renderer renderer;
+    private final int regionCells;
+    private final int tableSide;
+    private final int rootBaseStride;
+    private final int rootSpanCells;
+    private final long fixedAtlasBytes;
     private final HeightfieldSurfaceResidency residency;
     private final ThreadPoolExecutor worker;
     private final LinkedHashMap<Long, RegionalSurfaceSource> sources = new LinkedHashMap<Long, RegionalSurfaceSource>(2, .75f, true) {
@@ -112,7 +117,7 @@ final class RegionalSurfaceCache implements AutoCloseable {
     private boolean closed;
     private boolean failed;
     private boolean atlasInitialized;
-    private final float[] lastPageTable = new float[16 * 16 * 4];
+    private final float[] lastPageTable;
     private HeightfieldSurfaceResidency.Frame frame;
     private volatile long reportedCachedBytes;
     private volatile long reportedPeakCachedBytes;
@@ -124,6 +129,21 @@ final class RegionalSurfaceCache implements AutoCloseable {
     private long maxFrameUploadBytes;
 
     RegionalSurfaceCache(Renderer renderer) {
+        this(renderer, REGION_CELLS);
+    }
+
+    RegionalSurfaceCache(Renderer renderer, int regionCells) {
+        if (regionCells != 1024 && regionCells != 2048) {
+            throw new IllegalArgumentException("regional surface cache supports 1024 or 2048 canonical cells");
+        }
+        this.regionCells = regionCells;
+        maxSourceCacheBytes = 2 * RegionalSurfaceSource.maximumCacheBytes(regionCells);
+        tableSide = regionCells / TABLE_CELL_CELLS;
+        rootBaseStride = regionCells / (ROOTS_PER_AXIS * PAGE_RESOLUTION);
+        rootSpanCells = PAGE_RESOLUTION * rootBaseStride;
+        lastPageTable = new float[tableSide * tableSide * 4];
+        fixedAtlasBytes = (long) LAYER_COUNT * PHYSICAL_SIDE * PHYSICAL_SIDE * 25
+                + (long) tableSide * tableSide * 4 * Float.BYTES;
         if (renderer == null) throw new IllegalArgumentException("renderer is required");
         if (!renderer.getCaps().contains(Caps.TextureArray)
                 || !renderer.getCaps().contains(Caps.FloatTexture)
@@ -160,12 +180,12 @@ final class RegionalSurfaceCache implements AutoCloseable {
         configureArray(albedo, false);
         configureArray(normal, false);
         configureArray(semantic, true);
-        tableBuffer = BufferUtils.createByteBuffer(16 * 16 * 4 * Float.BYTES).order(ByteOrder.nativeOrder());
+        tableBuffer = BufferUtils.createByteBuffer(tableSide * tableSide * 4 * Float.BYTES).order(ByteOrder.nativeOrder());
         ownedBuffers.add(tableBuffer);
         tableBuffer.limit(tableBuffer.capacity());
-        for (int i = 0; i < 16 * 16; i++) tableBuffer.putFloat(0).putFloat(0).putFloat(4).putFloat(0);
+        for (int i = 0; i < tableSide * tableSide; i++) tableBuffer.putFloat(0).putFloat(0).putFloat(rootBaseStride).putFloat(0);
         tableBuffer.flip();
-        Image table = new Image(Image.Format.RGBA32F, 16, 16, tableBuffer, ColorSpace.Linear);
+        Image table = new Image(Image.Format.RGBA32F, tableSide, tableSide, tableBuffer, ColorSpace.Linear);
         pageTable = new Texture2D(table);
         configureTexture(pageTable, true);
     }
@@ -240,7 +260,7 @@ final class RegionalSurfaceCache implements AutoCloseable {
         }
         HeightfieldSurfaceBindings.bind(material, albedo, normal, semantic, pageTable,
                 PHYSICAL_SIDE, HeightfieldSurfacePage.GUTTER, MIP_COUNT,
-                new Vector2f(0, 0), REGION_METRES, CANONICAL_SPACING);
+                new Vector2f(0, 0), regionCells * CANONICAL_SPACING, CANONICAL_SPACING);
     }
 
     void endFrame() {
@@ -296,7 +316,7 @@ final class RegionalSurfaceCache implements AutoCloseable {
                 + ", composedSamples=" + getComposedSamples() + ", uploadedBytes=" + paddedUploadBytes
                 + ", finePages=" + uploadedFinePages + ", maxUploadFrameBytes=" + maxFrameUploadBytes);
         System.out.println("HEIGHTFIELD_SURFACE_CACHE_PASS ready=" + s.readySlots + " retired=" + s.retiredSlots
-                + " jobs=" + jobs.size() + " prepared=" + s.preparedPages + " fixedAtlasBytes=" + FIXED_ATLAS_BYTES
+                + " jobs=" + jobs.size() + " prepared=" + s.preparedPages + " fixedAtlasBytes=" + fixedAtlasBytes
                 + " sourceBytes=" + getCachedBytes() + " reservedBytes=" + (s.queuedBytes + s.preparedBytes)
                 + " maxUploadFrameBytes=" + maxFrameUploadBytes + " finePages=" + uploadedFinePages);
     }
@@ -309,8 +329,8 @@ final class RegionalSurfaceCache implements AutoCloseable {
                 .order(ByteOrder.nativeOrder());
         long channels = 0;
         try {
-            for (int z = 0; z < 4; z++) for (int x = 0; x < 4; x++) {
-                HeightfieldSurfaceResidency.PageKey key = key(visibleRevision, x * 256L, z * 256L, 4);
+            for (int z = 0; z < ROOTS_PER_AXIS; z++) for (int x = 0; x < ROOTS_PER_AXIS; x++) {
+                HeightfieldSurfaceResidency.PageKey key = key(visibleRevision, x * (long) rootSpanCells, z * (long) rootSpanCells, rootBaseStride);
                 int slot = residency.ready(key).getSlot();
                 for (int mip = 0; mip < MIP_COUNT; mip++) {
                     int layer = slot * MIP_COUNT + mip;
@@ -339,7 +359,7 @@ final class RegionalSurfaceCache implements AutoCloseable {
                     }
                 }
             }
-            FrameBuffer tableTarget = new FrameBuffer(16, 16, 1);
+            FrameBuffer tableTarget = new FrameBuffer(tableSide, tableSide, 1);
             tableTarget.addColorTarget(FrameBuffer.FrameBufferTarget.newTarget(pageTable));
             try {
                 pixels.clear();
@@ -366,13 +386,13 @@ final class RegionalSurfaceCache implements AutoCloseable {
         checkOwner();
         HeightfieldSurfaceResidency.Stats s = residency.stats();
         long reserved = s.queuedBytes + s.preparedBytes;
-        long desiredExtras = desiredPages.stream().filter(page -> page.baseStride != 4).count();
+        long desiredExtras = desiredPages.stream().filter(page -> page.baseStride != rootBaseStride).count();
         if (s.requests > 4 || jobs.size() > 4 || s.preparedPages > 2 || s.readySlots + s.retiredSlots > SLOT_COUNT
                 || s.slotCapacity != SLOT_COUNT || s.preparedBytes > pageCpuArrayBytes() * 2
                 || s.queuedBytes > pageCpuArrayBytes() * 4 || desiredExtras > 32
-                || reportedSourceCount > 2 || getCachedBytes() > MAX_SOURCE_CACHE_BYTES
-                || FIXED_ATLAS_BYTES + getCachedBytes() + reserved + MAX_UPLOAD_PAYLOAD_BYTES
-                        > FIXED_ATLAS_BYTES + 40L * 1024 * 1024) {
+                || reportedSourceCount > 2 || getCachedBytes() > maxSourceCacheBytes
+                || fixedAtlasBytes + getCachedBytes() + reserved + MAX_UPLOAD_PAYLOAD_BYTES
+                        > fixedAtlasBytes + 40L * 1024 * 1024) {
             throw new IllegalStateException("regional surface cache exceeded a configured bound");
         }
     }
@@ -417,18 +437,18 @@ final class RegionalSurfaceCache implements AutoCloseable {
 
     private void addRoots(java.util.Set<HeightfieldSurfaceResidency.PageKey> into, long revision) {
         if (revision < 0) return;
-        for (int z = 0; z < 4; z++) for (int x = 0; x < 4; x++) into.add(key(revision, x * 256L, z * 256L, 4));
+        for (int z = 0; z < ROOTS_PER_AXIS; z++) for (int x = 0; x < ROOTS_PER_AXIS; x++) into.add(key(revision, x * (long) rootSpanCells, z * (long) rootSpanCells, rootBaseStride));
     }
 
     private void ensureRoots(long revision) {
         if (revision < 0) return;
-        for (int z = 0; z < 4; z++) for (int x = 0; x < 4; x++) requestPage(key(revision, x * 256L, z * 256L, 4));
+        for (int z = 0; z < ROOTS_PER_AXIS; z++) for (int x = 0; x < ROOTS_PER_AXIS; x++) requestPage(key(revision, x * (long) rootSpanCells, z * (long) rootSpanCells, rootBaseStride));
     }
 
     private boolean rootsReady(long revision, long rx, long rz) {
         if (revision < 0) return false;
-        for (int z = 0; z < 4; z++) for (int x = 0; x < 4; x++) {
-            if (residency.ready(key(revision, rx + (long) x * 256, rz + (long) z * 256, 4)) == null) return false;
+        for (int z = 0; z < ROOTS_PER_AXIS; z++) for (int x = 0; x < ROOTS_PER_AXIS; x++) {
+            if (residency.ready(key(revision, rx + (long) x * rootSpanCells, rz + (long) z * rootSpanCells, rootBaseStride)) == null) return false;
         }
         return true;
     }
@@ -438,11 +458,11 @@ final class RegionalSurfaceCache implements AutoCloseable {
         double dx = direction.x, dz = direction.z, length = Math.hypot(dx, dz);
         if (length < 1e-6) { dx = 0; dz = 1; length = 1; }
         dx /= length; dz /= length;
-        List<DistanceKey> candidates = new ArrayList<>(256);
-        for (int z = 0; z < 16; z++) for (int x = 0; x < 16; x++) {
-            long px = x * 64L, pz = z * 64L;
-            double vx = (px + 32) * CANONICAL_SPACING - location.x;
-            double vz = (pz + 32) * CANONICAL_SPACING - location.z;
+        List<DistanceKey> candidates = new ArrayList<>(tableSide * tableSide);
+        for (int z = 0; z < tableSide; z++) for (int x = 0; x < tableSide; x++) {
+            long px = x * (long) TABLE_CELL_CELLS, pz = z * (long) TABLE_CELL_CELLS;
+            double vx = (px + TABLE_CELL_CELLS * .5) * CANONICAL_SPACING - location.x;
+            double vz = (pz + TABLE_CELL_CELLS * .5) * CANONICAL_SPACING - location.z;
             double along = vx * dx + vz * dz;
             double across = Math.abs(vx * dz - vz * dx);
             double score = Math.max(0, -along) * 4 + across * 1.5 + Math.hypot(vx, vz) * .15;
@@ -463,7 +483,7 @@ final class RegionalSurfaceCache implements AutoCloseable {
     }
 
     private void requestDesiredPages() {
-        for (HeightfieldSurfaceResidency.PageKey page : desiredPages) if (page.baseStride != 4) requestPage(page);
+        for (HeightfieldSurfaceResidency.PageKey page : desiredPages) if (page.baseStride != rootBaseStride) requestPage(page);
     }
 
     private void requestPage(HeightfieldSurfaceResidency.PageKey key) {
@@ -480,7 +500,7 @@ final class RegionalSurfaceCache implements AutoCloseable {
         if (Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException();
         RegionalSurfaceSource source = sources.get(key.revision.getHeight());
         if (source == null) {
-            source = new RegionalSurfaceSource(key.revision.getHeight());
+            source = new RegionalSurfaceSource(regionCells, key.revision.getHeight());
             sources.put(key.revision.getHeight(), source);
         }
         HeightfieldSurfacePage page = new HeightfieldSurfacePage(key.revision, key.originX, key.originZ,
@@ -554,12 +574,12 @@ final class RegionalSurfaceCache implements AutoCloseable {
     private void updatePageTable(long revision) {
         float[] next = new float[lastPageTable.length];
         tableBuffer.clear();
-        for (int z = 0; z < 16; z++) for (int x = 0; x < 16; x++) {
-            long px = x * 64L, pz = z * 64L;
+        for (int z = 0; z < tableSide; z++) for (int x = 0; x < tableSide; x++) {
+            long px = x * (long) TABLE_CELL_CELLS, pz = z * (long) TABLE_CELL_CELLS;
             HeightfieldSurfaceResidency.PageKey page = finestReady(revision, px, pz);
             if (page == null) throw new IllegalStateException("no ready regional surface fallback for table cell " + x + "," + z);
             HeightfieldSurfaceResidency.Handle handle = residency.ready(page);
-            int i = (z * 16 + x) * 4;
+            int i = (z * tableSide + x) * 4;
             next[i] = (float) page.originX; next[i + 1] = (float) page.originZ;
             next[i + 2] = page.baseStride; next[i + 3] = handle.getSlot() * MIP_COUNT;
             tableBuffer.putFloat(next[i]).putFloat(next[i + 1]).putFloat(next[i + 2]).putFloat(next[i + 3]);
@@ -577,15 +597,15 @@ final class RegionalSurfaceCache implements AutoCloseable {
         HeightfieldSurfaceResidency.PageKey middle = key(revision, Math.floorDiv(x, 128) * 128,
                 Math.floorDiv(z, 128) * 128, 2);
         if (desiredPages.contains(middle) && residency.ready(middle) != null) return middle;
-        HeightfieldSurfaceResidency.PageKey root = key(revision, Math.floorDiv(x, 256) * 256,
-                Math.floorDiv(z, 256) * 256, 4);
+        HeightfieldSurfaceResidency.PageKey root = key(revision, Math.floorDiv(x, rootSpanCells) * (long) rootSpanCells,
+                Math.floorDiv(z, rootSpanCells) * (long) rootSpanCells, rootBaseStride);
         return desiredPages.contains(root) && residency.ready(root) != null ? root : null;
     }
 
     private List<HeightfieldSurfaceResidency.PageKey> visiblePageKeys(long revision) {
-        List<HeightfieldSurfaceResidency.PageKey> keys = new ArrayList<>(256);
-        for (int z = 0; z < 16; z++) for (int x = 0; x < 16; x++) {
-            HeightfieldSurfaceResidency.PageKey page = finestReady(revision, x * 64L, z * 64L);
+        List<HeightfieldSurfaceResidency.PageKey> keys = new ArrayList<>(tableSide * tableSide);
+        for (int z = 0; z < tableSide; z++) for (int x = 0; x < tableSide; x++) {
+            HeightfieldSurfaceResidency.PageKey page = finestReady(revision, x * (long) TABLE_CELL_CELLS, z * (long) TABLE_CELL_CELLS);
             if (page == null) throw new IllegalStateException("regional page table references a missing page");
             keys.add(page);
         }
@@ -594,12 +614,12 @@ final class RegionalSurfaceCache implements AutoCloseable {
 
     private void pinRoots(long revision) {
         if (revision < 0) return;
-        for (int z = 0; z < 4; z++) for (int x = 0; x < 4; x++) residency.pin(key(revision, x * 256L, z * 256L, 4));
+        for (int z = 0; z < ROOTS_PER_AXIS; z++) for (int x = 0; x < ROOTS_PER_AXIS; x++) residency.pin(key(revision, x * (long) rootSpanCells, z * (long) rootSpanCells, rootBaseStride));
     }
 
     private void unpinRoots(long revision) {
         if (revision < 0) return;
-        for (int z = 0; z < 4; z++) for (int x = 0; x < 4; x++) residency.unpin(key(revision, x * 256L, z * 256L, 4));
+        for (int z = 0; z < ROOTS_PER_AXIS; z++) for (int x = 0; x < ROOTS_PER_AXIS; x++) residency.unpin(key(revision, x * (long) rootSpanCells, z * (long) rootSpanCells, rootBaseStride));
     }
 
     private void evictUnwanted() {
@@ -655,7 +675,7 @@ final class RegionalSurfaceCache implements AutoCloseable {
         java.util.Arrays.fill(lastPageTable, Float.NaN);
         atlasInitialized = false;
         tableBuffer.clear();
-        for (int i = 0; i < 16 * 16; i++) tableBuffer.putFloat(0).putFloat(0).putFloat(4).putFloat(0);
+        for (int i = 0; i < tableSide * tableSide; i++) tableBuffer.putFloat(0).putFloat(0).putFloat(rootBaseStride).putFloat(0);
         tableBuffer.flip();
     }
 

@@ -82,7 +82,34 @@ public final class TestRegionalPagePreparation {
         }
 
         verifyCloseCompletesFutures();
+        verifyBeyondDefaultBoundary();
         System.out.println("PASS regional page preparation");
+    }
+
+    private static void verifyBeyondDefaultBoundary() throws Exception {
+        HeightfieldHierarchy hierarchy = HeightfieldHierarchy.fromMetadata(2048, 64, .5f, 9, 0,
+                (x, z, span, stride) -> new HeightfieldHierarchy.NodeMetadata(0, 736,
+                        stride == 1 ? 0 : 736, stride == 32 ? 0 : 736));
+        HeightfieldHierarchy.Node target = null;
+        for (HeightfieldHierarchy.Node node : hierarchy.getNodes()) {
+            if (node.getOriginX() == 1024 && node.getOriginZ() == 0 && node.getStride() == 1) {
+                target = node;
+                break;
+            }
+        }
+        require(target != null, "2048 metadata contains a stride-one node beyond x=1024");
+        RegionalHeightfieldSource expected = new RegionalHeightfieldSource(2048, 9);
+        try (RegionalPagePreparation preparation = new RegionalPagePreparation(64, 2, 2048)) {
+            HeightfieldPage page = preparation.submit(target, 9).get(10, TimeUnit.SECONDS);
+            require(page.getCells() == 64 && page.getSampleSpacing() == .5f
+                    && page.hasSourceGradients(), "extended page dimensions and gradients are retained");
+            require(page.getHeight(0, 0) == expected.getHeight(1024, 0)
+                    && page.getHeight(64, 64) == expected.getHeight(1088, 64),
+                    "worker source prepares a node page beyond the old 1024-cell extent");
+            require(page.getHeight(65, 0) == expected.getHeight(1089, 0),
+                    "extended worker page includes its outer halo");
+            preparation.assertBounds();
+        }
     }
 
     private static HeightfieldHierarchy hierarchy(long revision) {

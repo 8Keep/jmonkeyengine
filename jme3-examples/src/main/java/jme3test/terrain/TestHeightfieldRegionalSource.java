@@ -74,6 +74,7 @@ public final class TestHeightfieldRegionalSource {
         require(hierarchy.getSourceRevision() == REVISION, "metadata revision changed");
 
         verifyDenseControl(source);
+        verifyConfigurableRegionalSources();
         verifySelectionAndTransitions(hierarchy);
         HeightfieldPage west = HeightfieldPage.fromSource(source, 0, 0, PATCH_CELLS, 1, true);
         HeightfieldPage east = HeightfieldPage.fromSource(source, PATCH_CELLS, 0, PATCH_CELLS, 1, true);
@@ -95,6 +96,39 @@ public final class TestHeightfieldRegionalSource {
                 + ", tileLoads=" + source.tileLoads + ", cachedFloatPayloadBytes=" + cacheBytes
                 + ", transientLoaderPeakTiles=" + source.peakTransientTiles
                 + ", retainedDenseHeightBytes=0");
+    }
+
+    private static void verifyConfigurableRegionalSources() {
+        for (int cells : new int[]{1024, 2048}) {
+            RegionalHeightfieldSource source = new RegionalHeightfieldSource(cells, REVISION);
+            require(source.getCells() == cells && source.getSampleSpacing() == SPACING,
+                    "configured regional extent preserves canonical spacing");
+            int patchCells = 32;
+            int westOrigin = cells - patchCells * 2;
+            int eastOrigin = cells - patchCells;
+            HeightfieldPage west = HeightfieldPage.fromSource(source,
+                    westOrigin, 0, patchCells, 1, true);
+            HeightfieldPage east = HeightfieldPage.fromSource(source,
+                    eastOrigin, 0, patchCells, 1, true);
+            for (int z = -1; z <= patchCells + 1; z++) {
+                require(west.getHeight(patchCells, z) == east.getHeight(0, z),
+                        "configured adjacent pages share exact heights");
+                require(west.getSourceGradientX(patchCells, z) == east.getSourceGradientX(0, z)
+                        && west.getSourceGradientZ(patchCells, z) == east.getSourceGradientZ(0, z),
+                        "configured adjacent pages share exact canonical gradients");
+            }
+            require(east.getHeight(patchCells + 1, 0) == source.getHeight(cells + 1, 0),
+                    "outer source halo is available beyond the configured boundary");
+            require(east.getSourceGradientX(patchCells, 0)
+                    == source.getHeight(cells - 1, 0) * .5f - source.getHeight(cells + 1, 0) * .5f,
+                    "outer boundary gradient uses the canonical one-sample halo");
+        }
+        RegionalHeightfieldSource extended = new RegionalHeightfieldSource(2048, REVISION);
+        HeightfieldPage beyondOldBoundary = HeightfieldPage.fromSource(extended,
+                1024, 0, 32, 1, true);
+        require(beyondOldBoundary.getHeight(0, 0) == extended.getHeight(1024, 0)
+                && beyondOldBoundary.getHeight(32, 0) == extended.getHeight(1056, 0),
+                "2048-cell source prepares pages beyond the former 1024 boundary");
     }
 
     private static void verifyDenseControl(HeightfieldSource source) {

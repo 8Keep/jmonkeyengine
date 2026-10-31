@@ -32,6 +32,7 @@
 package jme3test.terrain;
 
 import com.jme3.terrain.heightfield.HeightfieldSource;
+import com.jme3.terrain.heightfield.HeightfieldHierarchy;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.CancellationException;
@@ -46,7 +47,8 @@ final class RegionalHeightfieldSource implements HeightfieldSource {
     static final float SPACING = .5f;
 
     private static final int TILE_CELLS = 64;
-    private static final int TILE_LIMIT = 64;
+    private static final int DEFAULT_TILE_LIMIT = 64;
+    private final int tileLimit;
     private static final long TILE_FLOAT_BYTES = (long) TILE_CELLS * TILE_CELLS * Float.BYTES;
     private static final double SCENIC_OFFSET_X = 100;
     private static final double SCENIC_OFFSET_Z = 200;
@@ -55,11 +57,12 @@ final class RegionalHeightfieldSource implements HeightfieldSource {
     private static final double EDIT_HILL_RADIUS = 35;
 
     private final long revision;
+    private final int cells;
     private final HeightfieldSource pointSamples = new PointSampleView();
     private final LinkedHashMap<Long, float[]> tiles = new LinkedHashMap<Long, float[]>(80, .75f, true) {
         @Override
         protected boolean removeEldestEntry(Map.Entry<Long, float[]> eldest) {
-            return size() > TILE_LIMIT;
+            return size() > tileLimit;
         }
     };
     private int tileLoads;
@@ -68,15 +71,26 @@ final class RegionalHeightfieldSource implements HeightfieldSource {
     private long heightRequests;
 
     RegionalHeightfieldSource(long revision) {
+        this(CELLS, revision);
+    }
+
+    RegionalHeightfieldSource(int cells, long revision) {
+        if (cells != 1024 && cells != 2048) {
+            throw new IllegalArgumentException("regional source cells must be 1024 or 2048");
+        }
         if (revision < 0) {
             throw new IllegalArgumentException("synthetic source revision must be nonnegative");
         }
+        this.cells = cells;
+        // Keep the fine scan and its coarse reconstruction rows resident,
+        // including edge tiles. A kilometre-wide scan outgrows 64 tiles.
+        tileLimit = cells == 2048 ? 128 : DEFAULT_TILE_LIMIT;
         this.revision = revision;
     }
 
     @Override
     public int getCells() {
-        return CELLS;
+        return cells;
     }
 
     @Override
@@ -89,7 +103,7 @@ final class RegionalHeightfieldSource implements HeightfieldSource {
         if (((++heightRequests) & 4095L) == 0) {
             checkInterrupted();
         }
-        if (x < -1 || x > CELLS + 1 || z < -1 || z > CELLS + 1) {
+        if (x < -1 || x > cells + 1 || z < -1 || z > cells + 1) {
             throw new IndexOutOfBoundsException("sample is outside the source and its one-fine-sample halo");
         }
         int tileX = Math.floorDiv(x, TILE_CELLS);
@@ -112,6 +126,23 @@ final class RegionalHeightfieldSource implements HeightfieldSource {
         return revision;
     }
 
+    /** Build conservative metadata without sampling or retaining a dense page. */
+    HeightfieldHierarchy bootstrapHierarchy(int patchCells) {
+        // Global source envelope: 25.3 base + 266.7 first hills + 196.88
+        // second hills + 122.96 far hills + 97 summits + 5.42 detail + 20
+        // edit maximum = 734.26. The source is nonnegative; [0,736] pads it.
+        // Every coarse triangle and parent morph is a convex interpolation of
+        // fine samples in this envelope, so 736 bounds their vertical error.
+        return HeightfieldHierarchy.fromMetadata(
+                cells, patchCells, SPACING, revision, 0,
+                (x, z, span, stride) -> new HeightfieldHierarchy.NodeMetadata(
+                        0, 736, stride == 1 ? 0 : 736, stride == cells / patchCells ? 0 : 736));
+    }
+
+    static long maximumCacheBytes(int cells) {
+        return (cells == 2048 ? 128L : DEFAULT_TILE_LIMIT) * TILE_FLOAT_BYTES;
+    }
+
     long getCachedFloatBytes() {
         return (long) tiles.size() * TILE_FLOAT_BYTES;
     }
@@ -128,6 +159,10 @@ final class RegionalHeightfieldSource implements HeightfieldSource {
         return directSampleCount;
     }
 
+    long getHeightRequestCount() {
+        return heightRequests;
+    }
+
     /**
      * Return the source view used by a page transaction at {@code stride}.
      * Fine samples use the bounded tile cache; coarser page samples bypass
@@ -135,7 +170,7 @@ final class RegionalHeightfieldSource implements HeightfieldSource {
      * each requested fine-lattice point. The view remains on this revision.
      */
     HeightfieldSource pageSamples(int stride) {
-        if (stride <= 0 || (stride & (stride - 1)) != 0 || stride > CELLS) {
+        if (stride <= 0 || (stride & (stride - 1)) != 0 || stride > cells) {
             throw new IllegalArgumentException("stride must be a power of two no greater than source cells");
         }
         return stride == 1 ? this : pointSamples;
@@ -179,7 +214,7 @@ final class RegionalHeightfieldSource implements HeightfieldSource {
     private final class PointSampleView implements HeightfieldSource {
         @Override
         public int getCells() {
-            return CELLS;
+            return cells;
         }
 
         @Override
@@ -192,7 +227,7 @@ final class RegionalHeightfieldSource implements HeightfieldSource {
             if (((++directSampleCount) & 4095L) == 0) {
                 checkInterrupted();
             }
-            if (x < -1 || x > CELLS + 1 || z < -1 || z > CELLS + 1) {
+            if (x < -1 || x > cells + 1 || z < -1 || z > cells + 1) {
                 throw new IndexOutOfBoundsException("sample is outside the source and its one-fine-sample halo");
             }
             return sampleHeight(x, z);

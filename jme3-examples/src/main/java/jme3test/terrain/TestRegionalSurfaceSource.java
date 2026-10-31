@@ -53,6 +53,8 @@ final class TestRegionalSurfaceSource {
                         (65L * 64 * 64 * 8 + 65L * 64 * 64) * Float.BYTES,
                 "peak cache exceeded the conservative resident-plus-loader bound");
 
+        verifyExpandedCoverage();
+
         RegionalSurfaceSource original = new RegionalSurfaceSource(0);
         RegionalSurfaceSource editA = new RegionalSurfaceSource(1);
         RegionalSurfaceSource editB = new RegionalSurfaceSource(3);
@@ -78,6 +80,45 @@ final class TestRegionalSurfaceSource {
         }
         require(cancelled && Thread.currentThread().isInterrupted(), "sampling cleared or ignored interruption");
         Thread.interrupted();
+    }
+
+
+    private static void verifyExpandedCoverage() {
+        RegionalSurfaceSource defaultSource = new RegionalSurfaceSource(0);
+        RegionalSurfaceSource expanded = new RegionalSurfaceSource(2048, 0);
+        HeightfieldSurfacePage.Sample originalSample = new HeightfieldSurfacePage.Sample();
+        HeightfieldSurfacePage.Sample expandedSample = new HeightfieldSurfacePage.Sample();
+        // The old outer-edge stencil was clamped at 512 metres. Compare the
+        // common interior; extending the world intentionally supplies real
+        // neighbors where that artificial boundary used to be.
+        for (int z : new int[]{0, 511, 1020}) for (int x : new int[]{0, 511, 1020}) {
+            defaultSource.sample(x, z, originalSample);
+            expanded.sample(x, z, expandedSample);
+            equalSample(originalSample, expandedSample);
+        }
+
+        // This stride-8 page occupies one coarse page footprint at the outer
+        // edge of the 1 km region. Its gutters sample beyond the region edge,
+        // exercising the clamped height halo without composing the full world.
+        HeightfieldSurfacePage.Revision revision = new HeightfieldSurfacePage.Revision(0, 0, 0);
+        HeightfieldSurfacePage outer = new HeightfieldSurfacePage(revision,
+                1984, 1984, 8, 8, 1, expanded);
+        require(outer.getOriginX() == 1984 && outer.getOriginZ() == 1984
+                        && outer.getResolution() == 8 && outer.getBaseStride() == 8,
+                "expanded coarse page has the expected canonical footprint");
+        require(outer.getOriginX() + (long) outer.getResolution() * outer.getBaseStride() == 2048
+                        && outer.getOriginZ() + (long) outer.getResolution() * outer.getBaseStride() == 2048,
+                "outer coarse page reaches the 1 km region boundary");
+        for (int z = -HeightfieldSurfacePage.GUTTER;
+                z < outer.getInteriorSize(0) + HeightfieldSurfacePage.GUTTER; z++) {
+            for (int x = -HeightfieldSurfacePage.GUTTER;
+                    x < outer.getInteriorSize(0) + HeightfieldSurfacePage.GUTTER; x++) {
+                for (int channel = 0; channel < 3; channel++) {
+                    require(Float.isFinite(outer.getAlbedo(0, x, z, channel)),
+                            "outer coarse page halo has finite albedo");
+                }
+            }
+        }
     }
 
     private static HeightfieldSurfacePage page(HeightfieldSurfacePage.Revision revision,

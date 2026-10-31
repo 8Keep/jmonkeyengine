@@ -47,9 +47,29 @@ public final class TestRegionalRevisionPreparation {
     }
 
     public static void main(String[] args) throws Exception {
+        verifyBootstrapHierarchy();
         verifyCoalescingFailureAndOwnerThread();
         verifyCloseInterruptsWorker();
         System.out.println("PASS regional revision preparation concurrency contract");
+    }
+
+    private static void verifyBootstrapHierarchy() {
+        RegionalHeightfieldSource source = new RegionalHeightfieldSource(2048, 12);
+        HeightfieldHierarchy hierarchy = source.bootstrapHierarchy(256);
+        require(source.getCells() == 2048 && hierarchy.getCells() == 2048,
+                "configured regional dimensions were not preserved");
+        require(hierarchy.getNodes().size() == 85 && !hierarchy.hasCanonicalPage(),
+                "2048 bootstrap hierarchy is metadata-only and bounded");
+        require(source.getHeightRequestCount() == 0
+                && source.getCachedFloatBytes() == 0,
+                "bootstrap metadata does not sample or retain source pages");
+        for (HeightfieldHierarchy.Node node : hierarchy.getNodes()) {
+            HeightfieldHierarchy.NodeMetadata metadata = node.getMetadata();
+            require(metadata.getMinimumHeight() == 0 && metadata.getMaximumHeight() == 736,
+                    "bootstrap node uses the documented conservative source envelope");
+            require(node.getStableError() <= 736.01 && node.getMorphError() <= 1472.01,
+                    "bootstrap errors are conservatively bounded");
+        }
     }
 
     private static void verifyCoalescingFailureAndOwnerThread() throws Exception {

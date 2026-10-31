@@ -61,7 +61,11 @@ final class RegionalRevisionPreparation implements AutoCloseable {
     private boolean closed;
 
     RegionalRevisionPreparation(int patchCells) {
-        this(new DefaultBuilder(patchCells));
+        this(patchCells, RegionalHeightfieldSource.CELLS);
+    }
+
+    RegionalRevisionPreparation(int patchCells, int regionCells) {
+        this(new DefaultBuilder(patchCells, regionCells));
     }
 
     /** Package hook for finite cancellation, supersession and failure checks. */
@@ -276,26 +280,34 @@ final class RegionalRevisionPreparation implements AutoCloseable {
 
     private static final class DefaultBuilder implements Builder {
         private final int patchCells;
+        private final int regionCells;
 
-        DefaultBuilder(int patchCells) {
+        DefaultBuilder(int patchCells, int regionCells) {
             if (patchCells < 2 || (patchCells & (patchCells - 1)) != 0) {
                 throw new IllegalArgumentException("patchCells must be a power of two of at least 2");
             }
+            if ((regionCells != 1024 && regionCells != 2048) || patchCells > regionCells) {
+                throw new IllegalArgumentException("regionCells must be 1024 or 2048 and at least patchCells");
+            }
             this.patchCells = patchCells;
+            this.regionCells = regionCells;
         }
 
         @Override
         public Prepared build(long revision, BooleanSupplier cancelled) {
-            return prepare(patchCells, revision, cancelled);
+            return prepare(patchCells, regionCells, revision, cancelled);
         }
     }
 
     static Prepared prepare(int patchCells, long revision, BooleanSupplier cancelled) {
+        return prepare(patchCells, RegionalHeightfieldSource.CELLS, revision, cancelled);
+    }
+
+    static Prepared prepare(int patchCells, int regionCells, long revision, BooleanSupplier cancelled) {
         long start = System.nanoTime();
         checkCancelled(cancelled);
-        RegionalHeightfieldSource source = new RegionalHeightfieldSource(revision);
-        HeightfieldHierarchy hierarchy = HeightfieldHierarchy.fromSource(
-                source, patchCells, revision, 0);
+        RegionalHeightfieldSource source = new RegionalHeightfieldSource(regionCells, revision);
+        HeightfieldHierarchy hierarchy = HeightfieldHierarchy.fromSource(source, patchCells, revision, 0);
         checkCancelled(cancelled);
         return new Prepared(source, hierarchy, revision, System.nanoTime() - start);
     }
