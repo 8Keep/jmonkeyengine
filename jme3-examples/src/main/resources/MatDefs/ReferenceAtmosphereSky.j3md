@@ -1,0 +1,23 @@
+MaterialDef ReferenceAtmosphereSky {
+    MaterialParameters {
+        TextureCubeMap SkyMap
+        Vector3 NormalScale
+        Vector3 SunDirection
+        Color SolarRadiance
+    }
+    Technique {
+        VertexShader GLSL300 GLSL150: Common/MatDefs/Misc/Sky.vert
+        FragmentShader GLSL300 GLSL150: MatDefs/ReferenceAtmosphereSky.frag
+        WorldParameters {
+            ViewMatrix
+            ProjectionMatrix
+            WorldMatrixInverse
+        }
+        RenderState {
+            FaceCull Off
+            DepthWrite Off
+            DepthTest On
+            DepthFunc Equal
+        }
+    }
+}

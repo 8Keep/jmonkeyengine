@@ -131,6 +131,8 @@ import javax.imageio.ImageIO;
  * Regional detail defaults to 64-cell grids and 128 desired patches. Use
  * --region-detail=low for the original 16-cell/64-patch control, and
  * --sync-region-pages for the owner-thread preparation comparison.
+ * Regional light defaults to a shared single-scattering sky/sun reference.
+ * --plain-lighting retains the old control; --sun-elevation=12 shows a low sun.
  */
 public final class TestHeightfieldStreaming extends SimpleApplication {
     private static final int CELLS = 128, DEFAULT_PATCH_CELLS = 16, DEFAULT_CAPACITY = 32;
@@ -155,6 +157,9 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     private final int capacity, patchBudget, patchCells, pressureEndFrame;
     private final boolean synchronousRegionPages;
     private RegionalPagePreparation pagePreparation;
+    private final boolean atmosphereLighting;
+    private final float sunElevation;
+    private ReferenceAtmosphereSky atmosphereSky;
     private HeightfieldGrid patchGrid;
     private List<Node> demandOrder;
     private final List<Geometry> spareGeometry = new ArrayList<>();
@@ -231,6 +236,8 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         patchBudget = largeRegionMode ? region.detail.patches : DEFAULT_PATCH_BUDGET;
         patchCells = largeRegionMode ? region.detail.cells : DEFAULT_PATCH_CELLS;
         synchronousRegionPages = region.synchronousPages;
+        atmosphereLighting = largeRegionMode && !region.plainLighting;
+        sunElevation = region.sunElevation;
         pressureEndFrame = largeRegionMode ? 150 + Math.max(130, capacity / 2 + 32) : 205;
         this.pageBytes = (long) (patchCells + 3) * (patchCells + 3) * Float.BYTES
                 * (sourceGradientMode ? 3L : 1L);
@@ -246,9 +253,13 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
 
     private static final class RegionalOptions {
         final RegionalDetail detail;
-        final boolean synchronousPages;
-        RegionalOptions(RegionalDetail detail, boolean synchronousPages) {
-            this.detail = detail; this.synchronousPages = synchronousPages;
+        final boolean synchronousPages, plainLighting;
+        final float sunElevation;
+        RegionalOptions(RegionalDetail detail, boolean synchronousPages, boolean plainLighting, float sunElevation) {
+            this.detail = detail;
+            this.synchronousPages = synchronousPages;
+            this.plainLighting = plainLighting;
+            this.sunElevation = sunElevation;
         }
     }
 
@@ -262,6 +273,8 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         boolean sourceGradientMode = false, largeRegionMode = false;
         boolean synchronousRegionEdits = false, revisionStress = false, surfaceCacheMode = false;
         boolean regionDetailExplicit = false, synchronousPages = false;
+        boolean plainLighting = false, sunExplicit = false;
+        float sunElevation = 55;
         RegionalDetail detail = RegionalDetail.DETAILED;
         for (String arg : args) {
             if ("--gpu-selection".equals(arg)) gpuSelectionMode = true;
@@ -273,6 +286,11 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             else if ("--revision-stress".equals(arg)) revisionStress = true;
             else if ("--surface-cache".equals(arg)) surfaceCacheMode = true;
             else if ("--sync-region-pages".equals(arg)) synchronousPages = true;
+            else if ("--plain-lighting".equals(arg)) plainLighting = true;
+            else if (arg.startsWith("--sun-elevation=")) {
+                sunElevation = Float.parseFloat(arg.substring("--sun-elevation=".length()));
+                sunExplicit = true;
+            }
             else if (arg.startsWith("--region-detail=")) {
                 detail = RegionalDetail.valueOf(arg.substring("--region-detail=".length()).toUpperCase(Locale.ROOT));
                 regionDetailExplicit = true;
@@ -286,6 +304,10 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         if ((synchronousRegionEdits || revisionStress) && !largeRegionMode
                 || synchronousRegionEdits && revisionStress) {
             throw new IllegalArgumentException("revision controls require --large-region and are mutually exclusive");
+        }
+        if ((plainLighting || sunExplicit) && !largeRegionMode || plainLighting && sunExplicit
+                || !Float.isFinite(sunElevation) || sunElevation < -90 || sunElevation > 90) {
+            throw new IllegalArgumentException("sky options require --large-region; sun elevation in [-90,90] cannot accompany --plain-lighting");
         }
         if ((regionDetailExplicit || synchronousPages) && !largeRegionMode) {
             throw new IllegalArgumentException("regional detail options require --large-region");
@@ -302,7 +324,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         if (!assertions) throw new IllegalStateException("Streaming control requires -ea");
         TestHeightfieldStreaming app = new TestHeightfieldStreaming(output, gpuSelectionMode,
                 gpuTransitionsMode, profileMode, sourceGradientMode, largeRegionMode,
-                synchronousRegionEdits, revisionStress, surfaceCacheMode, new RegionalOptions(detail, synchronousPages));
+                synchronousRegionEdits, revisionStress, surfaceCacheMode, new RegionalOptions(detail, synchronousPages, plainLighting, sunElevation));
         AppSettings settings = new AppSettings(true);
         settings.setRenderer(rendererName);
         settings.setResolution(960, 640);
@@ -1719,9 +1741,26 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         DirectionalLight sun = new DirectionalLight();
         sun.setDirection(new Vector3f(-.55f, -1f, -.42f).normalizeLocal());
         sun.setColor(new ColorRGBA(1.25f, 1.18f, 1.03f, 1));
-        rootNode.addLight(sun);
         AmbientLight sky = new AmbientLight();
         sky.setColor(new ColorRGBA(.22f, .27f, .34f, 1));
+        if (atmosphereLighting) {
+            ReferenceAtmosphereSky.requireFloatTextureFiltering(renderer);
+            ClearSkyAtmosphere atmosphere = new ClearSkyAtmosphere(sunElevation, 53);
+            atmosphereSky = new ReferenceAtmosphereSky(assetManager, atmosphere);
+            sun.setDirection(atmosphere.getSunDirection(new Vector3f()).negateLocal());
+            sun.setColor(atmosphere.getSunIrradiance(new ColorRGBA()));
+            // Upper-hemisphere irradiance / PI, applied once by the existing
+            // AmbientLight path. Directional sky response remains an approximation.
+            sky.setColor(atmosphere.diffuseFill(new ColorRGBA()));
+            rootNode.attachChild(atmosphereSky.getSpatial());
+            System.out.println("HEIGHTFIELD_ATMOSPHERE_REFERENCE elevationDegrees=" + sunElevation
+                    + " directIrradiance=" + sun.getColor() + " diffuseFill=" + sky.getColor()
+                    + " cubeTexels=" + atmosphereSky.getTexelCount()
+                    + " cubeBytes=" + atmosphereSky.getEncodedBytes()
+                    + " generationMs=" + atmosphereSky.getGenerationMillis()
+                    + " model=single-scattering fixedObserverAltitudeMeters=200");
+        }
+        rootNode.addLight(sun);
         rootNode.addLight(sky);
 
         FilterPostProcessor post = new FilterPostProcessor(assetManager);
@@ -1845,6 +1884,18 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             if (pagePreparation != null) pagePreparation.close();
             if (surfaces != null) surfaces.close();
             if (gpuSelectionMode && !drainGpuSelectionResources()) return;
+            if (atmosphereSky != null) {
+                // Last-frame leases fence sky/post work as well as terrain. Drain
+                // real uses before releasing the static cube and its CPU replay.
+                retiringStorage = true;
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (residency.stats().frames != 0 && System.nanoTime() < deadline) {
+                    residency.poll();
+                    Thread.yield();
+                }
+                require(residency.stats().frames == 0, "sky draws drained before image disposal");
+                atmosphereSky.close(renderer);
+            }
             // Discard the physical storage before invalidating its leases.
             if (atlas != null) discardAtlas();
             if (gradientAtlas != null) discardAtlas(gradientAtlas);
