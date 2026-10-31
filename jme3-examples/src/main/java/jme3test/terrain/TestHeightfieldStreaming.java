@@ -67,6 +67,7 @@ import com.jme3.terrain.heightfield.HeightfieldLod.Selection;
 import com.jme3.terrain.heightfield.HeightfieldLod.Transition;
 import com.jme3.terrain.heightfield.HeightfieldPage;
 import com.jme3.terrain.heightfield.HeightfieldSource;
+import com.jme3.terrain.heightfield.HeightfieldSkyIrradiance;
 import com.jme3.terrain.heightfield.HeightfieldReconstruction;
 import com.jme3.terrain.heightfield.HeightfieldResidency;
 import com.jme3.terrain.heightfield.HeightfieldResidency.PageKey;
@@ -134,7 +135,8 @@ import javax.imageio.ImageIO;
  * Regional light defaults to GPU transmittance/multiple-scattering sky passes.
  * --reference-sky retains the CPU single-scattering control; --single-scattering
  * disables higher orders in the GPU sky. --plain-lighting retains constant fill;
- * --sun-elevation=12 shows a low sun.
+ * --sun-elevation=12 shows a low sun. --hemisphere-fill retains artistic fill;
+ * otherwise directional diffuse sky uses the shared HDR environment.
  * --region-cells=2048 expands to one kilometre with a coherent coarse root while
  * initial metadata prepares; the default 1024-cell control stays at 512 metres.
  */
@@ -170,7 +172,8 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     private final boolean atmosphereLighting;
     private final float sunElevation;
     private AtmosphereSky atmosphereSky;
-    private final boolean referenceSky, singleScattering;
+    private final boolean referenceSky, singleScattering, hemisphereFill;
+    private HeightfieldSkyIrradiance skyIrradiance;
     private HeightfieldGrid patchGrid;
     private List<Node> demandOrder;
     private final List<Geometry> spareGeometry = new ArrayList<>();
@@ -253,6 +256,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         sunElevation = region.sunElevation;
         referenceSky = region.referenceSky;
         singleScattering = region.singleScattering;
+        hemisphereFill = region.hemisphereFill;
         pressureFrameCount = largeRegionMode ? Math.max(130, capacity / 2 + 32) : 55;
         pressureEndFrame = pressureStartFrame + pressureFrameCount;
         asynchronousInitialMetadata = largeRegionMode && regionCells > RegionalHeightfieldSource.CELLS
@@ -278,9 +282,9 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         final boolean synchronousPages, plainLighting;
         final float sunElevation;
         final int regionCells;
-        final boolean referenceSky, singleScattering;
+        final boolean referenceSky, singleScattering, hemisphereFill;
         RegionalOptions(RegionalDetail detail, boolean synchronousPages, boolean plainLighting,
-                float sunElevation, int regionCells, boolean referenceSky, boolean singleScattering) {
+                float sunElevation, int regionCells, boolean referenceSky, boolean singleScattering, boolean hemisphereFill) {
             this.detail = detail;
             this.synchronousPages = synchronousPages;
             this.plainLighting = plainLighting;
@@ -288,6 +292,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             this.regionCells = regionCells;
             this.referenceSky = referenceSky;
             this.singleScattering = singleScattering;
+            this.hemisphereFill = hemisphereFill;
         }
     }
 
@@ -305,7 +310,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         float sunElevation = 55;
         int regionCells = RegionalHeightfieldSource.CELLS;
         boolean regionCellsExplicit = false;
-        boolean referenceSky = false, singleScattering = false;
+        boolean referenceSky = false, singleScattering = false, hemisphereFill = false;
         RegionalDetail detail = RegionalDetail.DETAILED;
         for (String arg : args) {
             if ("--gpu-selection".equals(arg)) gpuSelectionMode = true;
@@ -319,6 +324,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             else if ("--sync-region-pages".equals(arg)) synchronousPages = true;
             else if ("--plain-lighting".equals(arg)) plainLighting = true;
             else if ("--reference-sky".equals(arg)) referenceSky = true;
+            else if ("--hemisphere-fill".equals(arg)) hemisphereFill = true;
             else if ("--single-scattering".equals(arg)) singleScattering = true;
             else if (arg.startsWith("--region-cells=")) {
                 regionCells = Integer.parseInt(arg.substring("--region-cells=".length()));
@@ -346,9 +352,9 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                 || !Float.isFinite(sunElevation) || sunElevation < -90 || sunElevation > 90) {
             throw new IllegalArgumentException("sky options require --large-region; sun elevation in [-90,90] cannot accompany --plain-lighting");
         }
-        if ((referenceSky || singleScattering) && (!largeRegionMode || plainLighting)
+        if ((referenceSky || singleScattering || hemisphereFill) && (!largeRegionMode || plainLighting)
                 || referenceSky && singleScattering) {
-            throw new IllegalArgumentException("sky controls require regional atmosphere and are mutually exclusive");
+            throw new IllegalArgumentException("sky controls require regional atmosphere; reference and single scattering are exclusive");
         }
         if (regionCells != 1024 && regionCells != 2048 || regionCellsExplicit && !largeRegionMode) {
             throw new IllegalArgumentException("--region-cells requires --large-region and 1024 or 2048 cells");
@@ -368,7 +374,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         if (!assertions) throw new IllegalStateException("Streaming control requires -ea");
         TestHeightfieldStreaming app = new TestHeightfieldStreaming(output, gpuSelectionMode,
                 gpuTransitionsMode, profileMode, sourceGradientMode, largeRegionMode,
-                synchronousRegionEdits, revisionStress, surfaceCacheMode, new RegionalOptions(detail, synchronousPages, plainLighting, sunElevation, regionCells, referenceSky, singleScattering));
+                synchronousRegionEdits, revisionStress, surfaceCacheMode, new RegionalOptions(detail, synchronousPages, plainLighting, sunElevation, regionCells, referenceSky, singleScattering, hemisphereFill));
         AppSettings settings = new AppSettings(true);
         settings.setRenderer(rendererName);
         settings.setResolution(960, 640);
@@ -584,6 +590,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         material.setColor("GrassColor", new ColorRGBA(.12f, .20f, .075f, 1));
         material.setColor("RockColor", new ColorRGBA(.29f, .26f, .22f, 1));
         material.setColor("SnowColor", new ColorRGBA(.83f, .87f, .9f, 1));
+        if (skyIrradiance != null) skyIrradiance.bind(material);
         geometry.setMaterial(material);
         if (regionalVisibility != null) regionalVisibility.addReceiver(material);
         configurePatchGeometry(geometry, node);
@@ -1856,9 +1863,20 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                     : new GpuAtmosphereSky(assetManager, renderManager, cam, atmosphere, !singleScattering);
             sun.setDirection(atmosphere.getSunDirection(new Vector3f()).negateLocal());
             sun.setColor(atmosphereSky.getSunIrradiance(new ColorRGBA()));
-            // Upper-hemisphere irradiance / PI, applied once by the existing
-            // AmbientLight path. Directional sky response remains an approximation.
+            long projectionStarted = System.nanoTime();
+            if (!hemisphereFill) {
+                skyIrradiance = HeightfieldSkyIrradiance.fromCubeMap(atmosphereSky.getSkyMap());
+                for (Geometry geometry : geometryByNode.values()) skyIrradiance.bind(geometry.getMaterial());
+            }
+            // Keep meaningful ambient values for any ordinary scene material.
+            // Opted-in heightfield materials use physical SH on their first pass.
             sky.setColor(atmosphereSky.getDiffuseFill(new ColorRGBA()));
+            System.out.printf(Locale.ROOT,
+                    "HEIGHTFIELD_SKY_IRRADIANCE mode=%s coefficientBytes=%d projectionMs=%.3f up=%s%n",
+                    hemisphereFill ? "hemisphere" : "SH9", hemisphereFill ? 0 : 9 * 3 * Float.BYTES,
+                    (System.nanoTime() - projectionStarted) / 1e6,
+                    hemisphereFill ? atmosphereSky.getDiffuseFill(new ColorRGBA())
+                            : skyIrradiance.evaluate(Vector3f.UNIT_Y, new ColorRGBA()));
             rootNode.attachChild(atmosphereSky.getSpatial());
             System.out.println("HEIGHTFIELD_ATMOSPHERE elevationDegrees=" + sunElevation
                     + " directIrradiance=" + sun.getColor() + " diffuseFill=" + sky.getColor()

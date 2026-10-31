@@ -27,6 +27,10 @@ uniform float m_TextureScale;
 uniform float m_SnowLine;
 uniform float m_SnowFade;
 uniform vec4 g_AmbientLightColor;
+#ifdef HEIGHTFIELD_SKY_IRRADIANCE
+uniform bool g_IsFirstLightPass;
+uniform vec3 m_SkyIrradianceSH[9];
+#endif
 
 float hash2(vec2 p) {
     p = fract(p * vec2(123.34, 456.21));
@@ -123,12 +127,21 @@ void main() {
         #endif
     }
 
-    // Artistic hemisphere fill from the scene's AmbientLights. The lighting
-    // logic supplies zero on additive light batches, so fill is applied once.
-    // This is separate from probe/physical sky lighting.
-    vec3 skyFill = max(g_AmbientLightColor.rgb, vec3(0.0));
-    float skyFacing = 0.32 + 0.68 * clamp(normal.y * 0.5 + 0.5, 0.0, 1.0);
-    vec3 indirectFill = surface.diffuseColor * skyFill * skyFacing;
+    // Indirect sky light stays separate from direct-only sun visibility.
+    // The existing lighting logic identifies its first draw even without an
+    // AmbientLight; later additive draws must not repeat this contribution.
+    #ifdef HEIGHTFIELD_SKY_IRRADIANCE
+        // EnvMapUtils.prepareShCoefs ordering is 0, y, z, x, yx, yz,
+        // (3z²-1), zx, (x²-y²). The prepared coefficients already evaluate
+        // to diffuse irradiance divided by PI for a Lambertian surface.
+        vec3 skyIrradiance = sphericalHarmonics(surface.normal, m_SkyIrradianceSH);
+        vec3 indirectFill = g_IsFirstLightPass
+                ? surface.diffuseColor * skyIrradiance : vec3(0.0);
+    #else
+        vec3 skyFill = max(g_AmbientLightColor.rgb, vec3(0.0));
+        float skyFacing = 0.32 + 0.68 * clamp(normal.y * 0.5 + 0.5, 0.0, 1.0);
+        vec3 indirectFill = surface.diffuseColor * skyFill * skyFacing;
+    #endif
 
     gl_FragColor = vec4(surface.directLightContribution + indirectFill, 1.0);
 }

@@ -31,10 +31,13 @@ package jme3test.terrain;
 import com.jme3.math.ColorRGBA;
 import com.jme3.renderer.Renderer;
 import com.jme3.scene.Spatial;
+import com.jme3.texture.TextureCubeMap;
 
 /** One immutable sun/sky bake, owned and released on the render thread. */
 interface AtmosphereSky {
     Spatial getSpatial();
+    /** Read-only environment texture owned by this bake; valid until close. */
+    TextureCubeMap getSkyMap();
     ColorRGBA getSunIrradiance(ColorRGBA store);
     ColorRGBA getDiffuseFill(ColorRGBA store);
     /** Encoded pixel payload of all persistent images, excluding driver overhead. */

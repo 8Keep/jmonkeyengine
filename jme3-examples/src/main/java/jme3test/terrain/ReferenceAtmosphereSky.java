@@ -156,6 +156,10 @@ public final class ReferenceAtmosphereSky implements AtmosphereSky {
         return (store == null ? new ColorRGBA() : store).set(diffuseFill);
     }
     public Spatial getSpatial() { return spatial; }
+    public TextureCubeMap getSkyMap() {
+        if (closed) throw new IllegalStateException("reference sky is closed");
+        return cubeMap;
+    }
     public long getEncodedBytes() { return (long) texelCount * 4 * Float.BYTES; }
     public long getGenerationMillis() { return generationMillis; }
     public int getTexelCount() { return texelCount; }

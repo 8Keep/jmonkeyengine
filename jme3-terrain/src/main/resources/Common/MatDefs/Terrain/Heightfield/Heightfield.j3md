@@ -58,6 +58,11 @@ MaterialDef Heightfield {
         Color SnowColor : 0.78 0.84 0.88 1.0
         Float Roughness : 0.88
 
+        // Optional diffuse sky irradiance from nine prepared world-space SH
+        // coefficients. Replaces artistic ambient fill on the first light pass.
+        Boolean UseHeightfieldSkyIrradiance : false
+        Vector3Array SkyIrradianceSH
+
         // World-space breakup frequency and configurable snow elevation band.
         Float TextureScale : 0.035
         Float SnowLine : 120.0
@@ -134,6 +139,7 @@ MaterialDef Heightfield {
             SURFACE_PRECISE_FILTER : SurfacePreciseFilter
             DIRECTIONAL_VISIBILITY : UseDirectionalVisibility
             DIRECTIONAL_HARDWARE_SHADOWS : DirectionalHardwareShadows
+            HEIGHTFIELD_SKY_IRRADIANCE : UseHeightfieldSkyIrradiance
         }
 
     }

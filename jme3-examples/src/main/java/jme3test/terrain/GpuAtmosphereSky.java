@@ -324,6 +324,7 @@ final class GpuAtmosphereSky implements AtmosphereSky {
         if (Thread.currentThread() != owner || closed) throw new IllegalStateException("GPU atmosphere belongs to its live render owner");
     }
     @Override public Spatial getSpatial() { checkOwner(); return spatial; }
+    @Override public TextureCubeMap getSkyMap() { checkOwner(); return cube; }
     @Override public ColorRGBA getSunIrradiance(ColorRGBA store) { checkOwner(); return (store == null ? new ColorRGBA() : store).set(sunIrradiance); }
     @Override public ColorRGBA getDiffuseFill(ColorRGBA store) { checkOwner(); return (store == null ? new ColorRGBA() : store).set(diffuseFill); }
     @Override public long getEncodedBytes() { return (long) (TRANSMITTANCE_WIDTH * TRANSMITTANCE_HEIGHT + MULTIPLE_SIZE * MULTIPLE_SIZE + 6 * CUBE_SIZE * CUBE_SIZE) * 16; }
