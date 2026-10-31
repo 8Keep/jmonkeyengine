@@ -43,7 +43,9 @@ import java.util.concurrent.CancellationException;
  */
 final class RegionalSurfaceSource implements HeightfieldSurfacePage.Source {
     private static final int TILE_SIDE = 64;
-    private static final int TILE_LIMIT = 64;
+    private static final int HEIGHT_WINDOW_SIDE = TILE_SIDE + 3;
+    private static final long HEIGHT_WINDOW_BYTES = (long) HEIGHT_WINDOW_SIDE * HEIGHT_WINDOW_SIDE * Float.BYTES;
+    private final int tileLimit;
     private static final int CHANNELS = 8;
     private static final long TILE_BYTES = (long) TILE_SIDE * TILE_SIDE * CHANNELS * Float.BYTES;
     private static final double SPACING = RegionalHeightfieldSource.SPACING;
@@ -52,18 +54,26 @@ final class RegionalSurfaceSource implements HeightfieldSurfacePage.Source {
 
     // Channels: linear albedo RGB, tangent normal XYZ, roughness, semantic ID.
     private final int regionCells;
+    private final float[] heightWindow = new float[HEIGHT_WINDOW_SIDE * HEIGHT_WINDOW_SIDE];
+    private long heightWindowX, heightWindowZ;
     private final RegionalHeightfieldSource heights;
     private final LinkedHashMap<Long, float[]> tiles = new LinkedHashMap<Long, float[]>(80, .75f, true) {
         @Override
         protected boolean removeEldestEntry(Map.Entry<Long, float[]> eldest) {
-            return size() > TILE_LIMIT;
+            return size() > tileLimit;
         }
     };
     private long composedSamples;
     private long peakMaterialTransientBytes;
 
     static long maximumCacheBytes(int regionCells) {
-        return TILE_LIMIT * TILE_BYTES + RegionalHeightfieldSource.maximumCacheBytes(regionCells);
+        return tileLimit(regionCells) * TILE_BYTES + RegionalHeightfieldSource.maximumCacheBytes(regionCells)
+                + HEIGHT_WINDOW_BYTES;
+    }
+
+    private static int tileLimit(int regionCells) {
+        // A stride-8 page with its largest mip gutter touches 10x10 source tiles.
+        return regionCells >= 2048 ? 128 : 64;
     }
 
     RegionalSurfaceSource(long revision) {
@@ -76,6 +86,7 @@ final class RegionalSurfaceSource implements HeightfieldSurfacePage.Source {
         }
         if (revision < 0) throw new IllegalArgumentException("revision must be nonnegative");
         this.regionCells = regionCells;
+        this.tileLimit = tileLimit(regionCells);
         this.heights = new RegionalHeightfieldSource(regionCells, revision);
     }
 
@@ -105,7 +116,7 @@ final class RegionalSurfaceSource implements HeightfieldSurfacePage.Source {
     }
 
     long getCachedBytes() {
-        return (long) tiles.size() * TILE_BYTES + heights.getCachedFloatBytes();
+        return (long) tiles.size() * TILE_BYTES + heights.getCachedFloatBytes() + HEIGHT_WINDOW_BYTES;
     }
 
     /**
@@ -115,7 +126,7 @@ final class RegionalSurfaceSource implements HeightfieldSurfacePage.Source {
      * happened at different times, so this can exceed a measured instant.
      */
     long getPeakCachedBytes() {
-        return peakMaterialTransientBytes + heights.getPeakTransientFloatBytes();
+        return peakMaterialTransientBytes + heights.getPeakTransientFloatBytes() + HEIGHT_WINDOW_BYTES;
     }
 
     long getComposedSamples() {
@@ -127,6 +138,18 @@ final class RegionalSurfaceSource implements HeightfieldSurfacePage.Source {
         float[] data = new float[TILE_SIDE * TILE_SIDE * CHANNELS];
         peakMaterialTransientBytes = Math.max(peakMaterialTransientBytes,
                 (long) (tiles.size() + 1) * TILE_BYTES);
+        // Share the height stencil across all cell-center samples in this tile,
+        // rather than performing twenty height-cache lookups for every material.
+        heightWindowX = (long) tileX * TILE_SIDE - 1;
+        heightWindowZ = (long) tileZ * TILE_SIDE - 1;
+        for (int z = 0; z < HEIGHT_WINDOW_SIDE; z++) {
+            checkInterrupted();
+            int gz = (int) Math.max(0, Math.min(regionCells, heightWindowZ + z));
+            for (int x = 0; x < HEIGHT_WINDOW_SIDE; x++) {
+                int gx = (int) Math.max(0, Math.min(regionCells, heightWindowX + x));
+                heightWindow[z * HEIGHT_WINDOW_SIDE + x] = heights.getHeight(gx, gz);
+            }
+        }
         for (int z = 0; z < TILE_SIDE; z++) {
             if ((z & 3) == 0) checkInterrupted();
             for (int x = 0; x < TILE_SIDE; x++) {
@@ -187,9 +210,18 @@ final class RegionalSurfaceSource implements HeightfieldSurfacePage.Source {
         int x1 = Math.min(x0 + 1, regionCells);
         int z1 = Math.min(z0 + 1, regionCells);
         double fx = x - x0, fz = z - z0;
-        double a = heights.getHeight(x0, z0) * (1 - fx) + heights.getHeight(x1, z0) * fx;
-        double b = heights.getHeight(x0, z1) * (1 - fx) + heights.getHeight(x1, z1) * fx;
+        int wx0 = windowIndex(x0, heightWindowX), wx1 = windowIndex(x1, heightWindowX);
+        int wz0 = windowIndex(z0, heightWindowZ), wz1 = windowIndex(z1, heightWindowZ);
+        double a = heightWindow[wz0 * HEIGHT_WINDOW_SIDE + wx0] * (1 - fx)
+                + heightWindow[wz0 * HEIGHT_WINDOW_SIDE + wx1] * fx;
+        double b = heightWindow[wz1 * HEIGHT_WINDOW_SIDE + wx0] * (1 - fx)
+                + heightWindow[wz1 * HEIGHT_WINDOW_SIDE + wx1] * fx;
         return a * (1 - fz) + b * fz;
+    }
+
+    private static int windowIndex(int coordinate, long origin) {
+        // Entirely out-of-region tiles have the same clamped edge height.
+        return (int) Math.max(0, Math.min(HEIGHT_WINDOW_SIDE - 1, coordinate - origin));
     }
 
     private static double smoothstep(double low, double high, double value) {

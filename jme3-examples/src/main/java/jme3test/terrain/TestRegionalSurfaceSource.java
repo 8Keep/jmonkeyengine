@@ -48,9 +48,10 @@ final class TestRegionalSurfaceSource {
         compareSharedTexels(fineWest, fineEast);
         compareFootprint(fineWest, strideTwo);
         require(source.getComposedSamples() > 0, "composition metric did not advance");
-        require(source.getCachedBytes() <= 9L * 1024 * 1024, "cache exceeded its bounded payload");
+        require(source.getCachedBytes() <= RegionalSurfaceSource.maximumCacheBytes(1024),
+                "cache exceeded its bounded payload");
         require(source.getPeakCachedBytes() <=
-                        (65L * 64 * 64 * 8 + 65L * 64 * 64) * Float.BYTES,
+                        RegionalSurfaceSource.maximumCacheBytes(1024) + (64L * 64 * 8 + 64L * 64) * Float.BYTES,
                 "peak cache exceeded the conservative resident-plus-loader bound");
 
         verifyExpandedCoverage();

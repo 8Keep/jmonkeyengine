@@ -32,6 +32,7 @@
 package jme3test.terrain;
 
 import com.jme3.terrain.heightfield.HeightfieldHierarchy;
+import com.jme3.terrain.heightfield.HeightfieldMetadataBuilder;
 import java.util.Objects;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.Future;
@@ -307,7 +308,8 @@ final class RegionalRevisionPreparation implements AutoCloseable {
         long start = System.nanoTime();
         checkCancelled(cancelled);
         RegionalHeightfieldSource source = new RegionalHeightfieldSource(regionCells, revision);
-        HeightfieldHierarchy hierarchy = HeightfieldHierarchy.fromSource(source, patchCells, revision, 0);
+        HeightfieldHierarchy hierarchy = HeightfieldMetadataBuilder.build(source, source.pageSamples(2),
+                patchCells, revision, 0);
         checkCancelled(cancelled);
         return new Prepared(source, hierarchy, revision, System.nanoTime() - start);
     }
