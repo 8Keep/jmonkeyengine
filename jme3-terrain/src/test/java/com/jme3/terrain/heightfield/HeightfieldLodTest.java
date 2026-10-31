@@ -110,6 +110,35 @@ class HeightfieldLodTest {
         assertMaximumMatchesNodes(source, camera);
     }
 
+    @Test void projectionCacheIsScopedToOneCameraAndReadinessSnapshot() {
+        HeightfieldHierarchy hierarchy = hierarchy(.25);
+        HeightfieldLod lod = new HeightfieldLod(hierarchy);
+        Camera camera = camera();
+        Map<Node, Integer> firstReadiness = new HashMap<>();
+        Selection first = lod.select(camera, 1e-6, 1000, node -> {
+            firstReadiness.merge(node, 1, Integer::sum);
+            return true;
+        });
+        assertEquals(hierarchy.getNodes().size(), firstReadiness.size());
+        assertTrue(firstReadiness.values().stream().allMatch(count -> count == 1),
+                "readiness is evaluated once per node in a selection");
+        assertMaximumMatchesNodes(first, camera);
+
+        camera.setLocation(new Vector3f(180, 900, 220));
+        camera.lookAt(new Vector3f(8, 20, 8), Vector3f.UNIT_Z);
+        Map<Node, Integer> secondReadiness = new HashMap<>();
+        Selection second = lod.select(camera, 1e-6, 1000, node -> {
+            secondReadiness.merge(node, 1, Integer::sum);
+            return true;
+        });
+        assertEquals(hierarchy.getNodes().size(), secondReadiness.size());
+        assertTrue(secondReadiness.values().stream().allMatch(count -> count == 1),
+                "a new camera selection captures readiness independently");
+        assertMaximumMatchesNodes(second, camera);
+        assertTrue(first.getMaximumPixels() > second.getMaximumPixels(),
+                "a moved camera must not reuse projections from the prior select call");
+    }
+
     @Test void automaticFloatAllowanceCoversNonbinarySteepAndExtremeReconstruction() {
         HeightfieldPage[] pages = {
             page(8, .1f, (x, z) -> ((x + z) & 1) == 0 ? 1.0e20f : -1.0e20f),

@@ -34,6 +34,7 @@ package com.jme3.terrain.heightfield;
 import com.jme3.renderer.Camera;
 import com.jme3.terrain.heightfield.HeightfieldHierarchy.Node;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -85,12 +86,17 @@ public final class HeightfieldLod {
         }
         List<Node> leaves = new ArrayList<>(Collections.singletonList(hierarchy.getRoot()));
         Set<Node> attempted = new HashSet<>();
+        // Each projection depends only on this call's camera and immutable
+        // node bounds/errors. A dense pair per node avoids repeated hash lookups;
+        // nothing is retained for a later camera or selection.
+        double[] projections = new double[2 * hierarchy.getNodes().size()];
+        Arrays.fill(projections, Double.NaN);
         boolean budget = false, waiting = false, source = false;
         while (true) {
             Node worst = null;
             double error = maximumPixels;
             for (Node leaf : leaves) {
-                double pixels = pixels(camera, leaf, hasCoarserNeighbor(leaf, leaves));
+                double pixels = pixels(camera, leaf, hasCoarserNeighbor(leaf, leaves), projections);
                 if (!attempted.contains(leaf) && pixels > error) {
                     worst = leaf;
                     error = pixels;
@@ -124,7 +130,7 @@ public final class HeightfieldLod {
                 waiting |= failure == 2;
             }
         }
-        double achieved = maximumPixels(camera, leaves);
+        double achieved = maximumPixels(camera, leaves, projections);
         boolean limited = achieved > maximumPixels;
         Set<Node> knownReady = new HashSet<>();
         readiness.forEach((n, r) -> { if (r) knownReady.add(n); });
@@ -145,9 +151,21 @@ public final class HeightfieldLod {
                 morphed ? node.getMorphError() : node.getStableError());
     }
 
-    private static double maximumPixels(Camera camera, List<Node> leaves) {
+    private static double pixels(Camera camera, Node node, boolean morphed, double[] projections) {
+        int index = 2 * node.getIndex() + (morphed ? 1 : 0);
+        double value = projections[index];
+        if (Double.isNaN(value)) {
+            value = pixels(camera, node, morphed);
+            projections[index] = value;
+        }
+        return value;
+    }
+
+    private static double maximumPixels(Camera camera, List<Node> leaves, double[] projections) {
         double maximum = 0;
-        for (Node node : leaves) maximum = Math.max(maximum, pixels(camera, node, hasCoarserNeighbor(node, leaves)));
+        for (Node node : leaves) {
+            maximum = Math.max(maximum, pixels(camera, node, hasCoarserNeighbor(node, leaves), projections));
+        }
         return maximum;
     }
 

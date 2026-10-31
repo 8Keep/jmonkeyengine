@@ -56,6 +56,7 @@ public final class HeightfieldHierarchy {
     private final double additionalError;
     private final Node root;
     private final List<Node> nodes;
+    private int nextNodeIndex; // Used only while constructing the immutable tree.
 
     /**
      * Construct a hierarchy over a canonical page.
@@ -212,7 +213,7 @@ public final class HeightfieldHierarchy {
     /** A fixed-size grid displaced at a power-of-two sample stride. */
     public final class Node {
         private final Node parent;
-        private final int x, z, span, level, stride;
+        private final int x, z, span, level, stride, index;
         private final List<Node> children;
         private final BoundingBox bound;
         private final NodeMetadata metadata;
@@ -221,6 +222,7 @@ public final class HeightfieldHierarchy {
         private Node(Node parent, int x, int z, int span, int level,
                 MetadataProvider provider, NodeMetadata parentData) {
             this.parent = parent; this.x = x; this.z = z; this.span = span; this.level = level;
+            index = nextNodeIndex++;
             stride = span / patchCells;
             NodeMetadata data = provider.metadata(x, z, span, stride);
             validateMetadata(data, parentData);
@@ -274,6 +276,8 @@ public final class HeightfieldHierarchy {
 
         /** Uninflated source metadata suitable for a later metadata-only rebuild. */
         public NodeMetadata getMetadata() { return metadata; }
+        /** Dense depth-first ordinal, local to this hierarchy. */
+        int getIndex() { return index; }
         public int getOriginX() { return x; }
         public int getOriginZ() { return z; }
         public int getSpan() { return span; }
