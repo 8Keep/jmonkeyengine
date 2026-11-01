@@ -59,12 +59,38 @@ float valueNoise(vec2 p) {
 }
 
 #ifdef SURFACE_REGION_FALLBACK
+// Integer lattice corners remain identical from either neighboring cell;
+// floating fract hashes can amplify different arithmetic rounding into seams.
+// The avalanche is MurmurHash3's public-domain fmix32, Austin Appleby:
+// https://github.com/aappleby/smhasher/blob/master/src/MurmurHash3.cpp
+float farMaterialCorner(ivec2 cell) {
+    uint h = uint(cell.x) * 0x9e3779b9u ^ uint(cell.y) * 0x85ebca6bu;
+    h ^= h >> 16u;
+    h *= 0x85ebca6bu;
+    h ^= h >> 13u;
+    h *= 0xc2b2ae35u;
+    h ^= h >> 16u;
+    // Keep exactly representable 24-bit values before normalization.
+    return float(h >> 8u) * (1.0 / 16777216.0);
+}
+
+float farMaterialValueNoise(vec2 position) {
+    ivec2 cell = ivec2(floor(position));
+    vec2 blend = fract(position);
+    blend = blend * blend * (3.0 - 2.0 * blend);
+    float a = farMaterialCorner(cell);
+    float b = farMaterialCorner(cell + ivec2(1, 0));
+    float c = farMaterialCorner(cell + ivec2(0, 1));
+    float d = farMaterialCorner(cell + ivec2(1, 1));
+    return mix(mix(a, b, blend.x), mix(c, d, blend.x), blend.y);
+}
+
 // Fade unresolved procedural octaves toward their mean rather than leaving
 // subpixel grass/snow speckle in distant views. Derivatives are supplied before
 // the material-table branch, never taken in nonuniform control flow.
 float farMaterialNoise(vec2 position, float frequency, float footprint) {
     float resolved = 1.0 - smoothstep(0.25, 0.75, footprint * frequency);
-    return mix(0.5, valueNoise(position * frequency), resolved);
+    return mix(0.5, farMaterialValueNoise(position * frequency), resolved);
 }
 #endif
 
