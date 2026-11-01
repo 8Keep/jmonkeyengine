@@ -52,28 +52,50 @@ float valueNoise(vec2 p) {
     return mix(mix(a, b, blend.x), mix(c, d, blend.x), blend.y);
 }
 
-void proceduralMaterial(vec3 worldPosition, vec3 normal, out vec3 albedo, out float roughness) {
-    vec2 worldXZ = worldPosition.xz * max(m_TextureScale, 0.00001);
-    float broadBreakup = valueNoise(worldXZ * 0.34);
-    float fineBreakup = valueNoise(worldXZ * 2.7);
-    float breakup = (broadBreakup - 0.5) * 0.22 + (fineBreakup - 0.5) * 0.07;
-    float steepness = 1.0 - clamp(normal.y, 0.0, 1.0);
+#ifdef SURFACE_REGION_FALLBACK
+// Fade unresolved procedural octaves toward their mean rather than leaving
+// subpixel grass/snow speckle in distant views. Derivatives are supplied before
+// the material-table branch, never taken in nonuniform control flow.
+float farMaterialNoise(vec2 position, float frequency, float footprint) {
+    float resolved = 1.0 - smoothstep(0.25, 0.75, footprint * frequency);
+    return mix(0.5, valueNoise(position * frequency), resolved);
+}
+#endif
+
+void proceduralMaterial(vec3 worldPosition, vec3 normal, float footprint,
+        out vec3 albedo, out float roughness) {
     #ifdef SURFACE_REGION_FALLBACK
-        // Match the regional source's slope convention (rise/run). Using
-        // 1-normal.y here leaves steep far slopes almost entirely snow covered.
+        // Metre-scale fields continue across streamed height pages. Broad
+        // exposure/snow variation avoids a perfectly horizontal snow ring.
+        float exposure = farMaterialNoise(worldPosition.xz + vec2(310.0, -170.0), 0.007, footprint);
+        float patches = farMaterialNoise(worldPosition.xz + vec2(-90.0, 230.0), 0.028, footprint);
+        float grain = farMaterialNoise(worldPosition.xz + vec2(50.0, -410.0), 0.14, footprint);
+        float breakup = (exposure - 0.5) * 0.18 + (patches - 0.5) * 0.13;
+        // Rise/run, matching the regional material source's slope convention.
         float slope = sqrt(max(1.0 - normal.y * normal.y, 0.0)) / max(abs(normal.y), 0.0001);
-        float rockWeight = smoothstep(0.48, 1.30, slope + breakup);
+        float rockWeight = smoothstep(0.35, 1.05, slope + breakup);
     #else
+        vec2 worldXZ = worldPosition.xz * max(m_TextureScale, 0.00001);
+        float broadBreakup = valueNoise(worldXZ * 0.34);
+        float fineBreakup = valueNoise(worldXZ * 2.7);
+        float breakup = (broadBreakup - 0.5) * 0.22 + (fineBreakup - 0.5) * 0.07;
+        float steepness = 1.0 - clamp(normal.y, 0.0, 1.0);
         float rockWeight = smoothstep(0.22, 0.68, steepness + breakup);
     #endif
     vec3 groundColor = mix(m_GrassColor.rgb, m_RockColor.rgb, rockWeight);
-    groundColor *= 0.94 + fineBreakup * 0.12;
-    float snowFade = max(m_SnowFade, 0.0001);
-    float snowWeight = smoothstep(m_SnowLine - snowFade, m_SnowLine + snowFade,
-                                  worldPosition.y + breakup * snowFade * 0.4);
     #ifdef SURFACE_REGION_FALLBACK
-        snowWeight *= 1.0 - smoothstep(0.65, 1.40, slope);
+        groundColor *= 0.86 + patches * 0.20 + grain * 0.08;
     #else
+        groundColor *= 0.94 + fineBreakup * 0.12;
+    #endif
+    float snowFade = max(m_SnowFade, 0.0001);
+    #ifdef SURFACE_REGION_FALLBACK
+        float snowHeight = worldPosition.y + (exposure - 0.5) * 150.0 + (patches - 0.5) * 32.0;
+        float snowWeight = smoothstep(m_SnowLine - snowFade, m_SnowLine + snowFade, snowHeight);
+        snowWeight *= 1.0 - smoothstep(0.50, 1.15, slope);
+    #else
+        float snowWeight = smoothstep(m_SnowLine - snowFade, m_SnowLine + snowFade,
+                                      worldPosition.y + breakup * snowFade * 0.4);
         snowWeight *= 1.0 - smoothstep(0.58, 0.88, steepness);
     #endif
     albedo = mix(groundColor, m_SnowColor.rgb, snowWeight);
@@ -103,7 +125,8 @@ void main() {
             vec3 fallbackAlbedo = vec3(0.0);
             float fallbackRoughness = 0.0;
             if (cacheWeight < 1.0) {
-                proceduralMaterial(worldPosition, normal, fallbackAlbedo, fallbackRoughness);
+                proceduralMaterial(worldPosition, normal, max(length(dxWorld), length(dyWorld)),
+                        fallbackAlbedo, fallbackRoughness);
             }
             surface.albedo = fallbackAlbedo;
             surface.roughness = fallbackRoughness;
@@ -156,7 +179,7 @@ void main() {
             }
         #endif
     #else
-        proceduralMaterial(worldPosition, normal, surface.albedo, surface.roughness);
+        proceduralMaterial(worldPosition, normal, 0.0, surface.albedo, surface.roughness);
     #endif
 
     PBRLightingUtils_calculatePreLightingValues(surface);

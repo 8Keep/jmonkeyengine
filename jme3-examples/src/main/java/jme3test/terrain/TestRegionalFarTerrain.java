@@ -163,17 +163,40 @@ public final class TestRegionalFarTerrain {
         RegionalHeightfieldSource source = new RegionalHeightfieldSource(RegionalHeightfieldSource.FAR_CELLS, 1);
         RegionalFarTerrain far = source.getFarTerrain();
         require(far.bounds(4096, 4096, 64, 8) == null, "legacy/blend node received analytic Gaussian bounds");
-        int originX = 1400, originZ = 7200, span = 64, stride = 8;
-        RegionalFarTerrain.Bounds bound = far.bounds(originX, originZ, span, stride);
+        int[][] rectangles = {
+            {1168, 6960}, // rotated northwest ridge
+            {6952, 7152}, // northeast ridge
+            {1168, 1360}, // southwest ridge
+            {7040, 1264}, // southeast ridge
+            {1848, 5968}, // narrow west shoulder
+            {0, 0},       // southwest world edge
+            {8128, 8128}  // northeast world edge
+        };
+        for (int[] rectangle : rectangles) {
+            verifyFarRectangle(source, rectangle[0], rectangle[1], 64, 8);
+        }
+
+        HeightfieldHierarchy bootstrap = source.bootstrapHierarchy(PATCH_CELLS);
+        require(!bootstrap.hasCanonicalPage() && bootstrap.getNodes().size() == 21845,
+                "far bootstrap allocated dense data or has unexpected topology");
+        require(bootstrap.getRoot().getBound().getYExtent() > 0,
+                "far bootstrap bounds are empty");
+    }
+
+    private static void verifyFarRectangle(RegionalHeightfieldSource source,
+            int originX, int originZ, int span, int stride) {
+        RegionalFarTerrain.Bounds bound = source.getFarTerrain().bounds(originX, originZ, span, stride);
         require(bound != null && bound.minimumHeight <= bound.maximumHeight
                 && Double.isFinite(bound.surfaceError) && bound.surfaceError > 0,
-                "pure-far analytic bounds are invalid");
+                "pure-far rotated-ridge analytic bounds are invalid");
+        require(source.getFarTerrain().bounds(originX, originZ, span, 1).surfaceError == 0,
+                "stride-one canonical surface error must be zero");
         for (int z = originZ; z <= originZ + span; z++) {
             for (int x = originX; x <= originX + span; x++) {
                 float height = source.getHeight(x, z);
                 require(height >= bound.minimumHeight && height <= bound.maximumHeight,
-                        "analytic bounds do not contain a canonical fine sample");
-                if (x % stride == 0 && z % stride == 0) {
+                        "analytic rotated-ridge bounds do not contain a canonical fine sample");
+                if ((x - originX) % stride == 0 && (z - originZ) % stride == 0) {
                     double coarse = HeightfieldReconstruction.height(source, x, z, stride);
                     require(Math.abs(height - coarse) <= bound.surfaceError,
                             "analytic stable surface error underestimates measured P1 deviation");
@@ -181,13 +204,8 @@ public final class TestRegionalFarTerrain {
             }
         }
         double measured = HeightfieldReconstruction.maximumError(source, originX, originZ, span, stride);
-        require(measured <= bound.surfaceError, "analytic error bound underestimates region maximum");
-
-        HeightfieldHierarchy bootstrap = source.bootstrapHierarchy(PATCH_CELLS);
-        require(!bootstrap.hasCanonicalPage() && bootstrap.getNodes().size() == 21845,
-                "far bootstrap allocated dense data or has unexpected topology");
-        require(bootstrap.getRoot().getBound().getYExtent() > 0,
-                "far bootstrap bounds are empty");
+        require(measured <= bound.surfaceError,
+                "rotated-ridge analytic error bound underestimates region maximum");
     }
 
     private static void verifyBoundedCache() {
