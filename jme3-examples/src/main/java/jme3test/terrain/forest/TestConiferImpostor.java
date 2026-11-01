@@ -64,7 +64,8 @@ public final class TestConiferImpostor extends SimpleApplication {
         "near-front", "near-side", "near-overhead",
         "far-front", "far-side", "far-overhead",
         "blend-front", "blend-overhead", "mesh-small-front", "far-small-front",
-        "mesh-small-overhead", "far-small-overhead", "mesh-perspective", "far-perspective"
+        "mesh-small-overhead", "far-small-overhead", "mesh-perspective", "far-perspective",
+        "mesh-backlit", "far-backlit"
     };
     private static final Pose[] POSES = {
         new Pose(false, new Vector3f(0, 10, 29), new Vector3f(0, 8.5f, 0), Vector3f.UNIT_Y),
@@ -80,7 +81,9 @@ public final class TestConiferImpostor extends SimpleApplication {
         new Pose(0, 120, new Vector3f(0,31,0), new Vector3f(0,8.5f,0), Vector3f.UNIT_Z, 1),
         new Pose(1, 120, new Vector3f(0,31,0), new Vector3f(0,8.5f,0), Vector3f.UNIT_Z, 1),
         new Pose(0, 0, new Vector3f(240,200,320), new Vector3f(0,9,0), Vector3f.UNIT_Y, 1),
-        new Pose(1, 0, new Vector3f(240,200,320), new Vector3f(0,9,0), Vector3f.UNIT_Y, 1)
+        new Pose(1, 0, new Vector3f(240,200,320), new Vector3f(0,9,0), Vector3f.UNIT_Y, 1),
+        new Pose(0, 12, new Vector3f(-18,10,-23), new Vector3f(0,8.5f,0), Vector3f.UNIT_Y, 0),
+        new Pose(1, 12, new Vector3f(-18,10,-23), new Vector3f(0,8.5f,0), Vector3f.UNIT_Y, 1)
     };
 
     private final Path output;

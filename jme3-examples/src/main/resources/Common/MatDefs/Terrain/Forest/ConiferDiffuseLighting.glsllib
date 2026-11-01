@@ -1,0 +1,39 @@
+// A bounded diffuse thin-surface approximation, shared by mesh and far trees.
+// Preserve albedo as reflected diffuse color. The transmitted color is relative
+// to that reflectance and capped by its remaining energy (unit-range albedo).
+// No thickness map, view-dependent lobe or specular scattering is modeled.
+// Directional SunColor is irradiance. Prepared SH already evaluates to E/PI.
+// Sources motivating thin foliage: GPU Gems 3 ch16 (Sousa), Burley BSDF (2015).
+uniform vec4 m_SunColor;
+uniform vec4 m_AmbientColor;
+uniform vec3 m_SunDirection;
+uniform float m_FoliageTransmission;
+uniform bool g_IsFirstLightPass;
+#ifdef CONIFER_SKY_IRRADIANCE
+uniform vec3 m_SkyIrradianceSH[9];
+#endif
+
+vec3 ConiferDiffuseLighting(vec3 albedo, vec3 normal, float leafFraction, float visibility) {
+    if (!g_IsFirstLightPass) return vec3(0.0);
+    float transmission = clamp(m_FoliageTransmission, 0.0, 1.0)
+            * clamp(leafFraction, 0.0, 1.0);
+    float nDotSun = dot(normal, -normalize(m_SunDirection));
+    vec3 frontSun = (m_SunColor.rgb / 3.14159265359) * max(nDotSun, 0.0) * visibility;
+#ifdef CONIFER_SKY_IRRADIANCE
+    vec3 frontSky = sphericalHarmonics(normal, m_SkyIrradianceSH);
+#else
+    vec3 frontSky = m_AmbientColor.rgb;
+#endif
+    vec3 reflected = albedo * frontSky + albedo * frontSun;
+    if (transmission <= 0.0) return reflected;
+
+    vec3 transmittedColor = min(max(albedo, vec3(0.0)) * transmission,
+            max(vec3(1.0) - albedo, vec3(0.0)));
+#ifdef CONIFER_SKY_IRRADIANCE
+    vec3 backSky = sphericalHarmonics(-normal, m_SkyIrradianceSH);
+#else
+    vec3 backSky = m_AmbientColor.rgb;
+#endif
+    vec3 backSun = (m_SunColor.rgb / 3.14159265359) * max(-nDotSun, 0.0) * visibility;
+    return reflected + transmittedColor * backSky + transmittedColor * backSun;
+}

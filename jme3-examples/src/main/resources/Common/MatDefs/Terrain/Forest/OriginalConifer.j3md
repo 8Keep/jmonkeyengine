@@ -7,6 +7,8 @@ MaterialDef Original Conifer {
         Boolean UseConiferLodFade : false
         Color SunColor : 4.08407 3.70708 3.01593 1.0
         Color AmbientColor : 0.34 0.39 0.31 1.0
+        // Transmission relative to albedo, capped by remaining energy; zero is opaque.
+        Float FoliageTransmission : 0.18
         Vector3 SunDirection : -0.35 -0.82 -0.45
         Boolean UseConiferInstances : false
         Boolean UseHeightfieldSkyIrradiance : false

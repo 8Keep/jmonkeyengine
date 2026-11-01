@@ -7,14 +7,8 @@
 
 uniform sampler2D m_FrondTexture;
 uniform float m_AlphaDiscardThreshold;
-uniform vec4 m_SunColor;
-uniform vec4 m_AmbientColor;
-uniform vec3 m_SunDirection;
 uniform vec3 m_ConiferBakeToObserver;
-#ifdef CONIFER_SKY_IRRADIANCE
-uniform vec3 m_SkyIrradianceSH[9];
-#endif
-uniform bool g_IsFirstLightPass;
+#import "Common/MatDefs/Terrain/Forest/ConiferDiffuseLighting.glsllib"
 
 varying vec3 vWorldPosition;
 varying vec3 vWorldNormal;
@@ -56,22 +50,13 @@ void main() {
 
     vec3 normal = normalize(vWorldNormal);
     vec3 baseColor = vColor.rgb * vInstanceTint;
-    float nDotSun = max(dot(normal, -normalize(m_SunDirection)), 0.0);
     float visibility = 1.0;
 #ifdef DIRECTIONAL_VISIBILITY
     float viewDepth = -(g_ViewMatrix * vec4(vWorldPosition, 1.0)).z;
     visibility = DirectionalVisibilityForPosition(vWorldPosition, viewDepth);
 #endif
-    vec3 indirectFill;
-#ifdef CONIFER_SKY_IRRADIANCE
-    indirectFill = g_IsFirstLightPass
-            ? baseColor * frond * sphericalHarmonics(normal, m_SkyIrradianceSH) : vec3(0.0);
-#else
-    indirectFill = g_IsFirstLightPass
-            ? baseColor * frond * m_AmbientColor.rgb : vec3(0.0);
-#endif
-    vec3 directSun = (m_SunColor.rgb / 3.14159265359) * nDotSun * visibility;
-    if (!g_IsFirstLightPass) directSun = vec3(0.0);
-    gl_FragColor = vec4(indirectFill + baseColor * frond * directSun, 1.0);
+    vec3 albedo = baseColor * frond;
+    gl_FragColor = vec4(ConiferDiffuseLighting(albedo, normal,
+            vTexCoord.z > 0.5 ? 1.0 : 0.0, visibility), 1.0);
 #endif
 }

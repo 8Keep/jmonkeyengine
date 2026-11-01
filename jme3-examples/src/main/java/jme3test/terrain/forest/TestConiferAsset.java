@@ -62,7 +62,8 @@ public final class TestConiferAsset extends SimpleApplication {
     private static final Vector3f SUN_DIRECTION = new Vector3f(-.35f, -.82f, -.45f).normalizeLocal();
     private static final String[] SHOTS = {
         "near-front", "near-side", "near-overhead",
-        "mid-front", "mid-side", "mid-overhead"
+        "mid-front", "mid-side", "mid-overhead",
+        "near-backlit", "mid-backlit"
     };
     private static final Pose[] POSES = {
         new Pose(false, new Vector3f(0, 10, 29), new Vector3f(0, 8.5f, 0), Vector3f.UNIT_Y),
@@ -70,7 +71,9 @@ public final class TestConiferAsset extends SimpleApplication {
         new Pose(false, new Vector3f(0, 31, 0), new Vector3f(0, 8.5f, 0), Vector3f.UNIT_Z),
         new Pose(true, new Vector3f(0, 10, 29), new Vector3f(0, 8.5f, 0), Vector3f.UNIT_Y),
         new Pose(true, new Vector3f(29, 10, 0), new Vector3f(0, 8.5f, 0), Vector3f.UNIT_Y),
-        new Pose(true, new Vector3f(0, 31, 0), new Vector3f(0, 8.5f, 0), Vector3f.UNIT_Z)
+        new Pose(true, new Vector3f(0, 31, 0), new Vector3f(0, 8.5f, 0), Vector3f.UNIT_Z),
+        new Pose(false, new Vector3f(-18, 10, -23), new Vector3f(0, 8.5f, 0), Vector3f.UNIT_Y),
+        new Pose(true, new Vector3f(-18, 10, -23), new Vector3f(0, 8.5f, 0), Vector3f.UNIT_Y)
     };
 
     private final Path output;
