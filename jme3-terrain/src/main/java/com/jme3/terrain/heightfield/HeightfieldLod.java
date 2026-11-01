@@ -53,6 +53,8 @@ import java.util.function.Predicate;
  */
 public final class HeightfieldLod {
     private final HeightfieldHierarchy hierarchy;
+    private double[] projectionScratch;
+    private boolean projectionScratchInUse;
 
     public HeightfieldLod(HeightfieldHierarchy hierarchy) {
         if (hierarchy == null) throw new IllegalArgumentException("hierarchy required");
@@ -85,13 +87,30 @@ public final class HeightfieldLod {
         if (!readiness.get(hierarchy.getRoot().getIndex())) {
             throw new IllegalStateException("a ready root must remain pinned as a fallback");
         }
+        double[] projections = borrowProjections();
+        try {
+            Arrays.fill(projections, Double.NaN);
+            return selectReady(camera, maximumPixels, maximumPatches, readiness, projections);
+        } finally {
+            if (projections == projectionScratch) projectionScratchInUse = false;
+        }
+    }
+
+    /** One retained array per instance; a nested camera callback borrows its own. */
+    private double[] borrowProjections() {
+        int length = 2 * hierarchy.getNodes().size();
+        if (projectionScratchInUse) return new double[length];
+        if (projectionScratch == null) projectionScratch = new double[length];
+        projectionScratchInUse = true;
+        return projectionScratch;
+    }
+
+    private Selection selectReady(Camera camera, double maximumPixels, int maximumPatches,
+            BitSet readiness, double[] projections) {
         List<Node> leaves = new ArrayList<>(Collections.singletonList(hierarchy.getRoot()));
         Set<Node> attempted = new HashSet<>();
-        // Each projection depends only on this call's camera and immutable
-        // node bounds/errors. A dense pair per node avoids repeated hash lookups;
-        // nothing is retained for a later camera or selection.
-        double[] projections = new double[2 * hierarchy.getNodes().size()];
-        Arrays.fill(projections, Double.NaN);
+        // Values are reset for this camera/selection. Only scratch storage is
+        // reused; returned readiness and cover data remain independently owned.
         boolean budget = false, waiting = false, source = false;
         while (true) {
             Node worst = null;
@@ -176,14 +195,21 @@ public final class HeightfieldLod {
     }
 
     private static Node unbalancedCoarse(List<Node> leaves) {
-        for (Node a : leaves) for (Node b : leaves) {
-            if (touches(a, b) && a.getLevel() + 1 < b.getLevel()) return a;
+        for (int i = 0; i < leaves.size(); i++) {
+            Node a = leaves.get(i);
+            for (int j = 0; j < leaves.size(); j++) {
+                Node b = leaves.get(j);
+                if (touches(a, b) && a.getLevel() + 1 < b.getLevel()) return a;
+            }
         }
         return null;
     }
 
     private static boolean hasCoarserNeighbor(Node node, List<Node> leaves) {
-        for (Node other : leaves) if (touches(node, other) && other.getLevel() < node.getLevel()) return true;
+        for (int i = 0; i < leaves.size(); i++) {
+            Node other = leaves.get(i);
+            if (touches(node, other) && other.getLevel() < node.getLevel()) return true;
+        }
         return false;
     }
 

@@ -31,6 +31,7 @@
  */
 package com.jme3.terrain.heightfield;
 
+import com.jme3.math.Matrix4f;
 import com.jme3.math.Vector3f;
 import com.jme3.renderer.Camera;
 import com.jme3.terrain.heightfield.HeightfieldHierarchy.Node;
@@ -45,6 +46,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -137,6 +140,38 @@ class HeightfieldLodTest {
         assertMaximumMatchesNodes(second, camera);
         assertTrue(first.getMaximumPixels() > second.getMaximumPixels(),
                 "a moved camera must not reuse projections from the prior select call");
+    }
+
+    @Test void nestedCameraSelectionDoesNotOverwriteTheOuterProjectionCache() {
+        HeightfieldHierarchy hierarchy = hierarchy(.25);
+        HeightfieldLod lod = new HeightfieldLod(hierarchy);
+        Camera outer = camera();
+        Camera inner = camera();
+        inner.setLocation(new Vector3f(180, 900, 220));
+        inner.lookAt(new Vector3f(8, 20, 8), Vector3f.UNIT_Z);
+        Selection expectedOuter = new HeightfieldLod(hierarchy).select(outer, 1e-6, 1000, node -> true);
+        Selection expectedInner = new HeightfieldLod(hierarchy).select(inner, 1e-6, 1000, node -> true);
+        AtomicBoolean armed = new AtomicBoolean();
+        AtomicReference<Selection> nested = new AtomicReference<>();
+        Camera callback = new Camera(outer.getWidth(), outer.getHeight()) {
+            @Override public Matrix4f getViewProjectionMatrix() {
+                if (armed.compareAndSet(true, false)) {
+                    nested.set(lod.select(inner, 1e-6, 1000, node -> true));
+                }
+                return super.getViewProjectionMatrix();
+            }
+        };
+        callback.copyFrom(outer);
+        armed.set(true);
+        Selection actual = lod.select(callback, 1e-6, 1000, node -> true);
+        assertTrue(nested.get() != null, "camera getter must exercise a nested active selection");
+        assertEquals(expectedInner.getLeaves(), nested.get().getLeaves());
+        assertEquals(expectedInner.getMaximumPixels(), nested.get().getMaximumPixels(), 0);
+        assertEquals(expectedOuter.getLeaves(), actual.getLeaves());
+        assertEquals(expectedOuter.getMaximumPixels(), actual.getMaximumPixels(), 0);
+        // The outer call must release its reusable storage for the next camera.
+        Selection later = lod.select(inner, 1e-6, 1000, node -> true);
+        assertEquals(expectedInner.getMaximumPixels(), later.getMaximumPixels(), 0);
     }
 
     @Test void automaticFloatAllowanceCoversNonbinarySteepAndExtremeReconstruction() {
