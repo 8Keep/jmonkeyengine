@@ -85,6 +85,9 @@ MaterialDef Heightfield {
         Float SurfaceRegionFade : 64.0
         // Optional original/image-backed detail for the procedural rock blend.
         Texture2D RockDetailMap
+        // Optional scalar rock relief in metres; shares the triplanar detail scale.
+        Texture2D RockHeightMap -LINEAR
+        Float RockHeightMetres : 0.0
         Vector3 RockDetailMean : 1.0 1.0 1.0
         Float RockDetailWorldScale : 0.0625
         Float RockDetailStrength : 0.45
@@ -148,6 +151,7 @@ MaterialDef Heightfield {
             HEIGHTFIELD_SURFACE : UseHeightfieldSurface
             SURFACE_REGION_FALLBACK : UseHeightfieldSurfaceRegionFallback
             ROCK_DETAIL : RockDetailMap
+            ROCK_HEIGHT : RockHeightMap
             SURFACE_DIRECT_REFERENCE : SurfaceDirectReference
             SURFACE_PRECISE_FILTER : SurfacePreciseFilter
             DIRECTIONAL_VISIBILITY : UseDirectionalVisibility

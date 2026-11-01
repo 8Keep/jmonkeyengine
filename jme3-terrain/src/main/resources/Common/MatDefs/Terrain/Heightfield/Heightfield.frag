@@ -33,8 +33,14 @@ uniform vec4 g_AmbientLightColor;
 #ifdef ROCK_DETAIL
 uniform sampler2D m_RockDetailMap;
 uniform vec3 m_RockDetailMean;
-uniform float m_RockDetailWorldScale;
 uniform float m_RockDetailStrength;
+#endif
+#if defined(ROCK_DETAIL) || defined(ROCK_HEIGHT)
+uniform float m_RockDetailWorldScale;
+#endif
+#ifdef ROCK_HEIGHT
+uniform sampler2D m_RockHeightMap;
+uniform float m_RockHeightMetres;
 #endif
 #ifdef HEIGHTFIELD_SKY_IRRADIANCE
 uniform bool g_IsFirstLightPass;
@@ -94,16 +100,23 @@ float farMaterialNoise(vec2 position, float frequency, float footprint) {
 }
 #endif
 
+#if defined(ROCK_DETAIL) || defined(ROCK_HEIGHT)
+vec3 rockTriplanarWeights(vec3 normal) {
+    vec3 weights = abs(normal);
+    weights *= weights;
+    weights *= weights;
+    weights /= max(weights.x + weights.y + weights.z, 0.00001);
+    return weights;
+}
+#endif
+
 #ifdef ROCK_DETAIL
 vec3 rockDetailModulation(vec3 position, vec3 normal, vec3 dxPosition, vec3 dyPosition) {
     float scale = max(m_RockDetailWorldScale, 0.00001);
     vec3 p = position * scale;
     vec3 dx = dxPosition * scale;
     vec3 dy = dyPosition * scale;
-    vec3 weights = abs(normal);
-    weights *= weights;
-    weights *= weights;
-    weights /= max(weights.x + weights.y + weights.z, 0.00001);
+    vec3 weights = rockTriplanarWeights(normal);
     // Explicit gradients remain defined when this procedural fallback is
     // evaluated in a nonuniform material-page region branch. Coordinates stay
     // unwrapped: the sampler performs mirrored repeat after LOD selection.
@@ -115,8 +128,55 @@ vec3 rockDetailModulation(vec3 position, vec3 normal, vec3 dxPosition, vec3 dyPo
 }
 #endif
 
+#ifdef ROCK_HEIGHT
+float sampleRockHeight(vec3 position, vec3 normal, vec3 dxPosition, vec3 dyPosition) {
+    float scale = max(m_RockDetailWorldScale, 0.00001);
+    vec3 p = position * scale;
+    vec3 dx = dxPosition * scale;
+    vec3 dy = dyPosition * scale;
+    vec3 weights = rockTriplanarWeights(normal);
+    return textureGrad(m_RockHeightMap, p.yz, dx.yz, dy.yz).r * weights.x
+            + textureGrad(m_RockHeightMap, p.xz, dx.xz, dy.xz).r * weights.y
+            + textureGrad(m_RockHeightMap, p.xy, dx.xy, dy.xy).r * weights.z;
+}
+
+// Mikkelsen's surface-gradient perturbation (2010), written from the
+// screen-space form: https://mmikk.github.io/papers3d/mm_sfgrad_bump.pdf
+// The relative determinant guard avoids unstable inversion near grazing or
+// collapsed screen-space parameterizations.
+vec3 perturbRockNormal(vec3 normal, vec3 dxPosition, vec3 dyPosition,
+        float heightDx, float heightDy, float rockCoverage) {
+    float amplitude = max(m_RockHeightMetres, 0.0) * clamp(rockCoverage, 0.0, 1.0);
+    if (!(amplitude > 0.0)) return normal;
+
+    vec3 r1 = cross(dyPosition, normal);
+    vec3 r2 = cross(normal, dxPosition);
+    float determinant = dot(dxPosition, r1);
+    float screenArea = length(cross(dxPosition, dyPosition));
+    if (!(screenArea > 1.0e-12) || !(abs(determinant) > screenArea * 1.0e-4)
+            || isnan(determinant) || isinf(determinant)) {
+        return normal;
+    }
+    vec3 surfaceGradient = sign(determinant)
+            * (heightDx * r1 + heightDy * r2) * amplitude;
+    vec3 perturbed = abs(determinant) * normal - surfaceGradient;
+    float lengthSquared = dot(perturbed, perturbed);
+    if (!(lengthSquared > 1.0e-20) || isnan(lengthSquared) || isinf(lengthSquared)) {
+        return normal;
+    }
+    return perturbed * inversesqrt(lengthSquared);
+}
+
+vec3 rockWeightedNormal(vec3 normal, float rockCoverage,
+        vec3 dxPosition, vec3 dyPosition, float heightDx, float heightDy) {
+    if (!(m_RockHeightMetres > 0.0) || !(rockCoverage > 0.0)) return normal;
+    return perturbRockNormal(normal, dxPosition, dyPosition,
+            heightDx, heightDy, rockCoverage);
+}
+#endif
+
 void proceduralMaterial(vec3 worldPosition, vec3 normal, vec3 dxPosition, vec3 dyPosition,
-        out vec3 albedo, out float roughness) {
+        out vec3 albedo, out float roughness, out float rockCoverage) {
     #ifdef SURFACE_REGION_FALLBACK
         // Metre-scale fields continue across streamed height pages. Broad
         // exposure/snow variation avoids a perfectly horizontal snow ring.
@@ -156,6 +216,7 @@ void proceduralMaterial(vec3 worldPosition, vec3 normal, vec3 dxPosition, vec3 d
                                       worldPosition.y + breakup * snowFade * 0.4);
         snowWeight *= 1.0 - smoothstep(0.58, 0.88, steepness);
     #endif
+    rockCoverage = rockWeight * (1.0 - snowWeight);
     albedo = mix(groundColor, m_SnowColor.rgb, snowWeight);
     roughness = clamp(m_Roughness, 0.04, 1.0);
 }
@@ -164,13 +225,20 @@ void main() {
     vec3 worldPosition = PBRLightingUtils_getWorldPosition();
     vec3 normal = normalize(PBRLightingUtils_getWorldNormal());
     // Capture derivatives before any dependent cache or procedural branch.
-    #if defined(HEIGHTFIELD_SURFACE) || defined(ROCK_DETAIL) || defined(SURFACE_REGION_FALLBACK)
+    #if defined(HEIGHTFIELD_SURFACE) || defined(ROCK_DETAIL) || defined(ROCK_HEIGHT) || defined(SURFACE_REGION_FALLBACK)
         vec3 dxPosition = dFdx(worldPosition);
         vec3 dyPosition = dFdy(worldPosition);
     #else
         vec3 dxPosition = vec3(0.0);
         vec3 dyPosition = vec3(0.0);
     #endif
+#ifdef ROCK_HEIGHT
+    // Keep both the texture footprint and the resulting scalar derivatives
+    // outside nonuniform cache/material control flow.
+    float rockHeight = sampleRockHeight(worldPosition, normal, dxPosition, dyPosition);
+    float rockHeightDx = dFdx(rockHeight);
+    float rockHeightDy = dFdy(rockHeight);
+#endif
     PBRSurface surface = PBRLightingUtils_createPBRSurface(
         normalize(g_CameraPosition - worldPosition));
     surface.position = worldPosition;
@@ -190,12 +258,19 @@ void main() {
             float cacheWeight = smoothstep(0.0, max(m_SurfaceRegionFade, 0.0001), edgeDistance);
             vec3 fallbackAlbedo = vec3(0.0);
             float fallbackRoughness = 0.0;
+            float fallbackRockCoverage = 0.0;
+            vec3 fallbackNormal = normal;
             if (cacheWeight < 1.0) {
                 proceduralMaterial(worldPosition, normal, dxPosition, dyPosition,
-                        fallbackAlbedo, fallbackRoughness);
+                        fallbackAlbedo, fallbackRoughness, fallbackRockCoverage);
+                #ifdef ROCK_HEIGHT
+                    fallbackNormal = rockWeightedNormal(normal, fallbackRockCoverage,
+                            dxPosition, dyPosition, rockHeightDx, rockHeightDy);
+                #endif
             }
             surface.albedo = fallbackAlbedo;
             surface.roughness = fallbackRoughness;
+            surface.normal = fallbackNormal;
             if (cacheWeight > 0.0) {
         #endif
         #ifdef SURFACE_DIRECT_REFERENCE
@@ -218,7 +293,7 @@ void main() {
             }
             // Blend variance in roughness-squared space, before recovering roughness.
             float variance = clamp(1.0 - momentLength, 0.0, 1.0);
-            vec3 blendedNormal = mix(normal, cachedNormal, cacheWeight);
+            vec3 blendedNormal = mix(fallbackNormal, cachedNormal, cacheWeight);
             float blendedNormalLengthSquared = dot(blendedNormal, blendedNormal);
             if (cacheWeight >= 1.0) {
                 surface.normal = cachedNormal;
@@ -245,7 +320,13 @@ void main() {
             }
         #endif
     #else
-        proceduralMaterial(worldPosition, normal, dxPosition, dyPosition, surface.albedo, surface.roughness);
+        float rockCoverage;
+        proceduralMaterial(worldPosition, normal, dxPosition, dyPosition,
+                surface.albedo, surface.roughness, rockCoverage);
+        #ifdef ROCK_HEIGHT
+            surface.normal = rockWeightedNormal(normal, rockCoverage,
+                    dxPosition, dyPosition, rockHeightDx, rockHeightDy);
+        #endif
     #endif
 
     PBRLightingUtils_calculatePreLightingValues(surface);

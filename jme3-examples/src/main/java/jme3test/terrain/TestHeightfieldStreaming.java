@@ -549,7 +549,10 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                 if (regionCells == RegionalHeightfieldSource.FAR_CELLS) {
                     rockDetail = new RegionalRockDetail(assetManager);
                     System.out.println("HEIGHTFIELD_ROCK_DETAIL baseImageBytes=" + rockDetail.getBaseImageBytes()
-                            + " estimatedRgb8MipBytes=" + rockDetail.getEstimatedMipChainRgb8Bytes());
+                            + " estimatedRgb8MipBytes=" + rockDetail.getEstimatedMipChainRgb8Bytes()
+                            + " heightBaseImageBytes=" + rockDetail.getHeightBaseImageBytes()
+                            + " heightMipBytes=" + rockDetail.getHeightMipChainBytes()
+                            + " heightMipLevels=" + rockDetail.getHeightMipLevels());
                 }
             }
             if (largeRegionMode && patchCells > DEFAULT_PATCH_CELLS && !synchronousRegionPages) {
@@ -762,7 +765,10 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         material.setColor("RockColor", new ColorRGBA(.29f, .26f, .22f, 1));
         material.setColor("SnowColor", new ColorRGBA(.83f, .87f, .9f, 1));
         if (skyIrradiance != null) skyIrradiance.bind(material);
-        if (rockDetail != null) rockDetail.bind(material);
+        if (rockDetail != null) {
+            rockDetail.bind(material);
+            rockDetail.bindHeight(material);
+        }
         material.setTexture("HeightPages", atlas);
         if (largeRegionMode) {
             material.setTexture("HeightGradientPages", gradientAtlas);

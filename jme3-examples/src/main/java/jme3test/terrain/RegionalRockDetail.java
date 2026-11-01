@@ -39,16 +39,23 @@ import com.jme3.texture.Image;
 import com.jme3.texture.Texture;
 import com.jme3.texture.image.ColorSpace;
 
-/** Shared image-backed rock albedo detail for regional heightfield materials. */
+/** Shared original rock albedo and linear height detail for regional materials. */
 final class RegionalRockDetail {
     static final String ASSET_PATH = "Textures/Terrain/Heightfield/bedrock-albedo-v1.png";
+    static final String HEIGHT_ASSET_PATH = "Textures/Terrain/Heightfield/bedrock-height-v1.png";
     private static final float SCALE = 1f / 16f;
     private static final float STRENGTH = .45f;
+    static final float DEFAULT_HEIGHT_METRES = .08f;
     private static final Vector3f MEAN = new Vector3f(.25377848f, .21698237f, .17156249f);
 
     private final Texture texture;
+    private final Texture heightTexture;
     private final long baseImageBytes;
     private final long estimatedMipChainRgb8Bytes;
+    private final long heightBaseImageBytes;
+    private final long heightMipChainBytes;
+    private final int heightMipLevels;
+    private final int heightBitsPerPixel;
 
     RegionalRockDetail(AssetManager assetManager) {
         if (assetManager == null) throw new IllegalArgumentException("asset manager is required");
@@ -65,6 +72,36 @@ final class RegionalRockDetail {
         Image image = texture.getImage();
         baseImageBytes = image.getData(0).capacity();
         estimatedMipChainRgb8Bytes = estimateRgb8MipChainBytes(image.getWidth(), image.getHeight());
+
+        TextureKey heightKey = new TextureKey(HEIGHT_ASSET_PATH, false);
+        heightKey.setGenerateMips(true);
+        heightTexture = assetManager.loadTexture(heightKey);
+        if (heightTexture == null || heightTexture.getImage() == null) {
+            throw new IllegalStateException("could not load regional rock height image");
+        }
+        Image heightImage = heightTexture.getImage();
+        if (heightImage.getWidth() != image.getWidth() || heightImage.getHeight() != image.getHeight()) {
+            throw new IllegalStateException("regional rock albedo and height maps must have matching dimensions");
+        }
+        heightImage.setColorSpace(ColorSpace.Linear);
+        heightTexture.setMinFilter(Texture.MinFilter.Trilinear);
+        heightTexture.setMagFilter(Texture.MagFilter.Bilinear);
+        heightTexture.setWrap(Texture.WrapMode.MirroredRepeat);
+        heightBitsPerPixel = heightImage.getFormat().getBitsPerPixel();
+        // A cached image may already contain all mip levels in data(0).
+        heightBaseImageBytes = (long) heightImage.getWidth() * heightImage.getHeight()
+                * heightBitsPerPixel / 8;
+        int[] mipSizes = heightImage.getMipMapSizes();
+        if (mipSizes != null && mipSizes.length > 0) {
+            long bytes = 0;
+            for (int size : mipSizes) bytes += size;
+            heightMipChainBytes = bytes;
+            heightMipLevels = mipSizes.length;
+        } else {
+            heightMipChainBytes = estimateMipChainBytes(
+                    heightImage.getWidth(), heightImage.getHeight(), heightBitsPerPixel);
+            heightMipLevels = mipLevelCount(heightImage.getWidth(), heightImage.getHeight());
+        }
     }
 
     /** Bind the shared texture and its fixed world-space sampling parameters. */
@@ -76,6 +113,26 @@ final class RegionalRockDetail {
         material.setFloat("RockDetailStrength", STRENGTH);
     }
 
+    /** Bind linear red-channel height data without changing vertex positions. */
+    void bindHeight(Material material) {
+        bindHeight(material, DEFAULT_HEIGHT_METRES);
+    }
+
+    void bindHeight(Material material, float heightMetres) {
+        if (material == null) throw new IllegalArgumentException("material is required");
+        if (!Float.isFinite(heightMetres) || heightMetres < 0) {
+            throw new IllegalArgumentException("height amplitude must be finite and non-negative");
+        }
+        material.setTexture("RockHeightMap", heightTexture);
+        material.setFloat("RockHeightMetres", heightMetres);
+    }
+
+    void unbindHeight(Material material) {
+        if (material == null) throw new IllegalArgumentException("material is required");
+        material.clearParam("RockHeightMap");
+        material.setFloat("RockHeightMetres", 0f);
+    }
+
     long getBaseImageBytes() {
         return baseImageBytes;
     }
@@ -85,6 +142,14 @@ final class RegionalRockDetail {
         return estimatedMipChainRgb8Bytes;
     }
 
+    long getHeightBaseImageBytes() { return heightBaseImageBytes; }
+
+    long getHeightMipChainBytes() { return heightMipChainBytes; }
+
+    int getHeightMipLevels() { return heightMipLevels; }
+
+    int getHeightBitsPerPixel() { return heightBitsPerPixel; }
+
     private static long estimateRgb8MipChainBytes(int width, int height) {
         long total = 0;
         while (true) {
@@ -93,5 +158,25 @@ final class RegionalRockDetail {
             width = Math.max(1, width / 2);
             height = Math.max(1, height / 2);
         }
+    }
+
+    private static long estimateMipChainBytes(int width, int height, int bitsPerPixel) {
+        long total = 0;
+        while (true) {
+            total += (long) width * height * bitsPerPixel / 8;
+            if (width == 1 && height == 1) return total;
+            width = Math.max(1, width / 2);
+            height = Math.max(1, height / 2);
+        }
+    }
+
+    private static int mipLevelCount(int width, int height) {
+        int levels = 1;
+        while (width > 1 || height > 1) {
+            width = Math.max(1, width / 2);
+            height = Math.max(1, height / 2);
+            levels++;
+        }
+        return levels;
     }
 }
