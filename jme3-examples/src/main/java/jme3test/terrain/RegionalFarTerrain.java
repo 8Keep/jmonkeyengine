@@ -221,12 +221,18 @@ final class RegionalFarTerrain {
         final double centerX, centerZ, amplitude;
         final double ux, uz, vx, vz;
         final double maximumTransformEigenvalue;
+        final boolean negligiblePastCutoff;
 
         Ridge(double centerX, double centerZ, double amplitude,
                 double alongWidth, double acrossWidth, double angleDegrees) {
             this.centerX = centerX;
             this.centerZ = centerZ;
             this.amplitude = amplitude;
+            // For q > 100, exp(-q/2) < 2^-71. The positive running sum
+            // starts at BASE_HEIGHT; this component then cannot affect its
+            // rounded double value, even before conversion to a source float.
+            negligiblePastCutoff = BASE_HEIGHT > 0 && amplitude >= 0
+                    && amplitude * 0x1.0p-71 < .25 * Math.ulp(BASE_HEIGHT);
             double angle = StrictMath.toRadians(angleDegrees);
             double cosine = StrictMath.cos(angle), sine = StrictMath.sin(angle);
             ux = cosine / alongWidth;
@@ -271,7 +277,9 @@ final class RegionalFarTerrain {
             return Math.nextUp(Math.nextUp(a * x) + Math.nextUp(b * y));
         }
         double height(double x, double z) {
-            return amplitude * StrictMath.exp(-0.5 * q(x - centerX, z - centerZ));
+            double distanceSquared = q(x - centerX, z - centerZ);
+            if (negligiblePastCutoff && distanceSquared > 100) return 0;
+            return amplitude * StrictMath.exp(-0.5 * distanceSquared);
         }
 
         double localHessianBound(double qMin, double qMax) {

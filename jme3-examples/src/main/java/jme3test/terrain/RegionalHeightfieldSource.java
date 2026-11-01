@@ -68,6 +68,9 @@ final class RegionalHeightfieldSource implements HeightfieldSource {
             return size() > tileLimit;
         }
     };
+    // The last cached tile is always MRU because this source is worker-confined.
+    private long lastTileKey;
+    private float[] lastTile;
     private int tileLoads;
     private long peakTransientFloatBytes;
     private long directSampleCount;
@@ -113,13 +116,18 @@ final class RegionalHeightfieldSource implements HeightfieldSource {
         int tileX = Math.floorDiv(x, TILE_CELLS);
         int tileZ = Math.floorDiv(z, TILE_CELLS);
         long key = ((long) tileZ << 32) ^ (tileX & 0xffffffffL);
-        float[] tile = tiles.get(key);
+        float[] tile = key == lastTileKey ? lastTile : null;
         if (tile == null) {
-            tile = loadTile(tileX, tileZ);
-            peakTransientFloatBytes = Math.max(peakTransientFloatBytes,
-                    (tiles.size() + 1L) * TILE_FLOAT_BYTES);
-            tiles.put(key, tile);
-            tileLoads++;
+            tile = tiles.get(key);
+            if (tile == null) {
+                tile = loadTile(tileX, tileZ);
+                peakTransientFloatBytes = Math.max(peakTransientFloatBytes,
+                        (tiles.size() + 1L) * TILE_FLOAT_BYTES);
+                tiles.put(key, tile);
+                tileLoads++;
+            }
+            lastTileKey = key;
+            lastTile = tile;
         }
         int localX = Math.floorMod(x, TILE_CELLS);
         int localZ = Math.floorMod(z, TILE_CELLS);
