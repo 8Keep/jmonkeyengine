@@ -81,8 +81,9 @@ final class RegionalPagePreparation implements AutoCloseable {
         if (patchCells < 2 || patchCells > 256 || (patchCells & (patchCells - 1)) != 0) {
             throw new IllegalArgumentException("patchCells must be a power of two from 2 to 256");
         }
-        if ((regionCells != 1024 && regionCells != 2048) || patchCells > regionCells) {
-            throw new IllegalArgumentException("regionCells must be 1024 or 2048 and at least patchCells");
+        if ((regionCells != 1024 && regionCells != 2048 && regionCells != RegionalHeightfieldSource.FAR_CELLS)
+                || patchCells > regionCells) {
+            throw new IllegalArgumentException("regionCells must be 1024, 2048, or 8192 and at least patchCells");
         }
         if (maxJobs < 1) {
             throw new IllegalArgumentException("maxJobs must be positive");

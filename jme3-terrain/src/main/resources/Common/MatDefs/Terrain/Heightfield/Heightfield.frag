@@ -13,6 +13,9 @@
 #ifdef HEIGHTFIELD_SURFACE
     #import "Common/MatDefs/Terrain/Heightfield/HeightfieldSurfaceSampling.glsllib"
     uniform float m_SurfaceFixedLod;
+    #ifdef SURFACE_REGION_FALLBACK
+        uniform float m_SurfaceRegionFade;
+    #endif
 #endif
 
 uniform vec4 g_LightData[NB_LIGHTS];
@@ -49,6 +52,34 @@ float valueNoise(vec2 p) {
     return mix(mix(a, b, blend.x), mix(c, d, blend.x), blend.y);
 }
 
+void proceduralMaterial(vec3 worldPosition, vec3 normal, out vec3 albedo, out float roughness) {
+    vec2 worldXZ = worldPosition.xz * max(m_TextureScale, 0.00001);
+    float broadBreakup = valueNoise(worldXZ * 0.34);
+    float fineBreakup = valueNoise(worldXZ * 2.7);
+    float breakup = (broadBreakup - 0.5) * 0.22 + (fineBreakup - 0.5) * 0.07;
+    float steepness = 1.0 - clamp(normal.y, 0.0, 1.0);
+    #ifdef SURFACE_REGION_FALLBACK
+        // Match the regional source's slope convention (rise/run). Using
+        // 1-normal.y here leaves steep far slopes almost entirely snow covered.
+        float slope = sqrt(max(1.0 - normal.y * normal.y, 0.0)) / max(abs(normal.y), 0.0001);
+        float rockWeight = smoothstep(0.48, 1.30, slope + breakup);
+    #else
+        float rockWeight = smoothstep(0.22, 0.68, steepness + breakup);
+    #endif
+    vec3 groundColor = mix(m_GrassColor.rgb, m_RockColor.rgb, rockWeight);
+    groundColor *= 0.94 + fineBreakup * 0.12;
+    float snowFade = max(m_SnowFade, 0.0001);
+    float snowWeight = smoothstep(m_SnowLine - snowFade, m_SnowLine + snowFade,
+                                  worldPosition.y + breakup * snowFade * 0.4);
+    #ifdef SURFACE_REGION_FALLBACK
+        snowWeight *= 1.0 - smoothstep(0.65, 1.40, slope);
+    #else
+        snowWeight *= 1.0 - smoothstep(0.58, 0.88, steepness);
+    #endif
+    albedo = mix(groundColor, m_SnowColor.rgb, snowWeight);
+    roughness = clamp(m_Roughness, 0.04, 1.0);
+}
+
 void main() {
     vec3 worldPosition = PBRLightingUtils_getWorldPosition();
     vec3 normal = normalize(PBRLightingUtils_getWorldNormal());
@@ -63,6 +94,21 @@ void main() {
         // Compute derivatives before dependent page-table lookup.
         vec2 dxWorld = dFdx(worldPosition.xz);
         vec2 dyWorld = dFdy(worldPosition.xz);
+        #ifdef SURFACE_REGION_FALLBACK
+            vec2 regionPosition = worldPosition.xz - m_SurfaceRegionOrigin;
+            float edgeDistance = min(min(regionPosition.x, regionPosition.y),
+                    min(m_SurfaceRegionSize - regionPosition.x,
+                            m_SurfaceRegionSize - regionPosition.y));
+            float cacheWeight = smoothstep(0.0, max(m_SurfaceRegionFade, 0.0001), edgeDistance);
+            vec3 fallbackAlbedo = vec3(0.0);
+            float fallbackRoughness = 0.0;
+            if (cacheWeight < 1.0) {
+                proceduralMaterial(worldPosition, normal, fallbackAlbedo, fallbackRoughness);
+            }
+            surface.albedo = fallbackAlbedo;
+            surface.roughness = fallbackRoughness;
+            if (cacheWeight > 0.0) {
+        #endif
         #ifdef SURFACE_DIRECT_REFERENCE
             HeightfieldSurfaceSample material = HeightfieldSurface_readDirect(
                     worldPosition.xz, dxWorld, dyWorld, m_SurfaceFixedLod);
@@ -75,6 +121,27 @@ void main() {
         vec3 tangent = normalize(tangentAxis - normal * dot(tangentAxis, normal));
         vec3 bitangent = cross(tangent, normal);
         float momentLength = length(material.normalMoment);
+        #ifdef SURFACE_REGION_FALLBACK
+            vec3 cachedNormal = normal;
+            if (momentLength > 1.0e-8) {
+                cachedNormal = normalize(tangent * material.normalMoment.x
+                        + normal * material.normalMoment.y + bitangent * material.normalMoment.z);
+            }
+            // Blend variance in roughness-squared space, before recovering roughness.
+            float variance = clamp(1.0 - momentLength, 0.0, 1.0);
+            vec3 blendedNormal = mix(normal, cachedNormal, cacheWeight);
+            float blendedNormalLengthSquared = dot(blendedNormal, blendedNormal);
+            if (cacheWeight >= 1.0) {
+                surface.normal = cachedNormal;
+            } else if (blendedNormalLengthSquared > 1.0e-8) {
+                surface.normal = blendedNormal * inversesqrt(blendedNormalLengthSquared);
+            } else {
+                surface.normal = normal;
+            }
+            surface.albedo = mix(fallbackAlbedo, material.albedo, cacheWeight);
+            surface.roughness = clamp(sqrt(max(mix(fallbackRoughness * fallbackRoughness,
+                    material.roughnessSquared + variance, cacheWeight), 0.0)), 0.04, 1.0);
+        #else
         if (momentLength > 1.0e-8) {
             surface.normal = normalize(tangent * material.normalMoment.x
                     + normal * material.normalMoment.y + bitangent * material.normalMoment.z);
@@ -84,21 +151,12 @@ void main() {
         // This is a filtering heuristic, not a calibrated microfacet fit.
         float variance = clamp(1.0 - momentLength, 0.0, 1.0);
         surface.roughness = clamp(sqrt(max(material.roughnessSquared + variance, 0.0)), 0.04, 1.0);
+        #endif
+        #ifdef SURFACE_REGION_FALLBACK
+            }
+        #endif
     #else
-        vec2 worldXZ = worldPosition.xz * max(m_TextureScale, 0.00001);
-        float broadBreakup = valueNoise(worldXZ * 0.34);
-        float fineBreakup = valueNoise(worldXZ * 2.7);
-        float breakup = (broadBreakup - 0.5) * 0.22 + (fineBreakup - 0.5) * 0.07;
-        float steepness = 1.0 - clamp(normal.y, 0.0, 1.0);
-        float rockWeight = smoothstep(0.22, 0.68, steepness + breakup);
-        vec3 groundColor = mix(m_GrassColor.rgb, m_RockColor.rgb, rockWeight);
-        groundColor *= 0.94 + fineBreakup * 0.12;
-        float snowFade = max(m_SnowFade, 0.0001);
-        float snowWeight = smoothstep(m_SnowLine - snowFade, m_SnowLine + snowFade,
-                                      worldPosition.y + breakup * snowFade * 0.4);
-        snowWeight *= 1.0 - smoothstep(0.58, 0.88, steepness);
-        surface.albedo = mix(groundColor, m_SnowColor.rgb, snowWeight);
-        surface.roughness = clamp(m_Roughness, 0.04, 1.0);
+        proceduralMaterial(worldPosition, normal, surface.albedo, surface.roughness);
     #endif
 
     PBRLightingUtils_calculatePreLightingValues(surface);

@@ -33,6 +33,7 @@ package jme3test.terrain;
 
 import com.jme3.terrain.heightfield.HeightfieldSource;
 import com.jme3.terrain.heightfield.HeightfieldHierarchy;
+import com.jme3.terrain.heightfield.HeightfieldMetadataBuilder;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.CancellationException;
@@ -44,6 +45,7 @@ import java.util.concurrent.CancellationException;
  */
 final class RegionalHeightfieldSource implements HeightfieldSource {
     static final int CELLS = 1024;
+    static final int FAR_CELLS = 8192;
     static final float SPACING = .5f;
 
     private static final int TILE_CELLS = 64;
@@ -58,6 +60,7 @@ final class RegionalHeightfieldSource implements HeightfieldSource {
 
     private final long revision;
     private final int cells;
+    private final RegionalFarTerrain farTerrain;
     private final HeightfieldSource pointSamples = new PointSampleView();
     private final LinkedHashMap<Long, float[]> tiles = new LinkedHashMap<Long, float[]>(80, .75f, true) {
         @Override
@@ -75,8 +78,8 @@ final class RegionalHeightfieldSource implements HeightfieldSource {
     }
 
     RegionalHeightfieldSource(int cells, long revision) {
-        if (cells != 1024 && cells != 2048) {
-            throw new IllegalArgumentException("regional source cells must be 1024 or 2048");
+        if (cells != 1024 && cells != 2048 && cells != FAR_CELLS) {
+            throw new IllegalArgumentException("regional source cells must be 1024, 2048, or 8192");
         }
         if (revision < 0) {
             throw new IllegalArgumentException("synthetic source revision must be nonnegative");
@@ -84,8 +87,9 @@ final class RegionalHeightfieldSource implements HeightfieldSource {
         this.cells = cells;
         // Keep the fine scan and its coarse reconstruction rows resident,
         // including edge tiles. A kilometre-wide scan outgrows 64 tiles.
-        tileLimit = cells == 2048 ? 128 : DEFAULT_TILE_LIMIT;
+        tileLimit = cells >= 2048 ? 128 : DEFAULT_TILE_LIMIT;
         this.revision = revision;
+        farTerrain = cells == FAR_CELLS ? new RegionalFarTerrain(revision) : null;
     }
 
     @Override
@@ -126,8 +130,30 @@ final class RegionalHeightfieldSource implements HeightfieldSource {
         return revision;
     }
 
+    float getWorldOrigin() {
+        return farTerrain == null ? 0f : -2048f;
+    }
+
+    RegionalFarTerrain getFarTerrain() {
+        return farTerrain;
+    }
+
+    HeightfieldHierarchy measuredHierarchy(int patchCells) {
+        return farTerrain == null
+                ? HeightfieldMetadataBuilder.build(this, pageSamples(2), patchCells, revision, 0)
+                : RegionalMetadataPyramid.build(this, patchCells);
+    }
+
     /** Build conservative metadata without sampling or retaining a dense page. */
     HeightfieldHierarchy bootstrapHierarchy(int patchCells) {
+        if (farTerrain != null) {
+            float maximum = farTerrain.getMaximumHeight();
+            return HeightfieldHierarchy.fromMetadata(
+                    cells, patchCells, SPACING, revision, 0,
+                    (x, z, span, stride) -> new HeightfieldHierarchy.NodeMetadata(
+                            0, maximum, stride == 1 ? 0 : maximum,
+                            stride == cells / patchCells ? 0 : maximum));
+        }
         // Global source envelope: 25.3 base + 266.7 first hills + 196.88
         // second hills + 122.96 far hills + 97 summits + 5.42 detail + 20
         // edit maximum = 734.26. The source is nonnegative; [0,736] pads it.
@@ -140,7 +166,7 @@ final class RegionalHeightfieldSource implements HeightfieldSource {
     }
 
     static long maximumCacheBytes(int cells) {
-        return (cells == 2048 ? 128L : DEFAULT_TILE_LIMIT) * TILE_FLOAT_BYTES;
+        return (cells >= 2048 ? 128L : DEFAULT_TILE_LIMIT) * TILE_FLOAT_BYTES;
     }
 
     long getCachedFloatBytes() {
@@ -193,12 +219,16 @@ final class RegionalHeightfieldSource implements HeightfieldSource {
     }
 
     private float sampleHeight(int x, int z) {
-        double worldX = x * (double) SPACING + SCENIC_OFFSET_X;
-        double worldZ = z * (double) SPACING + SCENIC_OFFSET_Z;
+        return farTerrain == null ? legacyHeight(x, z, revision) : farTerrain.height(x, z);
+    }
+
+    static float legacyHeight(int globalFineX, int globalFineZ, long revision) {
+        double worldX = globalFineX * (double) SPACING + SCENIC_OFFSET_X;
+        double worldZ = globalFineZ * (double) SPACING + SCENIC_OFFSET_Z;
         double height = ScenicHeightField.height(worldX, worldZ);
         if ((revision & 1L) != 0) {
-            double dx = x * (double) SPACING - EDIT_HILL_X;
-            double dz = z * (double) SPACING - EDIT_HILL_Z;
+            double dx = globalFineX * (double) SPACING - EDIT_HILL_X;
+            double dz = globalFineZ * (double) SPACING - EDIT_HILL_Z;
             double radiusSquared = EDIT_HILL_RADIUS * EDIT_HILL_RADIUS;
             height += 20.0 * Math.exp(-0.5 * (dx * dx + dz * dz) / radiusSquared);
         }

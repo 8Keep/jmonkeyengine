@@ -32,7 +32,6 @@
 package jme3test.terrain;
 
 import com.jme3.terrain.heightfield.HeightfieldHierarchy;
-import com.jme3.terrain.heightfield.HeightfieldMetadataBuilder;
 import java.util.Objects;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.Future;
@@ -287,8 +286,9 @@ final class RegionalRevisionPreparation implements AutoCloseable {
             if (patchCells < 2 || (patchCells & (patchCells - 1)) != 0) {
                 throw new IllegalArgumentException("patchCells must be a power of two of at least 2");
             }
-            if ((regionCells != 1024 && regionCells != 2048) || patchCells > regionCells) {
-                throw new IllegalArgumentException("regionCells must be 1024 or 2048 and at least patchCells");
+            if ((regionCells != 1024 && regionCells != 2048
+                    && regionCells != RegionalHeightfieldSource.FAR_CELLS) || patchCells > regionCells) {
+                throw new IllegalArgumentException("regionCells must be 1024, 2048, or 8192 and at least patchCells");
             }
             this.patchCells = patchCells;
             this.regionCells = regionCells;
@@ -308,8 +308,7 @@ final class RegionalRevisionPreparation implements AutoCloseable {
         long start = System.nanoTime();
         checkCancelled(cancelled);
         RegionalHeightfieldSource source = new RegionalHeightfieldSource(regionCells, revision);
-        HeightfieldHierarchy hierarchy = HeightfieldMetadataBuilder.build(source, source.pageSamples(2),
-                patchCells, revision, 0);
+        HeightfieldHierarchy hierarchy = source.measuredHierarchy(patchCells);
         checkCancelled(cancelled);
         return new Prepared(source, hierarchy, revision, System.nanoTime() - start);
     }

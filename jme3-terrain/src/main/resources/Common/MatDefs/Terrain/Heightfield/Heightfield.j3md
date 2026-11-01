@@ -78,6 +78,9 @@ MaterialDef Heightfield {
         Int SurfacePhysicalSide : 36
         Int SurfaceGutter : 2
         Int SurfaceMipCount : 3
+        // Optional procedural fallback outside a bounded material-page region.
+        Boolean UseHeightfieldSurfaceRegionFallback : false
+        Float SurfaceRegionFade : 64.0
         Vector2 SurfaceRegionOrigin : 0.0 0.0
         Float SurfaceRegionSize : 64.0
         Float SurfaceCanonicalSpacing : 0.5
@@ -135,6 +138,7 @@ MaterialDef Heightfield {
             HEIGHTFIELD_SOURCE_GRADIENTS : UseHeightfieldSourceGradients
             HEIGHTFIELD_PATCH_RECORD_VECS : PatchRecordVectors
             HEIGHTFIELD_SURFACE : UseHeightfieldSurface
+            SURFACE_REGION_FALLBACK : UseHeightfieldSurfaceRegionFallback
             SURFACE_DIRECT_REFERENCE : SurfaceDirectReference
             SURFACE_PRECISE_FILTER : SurfacePreciseFilter
             DIRECTIONAL_VISIBILITY : UseDirectionalVisibility
