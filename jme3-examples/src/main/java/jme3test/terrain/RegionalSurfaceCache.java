@@ -118,6 +118,8 @@ final class RegionalSurfaceCache implements AutoCloseable {
     private boolean failed;
     private boolean atlasInitialized;
     private final float[] lastPageTable;
+    private KeyBank newestKeyBank;
+    private KeyBank previousKeyBank;
     private HeightfieldSurfaceResidency.Frame frame;
     private volatile long reportedCachedBytes;
     private volatile long reportedPeakCachedBytes;
@@ -295,6 +297,8 @@ final class RegionalSurfaceCache implements AutoCloseable {
         residency.reset();
         readyPages.clear();
         desiredPages.clear();
+        newestKeyBank = null;
+        previousKeyBank = null;
         visibleRevision = revision;
         pinnedRevision = -1;
         targetRevision = revision;
@@ -432,6 +436,8 @@ final class RegionalSurfaceCache implements AutoCloseable {
         residency.close();
         for (ByteBuffer buffer : ownedBuffers) BufferUtils.destroyDirectBuffer(buffer);
         ownedBuffers.clear();
+        newestKeyBank = null;
+        previousKeyBank = null;
         closed = true;
     }
 
@@ -552,7 +558,8 @@ final class RegionalSurfaceCache implements AutoCloseable {
                 renderer.modifyTexture(normal, temporary(Image.Format.RGBA32F, n), layer, 0, 0);
                 renderer.modifyTexture(semantic, temporary(Image.Format.Luminance8, sem), layer, 0, 0);
             }
-            readyPages.add(new HeightfieldSurfaceResidency.PageKey(page.getRevision(), page.getOriginX(), page.getOriginZ(), page.getBaseStride()));
+            HeightfieldSurfacePage.Revision pageRevision = page.getRevision();
+            readyPages.add(key(pageRevision.getHeight(), page.getOriginX(), page.getOriginZ(), page.getBaseStride()));
             paddedUploadBytes += PADDED_PAGE_BYTES;
             frameUploadBytes += PADDED_PAGE_BYTES;
             if (page.getBaseStride() == 1) uploadedFinePages++;
@@ -630,7 +637,82 @@ final class RegionalSurfaceCache implements AutoCloseable {
     }
 
     private HeightfieldSurfaceResidency.PageKey key(long revision, long x, long z, int stride) {
-        return new HeightfieldSurfaceResidency.PageKey(new HeightfieldSurfacePage.Revision(revision, revision, revision), x, z, stride);
+        return keyBank(revision).key(x, z, stride);
+    }
+
+    private KeyBank keyBank(long revision) {
+        if (newestKeyBank != null && newestKeyBank.revisionNumber == revision) {
+            return newestKeyBank;
+        }
+        if (previousKeyBank != null && previousKeyBank.revisionNumber == revision) {
+            KeyBank swap = newestKeyBank;
+            newestKeyBank = previousKeyBank;
+            previousKeyBank = swap;
+            return newestKeyBank;
+        }
+        previousKeyBank = newestKeyBank;
+        newestKeyBank = new KeyBank(revision, regionCells, rootBaseStride);
+        return newestKeyBank;
+    }
+
+    /** Lazy immutable keys for one revision; recreated keys remain value-equal. */
+    static final class KeyBank {
+        final long revisionNumber;
+        final HeightfieldSurfacePage.Revision revision;
+        private final int regionCells;
+        private final int[] axes = new int[9];
+        private final HeightfieldSurfaceResidency.PageKey[][] tables =
+                new HeightfieldSurfaceResidency.PageKey[9][];
+        private int allocatedKeys;
+
+        KeyBank(long revisionNumber, int regionCells, int rootBaseStride) {
+            if (revisionNumber < 0 || regionCells <= 0) {
+                throw new IllegalArgumentException("revision and region dimensions must be nonnegative");
+            }
+            this.revisionNumber = revisionNumber;
+            this.regionCells = regionCells;
+            revision = new HeightfieldSurfacePage.Revision(revisionNumber, revisionNumber, revisionNumber);
+            installStride(1);
+            installStride(2);
+            installStride(rootBaseStride);
+        }
+
+        private void installStride(int stride) {
+            long span = (long) PAGE_RESOLUTION * stride;
+            if (stride < 1 || stride > 8 || (stride & (stride - 1)) != 0
+                    || regionCells % span != 0) {
+                throw new IllegalArgumentException("stride does not evenly partition the surface region");
+            }
+            int axis = (int) (regionCells / span);
+            if (tables[stride] == null) {
+                axes[stride] = axis;
+                tables[stride] = new HeightfieldSurfaceResidency.PageKey[axis * axis];
+            }
+        }
+
+        HeightfieldSurfaceResidency.PageKey key(long x, long z, int stride) {
+            if (stride < 1 || stride > 8 || tables[stride] == null) {
+                throw new IllegalArgumentException("unsupported regional surface stride");
+            }
+            long span = (long) PAGE_RESOLUTION * stride;
+            if (x < 0 || z < 0 || x >= regionCells || z >= regionCells
+                    || x % span != 0 || z % span != 0) {
+                throw new IndexOutOfBoundsException("surface key origin is outside or misaligned to its page grid");
+            }
+            int axis = axes[stride];
+            int index = (int) (z / span) * axis + (int) (x / span);
+            HeightfieldSurfaceResidency.PageKey result = tables[stride][index];
+            if (result == null) {
+                result = new HeightfieldSurfaceResidency.PageKey(revision, x, z, stride);
+                tables[stride][index] = result;
+                allocatedKeys++;
+            }
+            return result;
+        }
+
+        int getAllocatedKeyCount() {
+            return allocatedKeys;
+        }
     }
 
     private void cancelObsoleteJobs() {
