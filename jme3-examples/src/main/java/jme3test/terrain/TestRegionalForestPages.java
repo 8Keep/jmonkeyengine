@@ -152,6 +152,49 @@ public final class TestRegionalForestPages {
                 "tree budget evicts an unrequested page");
         check(treeBound.getResidentTrees() <= maxTrees, "tree-bound cache stays within limit");
 
+        RegionalForestPages dense = new RegionalForestPages(source, 6f, 1024, 8192);
+        dense.beginDemand();
+        Map<Long, float[]> denseRecords = new TreeMap<>();
+        for (int z = 0; z < dense.getPageCountPerAxis(); z++) {
+            for (int x = 0; x < dense.getPageCountPerAxis(); x++) {
+                RegionalForestPages.Page page = dense.request(x, z);
+                check(page != null, "dense full-source scan fits the preset tree budget");
+                if (page.getTreeCount() > 0) {
+                    check(dense.mayContainTrees(x, z), "dense support retains every populated page");
+                }
+                for (int tree = 0; tree < page.getTreeCount(); tree++) {
+                    float[] record = new float[RegionalForestPages.RECORD_COMPONENTS];
+                    for (int component = 0; component < record.length; component++) {
+                        record[component] = page.getRecord(tree, component);
+                    }
+                    check((int) Math.floor(record[0] * RegionalHeightfieldSource.SPACING
+                            / RegionalForestPages.PAGE_SIZE_METRES) == x
+                            && (int) Math.floor(record[1] * RegionalHeightfieldSource.SPACING
+                                    / RegionalForestPages.PAGE_SIZE_METRES) == z,
+                            "dense rounded root belongs to its page across seams");
+                    check(record[2] <= 1.15f, "dense age scaling preserves the maximum instance scale");
+                    long key = key((int) record[0], (int) record[1]);
+                    check(denseRecords.put(key, record) == null, "dense roots are unique across page seams");
+                }
+            }
+        }
+        check(denseRecords.size() <= 8192, "dense placement stays within the configured tree budget");
+        check(dense.getResidentPages() <= 96, "dense nonempty pages fit the preset page budget");
+        int[] densePageIds = firstTwoPages(denseRecords);
+        int denseFirstCount = pageTreeCount(denseRecords, densePageIds[0], densePageIds[1]);
+        RegionalForestPages denseReplay = new RegionalForestPages(source, 6f, 1, 8192);
+        denseReplay.beginDemand();
+        RegionalForestPages.Page denseFirst = denseReplay.request(densePageIds[0], densePageIds[1]);
+        float[] denseFirstRecords = denseFirst.copyRecords();
+        denseReplay.beginDemand();
+        check(denseReplay.request(densePageIds[2], densePageIds[3]) != null
+                && denseReplay.getEvictions() == 1, "dense page budget permits deterministic eviction");
+        denseReplay.beginDemand();
+        RegionalForestPages.Page denseAgain = denseReplay.request(densePageIds[0], densePageIds[1]);
+        check(denseAgain != null && denseAgain.getTreeCount() == denseFirstCount
+                && Arrays.equals(denseFirstRecords, denseAgain.copyRecords()),
+                "dense page replay is bit deterministic");
+
         boolean badStep = rejected(() -> new RegionalForestPages(source, 5.99f, 1, 1));
         boolean badBudget = rejected(() -> new RegionalForestPages(source, SITE_STEP, 0, 1));
         boolean badPage = rejected(() -> all.request(-1, 0));

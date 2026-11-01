@@ -50,8 +50,10 @@ public final class TestOriginalConifer {
             check(!sameBuffer(first.getNearMesh(), other.getNearMesh(), VertexBuffer.Type.Position),
                     "seed changes placement");
             checkCommonBounds(first.getBounds(), repeat.getBounds());
-            inspect(first.getNearMesh(), first.getBounds(), 1000, 2500, "near");
-            inspect(first.getMidMesh(), first.getBounds(), 200, 500, "mid");
+            inspect(first.getNearMesh(), first.getBounds(), 1000, 6000, "near");
+            inspect(first.getMidMesh(), first.getBounds(), 450, 2500, "mid");
+            check(first.getNearMesh().getTriangleCount() > first.getMidMesh().getTriangleCount(),
+                    "near crown spends more geometry on overlapping sprays than mid");
             print(seed, "near", first.getNearMesh());
             print(seed, "mid", first.getMidMesh());
         }
@@ -79,6 +81,7 @@ public final class TestOriginalConifer {
         }
         checkWinding(positions, normals, indices, label);
         boolean wood = false, foliage = false;
+        float foliageMinY = Float.POSITIVE_INFINITY, foliageMaxY = Float.NEGATIVE_INFINITY;
         for (int i = 0; i < vertices; i++) {
             float x = positions.get(i * 3), y = positions.get(i * 3 + 1), z = positions.get(i * 3 + 2);
             float nx = normals.get(i * 3), ny = normals.get(i * 3 + 1), nz = normals.get(i * 3 + 2);
@@ -95,9 +98,15 @@ public final class TestOriginalConifer {
                     && Math.abs(z) <= envelope.getZExtent() + 1e-4f
                     && y <= OriginalConifer.HEIGHT + 1e-4f, label + " within shared envelope");
             if (tag == 0f) wood = true;
-            else foliage = true;
+            else {
+                foliage = true;
+                foliageMinY = Math.min(foliageMinY, y);
+                foliageMaxY = Math.max(foliageMaxY, y);
+            }
         }
         check(wood && foliage, label + " contains wood and fronds");
+        check(foliageMinY <= 2.0f, label + " foliage fills the lower crown");
+        check(foliageMaxY >= 17.5f, label + " foliage reaches the tapered leader");
         check(mesh.getBound() instanceof BoundingBox, label + " mesh bound");
         BoundingBox meshBounds = (BoundingBox) mesh.getBound();
         check(Float.isFinite(meshBounds.getMin(null).x) && Float.isFinite(meshBounds.getMin(null).y)

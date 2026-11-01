@@ -40,6 +40,7 @@ import java.util.Random;
 public final class OriginalConifer {
     public static final float HEIGHT = 18f;
     public static final float CROWN_RADIUS = 4f;
+    private static final int BRANCH_LEVELS = 14;
     private static final int NEAR_BRANCH_SIDES = 4;
     private static final ColorRGBA BARK = new ColorRGBA(.30f, .19f, .10f, 1f);
     private static final ColorRGBA BRANCH_BARK = new ColorRGBA(.35f, .22f, .12f, 1f);
@@ -89,25 +90,29 @@ public final class OriginalConifer {
     }
 
     private static BranchSpec[] branchSkeleton(long seed) {
-        BranchSpec[] result = new BranchSpec[10 * 5];
+        BranchSpec[] result = new BranchSpec[BRANCH_LEVELS * 6];
         int index = 0;
-        for (int level = 0; level < 10; level++) {
-            double t = level / 9.0;
+        for (int level = 0; level < BRANCH_LEVELS; level++) {
+            double t = level / (double) (BRANCH_LEVELS - 1);
             Random random = new Random(seed ^ (0x9e3779b97f4a7c15L * (level + 1L)));
-            float levelY = (float) (2.0 + t * 14.8 + (random.nextDouble() - .5) * .22);
-            float radial = (float) (3.15 * Math.pow(1.0 - t, .78) + .18);
+            float levelY = (float) (1.15 + t * 16.45 + (random.nextDouble() - .5) * .60);
+            // A broad middle skirt narrows into the leader instead of ending as
+            // equal-width stacked whorls. Keep the primary limb tips inside 4m.
+            float radial = (float) (3.30 * Math.pow(1.0 - t, .88) + .13);
             double phase = random.nextDouble() * Math.PI * 2;
-            for (int direction = 0; direction < 5; direction++) {
-                double angle = phase + 2 * Math.PI * direction / 5
-                        + (random.nextDouble() - .5) * .12;
-                float length = radial * (float) (.97 + random.nextDouble() * .07);
-                float droop = .18f + (float) random.nextDouble() * .36f;
-                float y = levelY + (float) (random.nextDouble() - .5) * 1.0f;
+            int directions = level % 3 == 1 ? 6 : 5;
+            for (int direction = 0; direction < directions; direction++) {
+                double angle = phase + 2 * Math.PI * direction / directions
+                        + (random.nextDouble() - .5) * .28;
+                float length = radial * (float) (.94 + random.nextDouble() * .12);
+                float droop = .12f + (float) random.nextDouble() * .34f;
+                float y = Math.min(17.85f, Math.max(.7f,
+                        levelY + (float) (random.nextDouble() - .5) * 1.20f));
                 long branchSeed = random.nextLong();
                 result[index++] = new BranchSpec(level, angle, y, length, droop, branchSeed);
             }
         }
-        return result;
+        return java.util.Arrays.copyOf(result, index);
     }
 
     private static void addTrunk(MeshBuilder b, int sides, int rings, Random random) {
@@ -124,49 +129,81 @@ public final class OriginalConifer {
     private static void addNearBranch(MeshBuilder b, BranchSpec branch) {
         float dx = (float) Math.cos(branch.angle), dz = (float) Math.sin(branch.angle);
         Random stemRandom = new Random(branch.seed ^ 0x13198a2e03707344L);
-        Random mainCardRandom = new Random(branch.seed ^ 0x082efa98ec4e6c89L);
-        Random twigRandom = new Random(branch.seed ^ 0xa4093822299f31d0L);
         Vector3f root = new Vector3f(dx * .12f, branch.y, dz * .12f);
         Vector3f tip = new Vector3f(dx * branch.length,
                 Math.max(.75f, branch.y - branch.droop), dz * branch.length);
         addFrustum(b, root, tip, .058f, .012f, NEAR_BRANCH_SIDES,
                 stemRandom.nextFloat() * 6.28f, BRANCH_BARK, false, false);
-
-        float t = branch.level / 9f;
-        float foliageWidth = 1.92f - .72f * t;
-        addFrondPair(b, lerp(root, tip, .04f), lerp(root, tip, .96f),
-                foliageWidth, mainCardRandom, colorFor(new Random(branch.seed ^ 0x3f84d5b5b5470917L)));
-
-        // Short secondary forks break whorl regularity and carry their own
-        // crossed fronds while remaining inside the primary branch envelope.
-        float forkT = .40f + twigRandom.nextFloat() * .15f;
-        Vector3f fork = lerp(root, tip, forkT);
-        for (int side = -1; side <= 1; side += 2) {
-            Random forkRandom = new Random(branch.seed ^ (side < 0
-                    ? 0x452821e638d01377L : 0xbe5466cf34e90c6cL));
-            float sideX = -dz * side, sideZ = dx * side;
-            Vector3f twigTip = new Vector3f(
-                    fork.x + dx * branch.length * (.29f + forkRandom.nextFloat() * .07f)
-                            + sideX * branch.length * .10f,
-                    Math.max(.48f, fork.y - branch.droop * (.55f + forkRandom.nextFloat() * .35f)),
-                    fork.z + dz * branch.length * (.29f + forkRandom.nextFloat() * .07f)
-                            + sideZ * branch.length * .10f);
-            addFrustum(b, fork, twigTip, .030f, .007f, 3,
-                    forkRandom.nextFloat() * 6.28f, BRANCH_BARK, false, false);
-            addFrondPair(b, lerp(fork, twigTip, .03f), lerp(fork, twigTip, .96f),
-                    1.43f - .35f * t, forkRandom, colorFor(forkRandom));
+        Vector3f[][] sprays = addMacroFoliage(b, branch, root, tip);
+        for (int i = 0; i < sprays.length; i++) {
+            Vector3f start = sprays[i][0], end = sprays[i][1];
+            Random fine = new Random(branch.seed ^ (0x6a09e667f3bcc909L * (i + 1L)));
+            addFrustum(b, start, end, .023f, .005f, 3,
+                    fine.nextFloat() * 6.28f, BRANCH_BARK, false, false);
+            // Fine near detail sits inside the shared macro spray silhouette.
+            addFrondPair(b, lerp(start, end, .18f), lerp(start, end, .88f),
+                    .58f - .12f * branch.level / (BRANCH_LEVELS - 1f),
+                    fine, colorFor(fine));
         }
     }
 
     private static void addMidBranch(MeshBuilder b, BranchSpec branch) {
-        Random random = new Random(branch.seed ^ 0x082efa98ec4e6c89L);
         float dx = (float) Math.cos(branch.angle), dz = (float) Math.sin(branch.angle);
         Vector3f root = new Vector3f(dx * .12f, branch.y, dz * .12f);
         Vector3f tip = new Vector3f(dx * branch.length,
                 Math.max(.75f, branch.y - branch.droop), dz * branch.length);
-        float t = branch.level / 9f;
-        addFrondPair(b, lerp(root, tip, .04f), lerp(root, tip, .96f),
-                1.52f - .35f * t, random, colorFor(new Random(branch.seed ^ 0x3f84d5b5b5470917L)));
+        addMacroFoliage(b, branch, root, tip);
+    }
+
+    /** Four macro foliage sprays shared exactly by both geometry LODs. */
+    private static Vector3f[][] addMacroFoliage(MeshBuilder b, BranchSpec branch,
+            Vector3f root, Vector3f tip) {
+        float t = branch.level / (float) (BRANCH_LEVELS - 1);
+        Random main = new Random(branch.seed ^ 0x082efa98ec4e6c89L);
+        addFrondPair(b, lerp(root, tip, .03f), lerp(root, tip, .98f),
+                2.05f - .93f * t, main,
+                colorFor(new Random(branch.seed ^ 0x3f84d5b5b5470917L)));
+
+        Vector3f[][] sprays = new Vector3f[2][2];
+        float dx = (float) Math.cos(branch.angle), dz = (float) Math.sin(branch.angle);
+        for (int i = 0; i < sprays.length; i++) {
+            int side = i == 0 ? -1 : 1;
+            Random random = new Random(branch.seed ^ (0xbb67ae8584caa73bL * (i + 1L)));
+            float forkT = .34f + i * .29f + (random.nextFloat() - .5f) * .12f;
+            Vector3f start = lerp(root, tip, forkT);
+            float radialStep = .14f + random.nextFloat() * .06f;
+            float lateralStep = .12f + random.nextFloat() * .07f;
+            float sideX = -dz * side, sideZ = dx * side;
+            Vector3f end = new Vector3f(
+                    start.x + dx * branch.length * radialStep + sideX * branch.length * lateralStep,
+                    Math.max(.26f, start.y + (side > 0 ? .12f : -.08f)
+                            - branch.droop * (.14f + random.nextFloat() * .22f)),
+                    start.z + dz * branch.length * radialStep + sideZ * branch.length * lateralStep);
+            sprays[i][0] = start;
+            sprays[i][1] = end;
+            float width = (1.68f - .66f * t) * (.94f + random.nextFloat() * .12f);
+            addFrondPair(b, start, end, width, random, colorFor(random));
+        }
+
+        // A pendant spray drops through the gap below each whorl. Its start,
+        // side, and fall vary per limb, so these overlapping curtains do not
+        // read as another level ring.
+        Random pendantRandom = new Random(branch.seed ^ 0x3c6ef372fe94f82bL);
+        int pendantSide = pendantRandom.nextBoolean() ? -1 : 1;
+        float pendantT = .17f + pendantRandom.nextFloat() * .13f;
+        Vector3f pendantStart = lerp(root, tip, pendantT);
+        float sideX = -dz * pendantSide, sideZ = dx * pendantSide;
+        float fall = .42f + pendantRandom.nextFloat() * .38f + branch.droop * .35f;
+        Vector3f pendantEnd = new Vector3f(
+                pendantStart.x + dx * branch.length * (.28f + pendantRandom.nextFloat() * .08f)
+                        + sideX * branch.length * (.08f + pendantRandom.nextFloat() * .05f),
+                Math.max(.22f, pendantStart.y - fall),
+                pendantStart.z + dz * branch.length * (.28f + pendantRandom.nextFloat() * .08f)
+                        + sideZ * branch.length * (.08f + pendantRandom.nextFloat() * .05f));
+        float pendantWidth = (1.56f - .62f * t) * (.94f + pendantRandom.nextFloat() * .12f);
+        addFrondPair(b, pendantStart, pendantEnd, pendantWidth,
+                pendantRandom, colorFor(pendantRandom));
+        return sprays;
     }
 
     private static void addLeader(MeshBuilder b, Random random) {

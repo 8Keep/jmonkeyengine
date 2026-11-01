@@ -46,7 +46,12 @@ public final class RegionalForestPages {
         .17f, .22f, .34f, .55f, .64f, .26f, .80f, .72f,
         .42f, .84f, .72f, .48f, .20f, .78f, .53f, .42f
     };
+    private static final float[] GROVE_COS = new float[GROVES.length / 2];
+    private static final float[] GROVE_SIN = new float[GROVES.length / 2];
     private static final float[] NO_RECORDS = new float[0];
+    private static final float DENSE_MAJOR_RADIUS = 1.12f;
+    private static final float DENSE_MINOR_RADIUS = .72f;
+    private static final float DENSE_WARP_AXIS_BOUND = 32f;
 
     private final RegionalHeightfieldSource source;
     private final HeightfieldSource pointSamples;
@@ -66,6 +71,7 @@ public final class RegionalForestPages {
     private final boolean[] impossible;
     private final int[] knownTreeCounts;
     private final float[] candidateScratch;
+    private final float[] denseValues = new float[4];
 
     private int residentPageCount;
     private int residentTreeCount;
@@ -75,6 +81,15 @@ public final class RegionalForestPages {
     private long loads;
     private long evictions;
     private long budgetLimited;
+
+    static {
+        for (int grove = 0; grove < GROVE_COS.length; grove++) {
+            double angle = unit(mix(0x6a09e667f3bcc909L + grove * 0x9e3779b97f4a7c15L))
+                    * Math.PI * 2;
+            GROVE_COS[grove] = (float) Math.cos(angle);
+            GROVE_SIN[grove] = (float) Math.sin(angle);
+        }
+    }
 
     /**
      * @param source immutable regional source for one revision
@@ -208,9 +223,16 @@ public final class RegionalForestPages {
         double maxX = Math.min(worldSize, (cellX + 1.0) * PAGE_SIZE_METRES) + padding;
         double maxZ = Math.min(worldSize, (cellZ + 1.0) * PAGE_SIZE_METRES) + padding;
         float legacyRadius = Math.max(28f, worldSize * .035f);
+        double supportRadius = legacyRadius;
+        if (siteStep < 14f) {
+            // The dense field is an oriented ellipse plus a two-axis domain
+            // warp, whose each component is bounded by 32 metres.
+            supportRadius = legacyRadius * DENSE_MAJOR_RADIUS
+                    + Math.sqrt(2.0) * DENSE_WARP_AXIS_BOUND;
+        }
         // Pad the legacy float center/subtraction and squared-distance
         // roundoff so this prefilter cannot exclude an accepted candidate.
-        double radius = Math.nextUp((double) legacyRadius
+        double radius = Math.nextUp(supportRadius
                 + 4.0 * Math.ulp(worldSize) + 4.0 * Math.ulp(legacyRadius));
         double radiusSquared = radius * radius;
         for (int grove = 0; grove < GROVES.length; grove += 2) {
@@ -329,7 +351,7 @@ public final class RegionalForestPages {
             checkInterrupted();
             for (int x = fromX; x < toX; x++) {
                 long seed = mix(((long) x << 32) ^ (z & 0xffffffffL));
-                if (unit(seed) > .60f) continue;
+                if (siteStep >= 14f && unit(seed) > .60f) continue;
                 float px = (x + .2f + .6f * unit(mix(seed + 1))) * siteStep;
                 float pz = (z + .2f + .6f * unit(mix(seed + 2))) * siteStep;
                 if (px < 4 || pz < 4 || px > worldSize - 4 || pz > worldSize - 4) continue;
@@ -340,16 +362,28 @@ public final class RegionalForestPages {
                 if ((int) Math.floor(sampleX / PAGE_SIZE_METRES) != cellX
                         || (int) Math.floor(sampleZ / PAGE_SIZE_METRES) != cellZ) continue;
 
-                boolean inGrove = false;
-                for (int grove = 0; grove < GROVES.length; grove += 2) {
-                    float dx = px - GROVES[grove] * worldSize;
-                    float dz = pz - GROVES[grove + 1] * worldSize;
-                    if (dx * dx + dz * dz < radiusSquared) {
-                        inGrove = true;
-                        break;
+                float denseScaleFactor = 1f;
+                float denseTintFactor = 1f;
+                if (siteStep >= 14f) {
+                    boolean inGrove = false;
+                    for (int grove = 0; grove < GROVES.length; grove += 2) {
+                        float dx = px - GROVES[grove] * worldSize;
+                        float dz = pz - GROVES[grove + 1] * worldSize;
+                        if (dx * dx + dz * dz < radiusSquared) {
+                            inGrove = true;
+                            break;
+                        }
                     }
+                    if (!inGrove) continue;
+                } else {
+                    float globalX = px + source.getWorldOrigin();
+                    float globalZ = pz + source.getWorldOrigin();
+                    denseField(globalX, globalZ);
+                    float density = denseValues[0];
+                    denseScaleFactor = denseValues[2];
+                    denseTintFactor = denseValues[3];
+                    if (!(unit(seed) < density)) continue;
                 }
-                if (!inGrove) continue;
                 float height = pointSamples.getHeight(fineX, fineZ);
                 float slopeX = (pointSamples.getHeight(fineX + 2, fineZ)
                         - pointSamples.getHeight(fineX - 2, fineZ)) / (4 * spacing);
@@ -361,15 +395,97 @@ public final class RegionalForestPages {
                 int offset = count++ * RECORD_COMPONENTS;
                 records[offset] = fineX;
                 records[offset + 1] = fineZ;
-                records[offset + 2] = .8f + .35f * unit(mix(seed + 3));
+                float baseScale = .8f + .35f * unit(mix(seed + 3));
+                float baseTint = .85f + .25f * unit(mix(seed + 5));
+                if (siteStep >= 14f) {
+                    records[offset + 2] = baseScale;
+                    records[offset + 5] = baseTint;
+                } else {
+                    records[offset + 2] = baseScale * denseScaleFactor;
+                    records[offset + 5] = baseTint * denseTintFactor;
+                }
                 double yaw = unit(mix(seed + 4)) * Math.PI * 2;
                 records[offset + 3] = (float) Math.cos(yaw);
                 records[offset + 4] = (float) Math.sin(yaw);
-                records[offset + 5] = .85f + .25f * unit(mix(seed + 5));
             }
         }
         return new Page(cellX, cellZ, count == 0 ? NO_RECORDS
                 : Arrays.copyOf(records, count * RECORD_COMPONENTS));
+    }
+
+    /** Write density, age, scale multiplier, and tint multiplier to denseValues. */
+    private void denseField(float worldX, float worldZ) {
+        float warpX = 20f * valueNoise(worldX, worldZ, 96f, 0)
+                + 9f * valueNoise(worldX, worldZ, 40f, 1)
+                + 3f * valueNoise(worldX, worldZ, 16f, 2);
+        float warpZ = 20f * valueNoise(worldX, worldZ, 96f, 3)
+                + 9f * valueNoise(worldX, worldZ, 40f, 4)
+                + 3f * valueNoise(worldX, worldZ, 16f, 5);
+        float warpedX = worldX + warpX;
+        float warpedZ = worldZ + warpZ;
+        float activity = .50f + .26f * valueNoise(worldX, worldZ, 96f, 6)
+                + .17f * valueNoise(worldX, worldZ, 40f, 7)
+                + .07f * valueNoise(worldX, worldZ, 16f, 8);
+        float boundary = .86f + .14f * (.5f + .5f * valueNoise(worldX, worldZ, 48f, 9));
+        float ageNoise = .5f + .5f * valueNoise(worldX, worldZ, 96f, 10);
+        float bestDensity = 0f;
+        float bestAge = 0f;
+        float radius = Math.max(28f, worldSize * .035f);
+        float major = radius * DENSE_MAJOR_RADIUS;
+        float minor = radius * DENSE_MINOR_RADIUS;
+        for (int grove = 0; grove < GROVE_COS.length; grove++) {
+            float centerX = GROVES[grove * 2] * worldSize + source.getWorldOrigin();
+            float centerZ = GROVES[grove * 2 + 1] * worldSize + source.getWorldOrigin();
+            float dx = warpedX - centerX;
+            float dz = warpedZ - centerZ;
+            float along = GROVE_COS[grove] * dx + GROVE_SIN[grove] * dz;
+            float across = -GROVE_SIN[grove] * dx + GROVE_COS[grove] * dz;
+            float normalized = (float) Math.sqrt((along * along) / (major * major)
+                    + (across * across) / (minor * minor)) / boundary;
+            if (normalized >= 1f) continue;
+            float edgeDensity = 1f - smoothstep(.72f, 1f, normalized);
+            float density = .90f * edgeDensity * smoothstep(.18f, .60f, activity);
+            if (density > bestDensity) {
+                bestDensity = density;
+                float coreAge = 1f - smoothstep(.55f, 1f, normalized);
+                bestAge = coreAge * (.78f + .22f * ageNoise);
+            }
+        }
+        denseValues[0] = bestDensity;
+        denseValues[1] = bestAge;
+        denseValues[2] = .78f + .22f * bestAge;
+        denseValues[3] = .90f + .10f * bestAge;
+    }
+
+    private static float valueNoise(float x, float z, float scale, int channel) {
+        double latticeX = x / (double) scale;
+        double latticeZ = z / (double) scale;
+        int x0 = (int) Math.floor(latticeX);
+        int z0 = (int) Math.floor(latticeZ);
+        float fx = smoothFraction((float) (latticeX - x0));
+        float fz = smoothFraction((float) (latticeZ - z0));
+        float a = latticeValue(x0, z0, channel);
+        float b = latticeValue(x0 + 1, z0, channel);
+        float c = latticeValue(x0, z0 + 1, channel);
+        float d = latticeValue(x0 + 1, z0 + 1, channel);
+        float north = a + (b - a) * fx;
+        float south = c + (d - c) * fx;
+        return north + (south - north) * fz;
+    }
+
+    private static float smoothFraction(float value) {
+        return value * value * (3f - 2f * value);
+    }
+
+    private static float latticeValue(int x, int z, int channel) {
+        long key = ((long) x << 32) ^ (z & 0xffffffffL)
+                ^ (long) (channel + 1) * 0x9e3779b97f4a7c15L;
+        return 2f * unit(mix(key)) - 1f;
+    }
+
+    private static float smoothstep(float edge0, float edge1, float value) {
+        float t = Math.max(0f, Math.min(1f, (value - edge0) / (edge1 - edge0)));
+        return t * t * (3f - 2f * t);
     }
 
     private int pageIndex(int cellX, int cellZ) {
