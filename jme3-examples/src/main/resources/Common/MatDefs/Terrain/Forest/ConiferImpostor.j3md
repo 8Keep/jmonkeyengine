@@ -1,0 +1,76 @@
+MaterialDef Original Conifer Impostor {
+    MaterialParameters {
+        TextureArray ConiferColorFrames
+        TextureArray ConiferNormalDepthFrames
+        UniformBufferObject ConiferFrameData
+        Float AlphaDiscardThreshold : 0.42
+        Color SunColor : 4.08407 3.70708 3.01593 1.0
+        Color AmbientColor : 0.34 0.39 0.31 1.0
+        Vector3 SunDirection : -0.35 -0.82 -0.45
+        Boolean UseHeightfieldSkyIrradiance : false
+        Vector3Array SkyIrradianceSH
+
+        Boolean UseDirectionalVisibility : false
+        Boolean DirectionalHardwareShadows : false
+        Int DirectionalCascadeCount : 1
+        Float DirectionalShadowMapSize : 1024.0
+        Float DirectionalShadowBias : 0.0005
+        Float DirectionalShadowStrength : 1.0
+        Color DirectionalShadowSplits
+        Vector3 DirectionalShadowLightDir
+        Vector2 DirectionalShadowFade
+        Texture2D DirectionalShadowMap0
+        Texture2D DirectionalShadowMap1
+        Texture2D DirectionalShadowMap2
+        Texture2D DirectionalShadowMap3
+        Matrix4 DirectionalLightViewProjectionMatrix0
+        Matrix4 DirectionalLightViewProjectionMatrix1
+        Matrix4 DirectionalLightViewProjectionMatrix2
+        Matrix4 DirectionalLightViewProjectionMatrix3
+    }
+
+    Technique {
+        LightMode SinglePassAndImageBased
+
+        VertexShader GLSL300 GLSL150: Common/MatDefs/Terrain/Forest/ConiferImpostor.vert
+        FragmentShader GLSL300 GLSL150: Common/MatDefs/Terrain/Forest/ConiferImpostor.frag
+
+        WorldParameters {
+            WorldViewProjectionMatrix
+            WorldMatrix
+            WorldNormalMatrix
+            ViewMatrix
+            ProjectionMatrix
+            CameraPosition
+        }
+
+        Defines {
+            DIRECTIONAL_VISIBILITY : UseDirectionalVisibility
+            DIRECTIONAL_HARDWARE_SHADOWS : DirectionalHardwareShadows
+            CONIFER_SKY_IRRADIANCE : UseHeightfieldSkyIrradiance
+        }
+    }
+
+    // The light-facing card uses the exact color-pass coverage/depth kernel.
+    Technique PreShadow {
+        VertexShader GLSL300 GLSL150: Common/MatDefs/Terrain/Forest/ConiferImpostor.vert
+        FragmentShader GLSL300 GLSL150: Common/MatDefs/Terrain/Forest/ConiferImpostorPreShadow.frag
+
+        WorldParameters {
+            WorldViewProjectionMatrix
+            WorldMatrix
+            WorldNormalMatrix
+            ViewMatrix
+            ProjectionMatrix
+            CameraPosition
+        }
+
+        ForcedRenderState {
+            FaceCull Back
+            DepthTest On
+            DepthWrite On
+            PolyOffset 5 3
+            ColorWrite Off
+        }
+    }
+}

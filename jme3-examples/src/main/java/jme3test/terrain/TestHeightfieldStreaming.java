@@ -192,7 +192,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     private GpuAtmosphereSkyView skyView;
     private volatile boolean cleanupComplete;
     private HeightfieldGrid patchGrid;
-    private final boolean batchTerrain, forestMode;
+    private final boolean batchTerrain, forestMode, forestImpostors;
     private RegionalConiferForest forest;
     private final Vector3f forestFocus = new Vector3f();
     private RegionalTerrainBatches terrainBatches;
@@ -267,10 +267,11 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     private TestHeightfieldStreaming(Path output, boolean gpuSelectionMode,
             boolean gpuTransitionsMode, boolean profileMode, boolean sourceGradientMode, boolean largeRegionMode,
             boolean synchronousRegionEdits, boolean revisionStress, boolean surfaceCacheMode,
-            boolean validationEnabled, boolean batchTerrain, boolean forestMode, RegionalOptions region) {
+            boolean validationEnabled, boolean batchTerrain, boolean forestMode, boolean forestImpostors, RegionalOptions region) {
         this.output = output;
         this.batchTerrain = batchTerrain;
         this.forestMode = forestMode;
+        this.forestImpostors = forestImpostors;
         this.gpuSelectionMode = gpuSelectionMode;
         this.gpuTransitionsMode = gpuTransitionsMode;
         this.profileMode = profileMode;
@@ -341,7 +342,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         boolean gpuSelectionMode = false;
         boolean gpuTransitionsMode = false;
         boolean profileMode = false;
-        boolean explicitValidation = false, batchTerrain = false, forestMode = false;
+        boolean explicitValidation = false, batchTerrain = false, forestMode = false, forestImpostors = false;
         boolean sourceGradientMode = false, largeRegionMode = false;
         boolean synchronousRegionEdits = false, revisionStress = false, surfaceCacheMode = false;
         boolean regionDetailExplicit = false, synchronousPages = false;
@@ -355,6 +356,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             if ("--gpu-selection".equals(arg)) gpuSelectionMode = true;
             else if ("--gpu-transitions".equals(arg)) gpuTransitionsMode = true;
             else if ("--forest".equals(arg)) forestMode = true;
+            else if ("--forest-impostors".equals(arg)) forestImpostors = true;
             else if ("--batch-terrain".equals(arg)) batchTerrain = true;
             else if ("--profile".equals(arg)) profileMode = true;
             else if ("--validation".equals(arg)) explicitValidation = true;
@@ -385,6 +387,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             else if (arg.startsWith("--")) throw new IllegalArgumentException("Unknown option: " + arg);
             else positional.add(arg);
         }
+        if (forestImpostors && !forestMode) throw new IllegalArgumentException("--forest-impostors requires --forest");
         if (forestMode && !largeRegionMode) {
             throw new IllegalArgumentException("--forest requires --large-region CPU terrain");
         }
@@ -435,7 +438,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                 + " revisionStress=" + revisionStress + " automaticCameraTour=" + (output != null));
         TestHeightfieldStreaming app = new TestHeightfieldStreaming(output, gpuSelectionMode,
                 gpuTransitionsMode, profileMode, sourceGradientMode, largeRegionMode,
-                synchronousRegionEdits, revisionStress, surfaceCacheMode, validationEnabled, batchTerrain, forestMode,
+                synchronousRegionEdits, revisionStress, surfaceCacheMode, validationEnabled, batchTerrain, forestMode, forestImpostors,
                 new RegionalOptions(detail, synchronousPages, plainLighting, sunElevation, regionCells, referenceSky, singleScattering, hemisphereFill, aerialPerspective, skyViewEnabled));
         AppSettings settings = new AppSettings(true);
         settings.setRenderer(rendererName);
@@ -2223,7 +2226,8 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             Material treeMaterial = jme3test.terrain.forest.OriginalConiferMaterial.create(
                     assetManager, sun.getDirection(), sun.getColor(), sky.getColor());
             if (skyIrradiance != null) skyIrradiance.bind(treeMaterial);
-            forest = new RegionalConiferForest(renderer, terrainParent, treeMaterial, capacity);
+            forest = new RegionalConiferForest(renderManager, assetManager, terrainParent, treeMaterial,
+                    capacity, forestImpostors, regionalVisibility::addReceiver);
             regionalVisibility.addReceiver(forest.getMaterial());
         }
         if (aerialPerspective) {
@@ -2433,7 +2437,10 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                 require(residency.stats().frames == 0, "draws drained before image disposal");
             }
             if (forest != null) {
-                if (regionalVisibility != null) regionalVisibility.removeReceiver(forest.getMaterial());
+                if (regionalVisibility != null) {
+                    regionalVisibility.removeReceiver(forest.getMaterial());
+                    if (forest.getFarMaterial() != null) regionalVisibility.removeReceiver(forest.getFarMaterial());
+                }
                 forest.close();
                 forest = null;
             }

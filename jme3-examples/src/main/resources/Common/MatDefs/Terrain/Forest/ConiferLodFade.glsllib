@@ -1,0 +1,16 @@
+// Stable integer screen-door coverage. Mesh/far tests are complementary in
+// each pass; neither geometry uses transparency sorting or fractional blending.
+float ConiferFadeNoise() {
+    uvec2 pixel = uvec2(ivec2(floor(gl_FragCoord.xy)));
+    uint hash = pixel.x * 1664525u + pixel.y * 1013904223u;
+    hash ^= hash >> 16u;
+    hash *= 2246822519u;
+    hash ^= hash >> 13u;
+    return float(hash & 65535u) / 65536.0;
+}
+void ConiferMeshFade(float weight) {
+    if (weight <= 0.0 || (weight < 1.0 && ConiferFadeNoise() >= weight)) discard;
+}
+void ConiferFarFade(float weight) {
+    if (weight <= 0.0 || (weight < 1.0 && ConiferFadeNoise() < 1.0 - weight)) discard;
+}

@@ -49,6 +49,7 @@ public final class TestInstancedConifers {
         renderer.initialize();
         MaterialDef definition = new MaterialDef(null, "conifer-instancing-test");
         definition.addMaterialParam(VarType.Boolean, "UseConiferInstances", false);
+        definition.addMaterialParam(VarType.Boolean, "UseConiferLodFade", false);
         Material template = new Material(definition);
         Node parent = new Node("conifer instances");
         InstancedConifers batch = new InstancedConifers(renderer,
@@ -68,6 +69,7 @@ public final class TestInstancedConifers {
             check(geometry.getQueueBucket() == RenderQueue.Bucket.Opaque, "opaque queue bucket");
             check(geometry.getShadowMode() == RenderQueue.ShadowMode.CastAndReceive, "casts and receives shadows");
             checkRecords(geometry, five, 5);
+            checkFades(geometry, new float[]{1, 1, 1, 1, 1}, 5);
             long grownBytes = batch.getInstanceBufferBytes();
 
             float[] split = {
@@ -80,7 +82,39 @@ public final class TestInstancedConifers {
             check(batch.getInstanceCount() == 3, "count after LOD and cell update");
             check(batch.getInstanceBufferBytes() >= grownBytes, "buffer capacity retained across reuse");
 
+            float[] weighted = {
+                1, 2, 3, 1, 1, 0, .8f,
+                2, 2, 3, 1, 1, 0, .9f,
+                3, 2, 3, 1, 1, 0, 1f,
+                4, 2, 3, 1, 1, 0, .7f,
+                5, 2, 3, 1, 1, 0, .6f,
+                6, 2, 3, 1, 1, 0, .5f,
+                7, 2, 3, 1, 1, 0, .4f,
+                8, 2, 3, 1, 1, 0, .3f,
+                9, 2, 3, 1, 1, 0, .2f
+            };
+            float[] weights = {0f, .125f, .25f, .375f, .5f, .625f, .75f, .875f, 1f};
+            batch.update(weighted, new int[]{0, 0, 0, 0, 0, 0, 0, 0, 0}, weights, 9);
+            check(Boolean.TRUE.equals(batch.getMaterial().getParam("UseConiferLodFade").getValue()),
+                    "weighted update enables mesh fade variant");
+            geometry = (Geometry) parent.getChild(0);
+            checkFades(geometry, weights, 9);
+            long weightedBytes = batch.getInstanceBufferBytes();
+
+            boolean rejected = false;
+            try {
+                batch.update(weighted, new int[]{0, 0, 0, 0, 0, 0, 0, 0, 0},
+                        new float[]{1, 1, 1, 1, 1, 1, 1, 1, Float.NaN}, 9);
+            } catch (IllegalArgumentException expected) {
+                rejected = true;
+            }
+            check(rejected, "non-finite fade weight rejected");
+            check(batch.getInstanceCount() == 9 && batch.getInstanceBufferBytes() == weightedBytes,
+                    "invalid fade update leaves published set unchanged");
+
             batch.update(new float[0], new int[0], 0);
+            check(Boolean.FALSE.equals(batch.getMaterial().getParam("UseConiferLodFade").getValue()),
+                    "legacy update restores mesh fade variant");
             check(batch.getInstanceCount() == 0 && batch.getGroupCount() == 0 && parent.getQuantity() == 0,
                     "empty update detaches all groups");
             check(batch.getInstanceBufferBytes() == grownBytes || batch.getInstanceBufferBytes() > grownBytes,
@@ -109,6 +143,14 @@ public final class TestInstancedConifers {
             check(rotations.get(r) == source[sourceOffset + 4]
                     && rotations.get(r + 1) == source[sourceOffset + 5]
                     && rotations.get(r + 2) == source[sourceOffset + 6], "preserved yaw growth record " + i);
+        }
+    }
+
+    private static void checkFades(Geometry geometry, float[] source, int count) {
+        FloatBuffer fades = (FloatBuffer) geometry.getMesh().getBuffer(VertexBuffer.Type.Size).getData();
+        check(fades.limit() == count, "fade data length");
+        for (int i = 0; i < count; i++) {
+            check(fades.get(i) == source[i], "fade weight record " + i);
         }
     }
 

@@ -64,6 +64,8 @@ public final class InstancedConifers implements AutoCloseable {
     private final Renderer renderer;
     private final OriginalConifer.Asset asset;
     private final Material material;
+    private ConiferImpostor impostor;
+    private Material farMaterial;
     private final Node parent;
     private final Group[] groups;
     private final int[] hashSlots;
@@ -79,6 +81,12 @@ public final class InstancedConifers implements AutoCloseable {
      */
     public InstancedConifers(Renderer renderer, OriginalConifer.Asset sharedAsset,
             Material template, Node parent, int maxInstances) {
+        this(renderer, sharedAsset, template, parent, maxInstances, null);
+    }
+
+    /** Optional elevation-aware far shape; the caller owns its lifetime. */
+    public InstancedConifers(Renderer renderer, OriginalConifer.Asset sharedAsset,
+            Material template, Node parent, int maxInstances, ConiferImpostor impostor) {
         if (renderer == null || sharedAsset == null || template == null || parent == null) {
             throw new IllegalArgumentException("renderer, asset, template, and parent are required");
         }
@@ -91,6 +99,8 @@ public final class InstancedConifers implements AutoCloseable {
         this.renderer = renderer;
         this.asset = sharedAsset;
         this.parent = parent;
+        this.impostor = null;
+        farMaterial = null;
         this.groups = new Group[maxInstances];
         int tableSize = 1;
         long wanted = Math.max(2L, (long) maxInstances * 2);
@@ -101,6 +111,16 @@ public final class InstancedConifers implements AutoCloseable {
         this.hashSlots = new int[tableSize];
         this.material = template.clone();
         this.material.setBoolean("UseConiferInstances", true);
+        if (impostor != null) installImpostor(impostor);
+    }
+
+    /** Install the shared far asset once. The caller retains ownership of it. */
+    public void installImpostor(ConiferImpostor value) {
+        ensureOpen();
+        if (value == null) throw new IllegalArgumentException("impostor is required");
+        if (impostor != null) throw new IllegalStateException("an impostor is already installed");
+        impostor = value;
+        farMaterial = value.getMaterial().clone();
     }
 
     /** Return the one cloned material shared by every active forest group. */
@@ -108,6 +128,9 @@ public final class InstancedConifers implements AutoCloseable {
         ensureOpen();
         return material;
     }
+
+    /** Dedicated far receiver material, or null when this batch has no far shape. */
+    public Material getFarMaterial() { ensureOpen(); return farMaterial; }
 
     /** Number of instances in the latest update. */
     public int getInstanceCount() { return activeInstances; }
@@ -120,15 +143,23 @@ public final class InstancedConifers implements AutoCloseable {
 
     /**
      * Replace the active set from packed records. Each record is
-     * {@code (x,y,z,scale,cosYaw,sinYaw,tint)} and LOD is 0 (near) or 1 (mid).
+     * {@code (x,y,z,scale,cosYaw,sinYaw,tint)} and LOD is 0 (near), 1 (mid), or 2 when a far asset was supplied.
      * Buffers and group objects are reused; direct buffers grow only when an
      * active group exceeds its previous high-water count.
      */
     public void update(float[] packed7, int[] lods, int count) {
+        update(packed7, lods, null, count);
+    }
+
+    /** Replace the active set and attach one fade weight per instance. */
+    public void update(float[] packed7, int[] lods, float[] weights, int count) {
         ensureOpen();
         if (packed7 == null || lods == null || count < 0 || count > groups.length
                 || packed7.length < (long) count * 7 || lods.length < count) {
             throw new IllegalArgumentException("packed instance arrays do not cover count");
+        }
+        if (weights != null && weights.length < count) {
+            throw new IllegalArgumentException("fade weights do not cover count");
         }
         for (int i = 0, offset = 0; i < count; i++, offset += 7) {
             float x = packed7[offset], y = packed7[offset + 1], z = packed7[offset + 2];
@@ -136,7 +167,11 @@ public final class InstancedConifers implements AutoCloseable {
             float cosYaw = packed7[offset + 4], sinYaw = packed7[offset + 5];
             float tint = packed7[offset + 6];
             validateRecord(x, y, z, scale, cosYaw, sinYaw, tint, lods[i], i);
+            if (weights != null && (!Float.isFinite(weights[i]) || weights[i] < 0f || weights[i] > 1f)) {
+                throw new IllegalArgumentException("invalid fade weight at record " + i);
+            }
         }
+        setFadeEnabled(weights != null);
 
         Arrays.fill(hashSlots, -1);
         for (int i = 0; i < allocatedGroups; i++) groups[i].reset();
@@ -150,7 +185,7 @@ public final class InstancedConifers implements AutoCloseable {
             float tint = packed7[offset + 6];
             int cellX = floorCell(x), cellZ = floorCell(z);
             Group group = findOrCreate(cellX, cellZ, lods[i]);
-            group.append(x, y, z, scale, cosYaw, sinYaw, tint);
+            group.append(x, y, z, scale, cosYaw, sinYaw, tint, weights == null ? 1f : weights[i]);
             activeInstances++;
         }
 
@@ -213,22 +248,25 @@ public final class InstancedConifers implements AutoCloseable {
         return (int) cell;
     }
 
-    private static void validateRecord(float x, float y, float z, float scale,
+    private void validateRecord(float x, float y, float z, float scale,
             float cosYaw, float sinYaw, float tint, int lod, int record) {
         if (!Float.isFinite(x) || !Float.isFinite(y) || !Float.isFinite(z)
                 || !Float.isFinite(scale) || scale <= 0
                 || !Float.isFinite(cosYaw) || !Float.isFinite(sinYaw)
-                || !Float.isFinite(tint) || tint < 0 || lod < 0 || lod > 1) {
+                || !Float.isFinite(tint) || tint < 0 || lod < 0 || lod > (impostor == null ? 1 : 2)) {
             throw new IllegalArgumentException("invalid conifer instance record " + record);
         }
         float yawLength2 = cosYaw * cosYaw + sinYaw * sinYaw;
         if (Math.abs(yawLength2 - 1f) > .002f) {
             throw new IllegalArgumentException("yaw pair must be normalized at record " + record);
         }
-        float radius = TREE_RADIUS * scale * (Math.abs(cosYaw) + Math.abs(sinYaw));
+        float radius = lod == 2 ? ConiferImpostor.BOUND_RADIUS * scale
+                : TREE_RADIUS * scale * (Math.abs(cosYaw) + Math.abs(sinYaw));
+        float bottom = lod == 2 ? y + (ConiferImpostorFrames.CENTER_Y - ConiferImpostor.BOUND_RADIUS) * scale : y;
+        float top = lod == 2 ? y + (ConiferImpostorFrames.CENTER_Y + ConiferImpostor.BOUND_RADIUS) * scale : y + TREE_HEIGHT * scale;
         if (!Float.isFinite(radius) || !Float.isFinite(x - radius) || !Float.isFinite(x + radius)
                 || !Float.isFinite(z - radius) || !Float.isFinite(z + radius)
-                || !Float.isFinite(y + TREE_HEIGHT * scale)) {
+                || !Float.isFinite(bottom) || !Float.isFinite(top)) {
             throw new IllegalArgumentException("instance bounds overflow at record " + record);
         }
         double cellX = Math.floor((double) x / GROUP_SIZE_METRES);
@@ -241,6 +279,16 @@ public final class InstancedConifers implements AutoCloseable {
 
     private void ensureOpen() {
         if (closed) throw new IllegalStateException("conifer batch is closed");
+    }
+
+    private void setFadeEnabled(boolean enabled) {
+        if (material.getMaterialDef().getMaterialParam("UseConiferLodFade") != null) {
+            material.setBoolean("UseConiferLodFade", enabled);
+        }
+        if (farMaterial != null
+                && farMaterial.getMaterialDef().getMaterialParam("UseConiferLodFade") != null) {
+            farMaterial.setBoolean("UseConiferLodFade", enabled);
+        }
     }
 
     /**
@@ -271,10 +319,13 @@ public final class InstancedConifers implements AutoCloseable {
         int capacity;
         float[] positions;
         float[] rotations;
+        float[] fades;
         FloatBuffer positionData;
         FloatBuffer rotationData;
+        FloatBuffer fadeData;
         VertexBuffer positionBuffer;
         VertexBuffer rotationBuffer;
+        VertexBuffer fadeBuffer;
         Mesh mesh;
         Geometry geometry;
         final BoundingBox bounds = new BoundingBox();
@@ -293,26 +344,28 @@ public final class InstancedConifers implements AutoCloseable {
         }
 
         void createShape() {
-            Mesh shared = lod == 0 ? asset.getNearMesh() : asset.getMidMesh();
+            Mesh shared = lod == 2 ? impostor.getMesh() : lod == 0 ? asset.getNearMesh() : asset.getMidMesh();
             if (mesh == null) mesh = new Mesh();
             for (Type type : STATIC_TYPES) {
                 mesh.clearBuffer(type);
-                mesh.setBuffer(shared.getBuffer(type));
+                if (shared.getBuffer(type) != null) mesh.setBuffer(shared.getBuffer(type));
             }
             if (capacity == 0) allocateCapacity(1);
             if (mesh.getBuffer(Type.TexCoord2) == null) mesh.setBuffer(positionBuffer);
             if (mesh.getBuffer(Type.TexCoord3) == null) mesh.setBuffer(rotationBuffer);
+            mesh.clearBuffer(Type.Size);
+            mesh.setBuffer(fadeBuffer);
             if (geometry == null) {
                 geometry = new Geometry("conifer-cell-" + cellX + "-" + cellZ + "-lod" + lod, mesh);
             }
-            geometry.setMaterial(material);
+            geometry.setMaterial(lod == 2 ? farMaterial : material);
             geometry.setShadowMode(RenderQueue.ShadowMode.CastAndReceive);
             geometry.setQueueBucket(RenderQueue.Bucket.Opaque);
             geometry.setModelBound(bounds);
         }
 
         void append(float x, float y, float z, float scale,
-                float cosYaw, float sinYaw, float tint) {
+                float cosYaw, float sinYaw, float tint, float fade) {
             ensureCapacity(count + 1);
             int p = count * POSITION_COMPONENTS;
             positions[p] = x;
@@ -323,15 +376,18 @@ public final class InstancedConifers implements AutoCloseable {
             rotations[r] = cosYaw;
             rotations[r + 1] = sinYaw;
             rotations[r + 2] = tint;
-            float radius = TREE_RADIUS * scale * (Math.abs(cosYaw) + Math.abs(sinYaw));
-            float height = TREE_HEIGHT * scale;
+            fades[count] = fade;
+            float radius = lod == 2 ? ConiferImpostor.BOUND_RADIUS * scale
+                    : TREE_RADIUS * scale * (Math.abs(cosYaw) + Math.abs(sinYaw));
+            float bottom = lod == 2 ? y + (ConiferImpostorFrames.CENTER_Y - ConiferImpostor.BOUND_RADIUS) * scale : y;
+            float top = lod == 2 ? y + (ConiferImpostorFrames.CENTER_Y + ConiferImpostor.BOUND_RADIUS) * scale : y + TREE_HEIGHT * scale;
             if (count == 0) {
                 minX = x - radius; maxX = x + radius;
-                minY = y; maxY = y + height;
+                minY = bottom; maxY = top;
                 minZ = z - radius; maxZ = z + radius;
             } else {
                 minX = Math.min(minX, x - radius); maxX = Math.max(maxX, x + radius);
-                minY = Math.min(minY, y); maxY = Math.max(maxY, y + height);
+                minY = Math.min(minY, bottom); maxY = Math.max(maxY, top);
                 minZ = Math.min(minZ, z - radius); maxZ = Math.max(maxZ, z + radius);
             }
             count++;
@@ -347,23 +403,29 @@ public final class InstancedConifers implements AutoCloseable {
         void allocateCapacity(int newCapacity) {
             float[] oldPositions = positions;
             float[] oldRotations = rotations;
+            float[] oldFades = fades;
             FloatBuffer oldPositionData = positionData;
             FloatBuffer oldRotationData = rotationData;
+            FloatBuffer oldFadeData = fadeData;
             if (oldPositionData != null) {
-                bufferBytes -= (long) (oldPositionData.capacity() + oldRotationData.capacity()) * Float.BYTES;
+                bufferBytes -= (long) (oldPositionData.capacity() + oldRotationData.capacity()
+                        + oldFadeData.capacity()) * Float.BYTES;
             }
             capacity = newCapacity;
             positions = new float[capacity * POSITION_COMPONENTS];
             rotations = new float[capacity * ROTATION_COMPONENTS];
+            fades = new float[capacity];
             if (oldPositions != null) {
                 // Keep all records already appended before this growth.
                 System.arraycopy(oldPositions, 0, positions, 0,
                         Math.min(oldPositions.length, positions.length));
                 System.arraycopy(oldRotations, 0, rotations, 0,
                         Math.min(oldRotations.length, rotations.length));
+                System.arraycopy(oldFades, 0, fades, 0, Math.min(oldFades.length, fades.length));
             }
             positionData = BufferUtils.createFloatBuffer(capacity * POSITION_COMPONENTS);
             rotationData = BufferUtils.createFloatBuffer(capacity * ROTATION_COMPONENTS);
+            fadeData = BufferUtils.createFloatBuffer(capacity);
             if (positionBuffer == null) {
                 positionBuffer = new VertexBuffer(Type.TexCoord2);
                 positionBuffer.setupData(Usage.Stream, POSITION_COMPONENTS, Format.Float, positionData);
@@ -378,20 +440,32 @@ public final class InstancedConifers implements AutoCloseable {
             } else {
                 rotationBuffer.updateData(rotationData);
             }
+            if (fadeBuffer == null) {
+                fadeBuffer = new VertexBuffer(Type.Size);
+                fadeBuffer.setupData(Usage.Stream, 1, Format.Float, fadeData);
+                fadeBuffer.setInstanced(true);
+            } else {
+                fadeBuffer.updateData(fadeData);
+            }
             if (oldPositionData != null) BufferUtils.destroyDirectBuffer(oldPositionData);
             if (oldRotationData != null) BufferUtils.destroyDirectBuffer(oldRotationData);
-            bufferBytes += (long) (positionData.capacity() + rotationData.capacity()) * Float.BYTES;
+            if (oldFadeData != null) BufferUtils.destroyDirectBuffer(oldFadeData);
+            bufferBytes += (long) (positionData.capacity() + rotationData.capacity() + fadeData.capacity()) * Float.BYTES;
         }
 
         void publish() {
             positionData.clear();
             rotationData.clear();
+            fadeData.clear();
             positionData.put(positions, 0, count * POSITION_COMPONENTS);
             rotationData.put(rotations, 0, count * ROTATION_COMPONENTS);
+            fadeData.put(fades, 0, count);
             positionData.flip();
             rotationData.flip();
+            fadeData.flip();
             positionBuffer.updateData(positionData);
             rotationBuffer.updateData(rotationData);
+            fadeBuffer.updateData(fadeData);
             mesh.updateCounts();
             bounds.getCenter().set((minX + maxX) * .5f, (minY + maxY) * .5f, (minZ + maxZ) * .5f);
             bounds.setXExtent((maxX - minX) * .5f);
@@ -404,20 +478,26 @@ public final class InstancedConifers implements AutoCloseable {
             if (mesh != null) {
                 mesh.clearBuffer(Type.TexCoord2);
                 mesh.clearBuffer(Type.TexCoord3);
+                mesh.clearBuffer(Type.Size);
             }
             if (positionData != null) {
-                bufferBytes -= (long) (positionData.capacity() + rotationData.capacity()) * Float.BYTES;
+                bufferBytes -= (long) (positionData.capacity() + rotationData.capacity() + fadeData.capacity()) * Float.BYTES;
                 if (positionBuffer != null) renderer.deleteBuffer(positionBuffer);
                 if (rotationBuffer != null) renderer.deleteBuffer(rotationBuffer);
+                if (fadeBuffer != null) renderer.deleteBuffer(fadeBuffer);
                 BufferUtils.destroyDirectBuffer(positionData);
                 BufferUtils.destroyDirectBuffer(rotationData);
+                BufferUtils.destroyDirectBuffer(fadeData);
             }
             positionData = null;
             rotationData = null;
             positionBuffer = null;
             rotationBuffer = null;
+            fadeBuffer = null;
             positions = null;
             rotations = null;
+            fades = null;
+            fadeData = null;
             capacity = 0;
             mesh = null;
         }

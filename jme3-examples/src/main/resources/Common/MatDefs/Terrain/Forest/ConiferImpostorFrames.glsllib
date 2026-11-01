@@ -1,0 +1,92 @@
+// CPU/GLSL selection ABI: 8x8 octahedral grid in layers 0..63,
+// with the explicit +Y zenith view at layer 64.
+const int CONIFER_FRAME_GRID_WIDTH = 8;
+const int CONIFER_FRAME_GRID_HEIGHT = 8;
+const int CONIFER_FRAME_ZENITH = 64;
+
+vec3 ConiferFrameBarycentric(vec2 p, vec2 a, vec2 b, vec2 c) {
+    float denominator = (b.y - c.y) * (a.x - c.x) + (c.x - b.x) * (a.y - c.y);
+    float wa = ((b.y - c.y) * (p.x - c.x) + (c.x - b.x) * (p.y - c.y)) / denominator;
+    float wb = ((c.y - a.y) * (p.x - c.x) + (a.x - c.x) * (p.y - c.y)) / denominator;
+    return vec3(wa, wb, 1.0 - wa - wb);
+}
+
+void ConiferNormalizeFrameWeights(inout vec3 weights) {
+    weights = max(weights, vec3(0.0));
+    float sumWeights = dot(weights, vec3(1.0));
+    weights /= max(sumWeights, 1e-30);
+}
+
+bool ConiferSelectZenithFan(vec2 grid, ivec2 cell, out ivec3 ids, out vec3 weights) {
+    vec2 local = grid - vec2(cell);
+    vec2 poleDelta = local - vec2(0.5);
+    int a = cell.y * CONIFER_FRAME_GRID_WIDTH + cell.x;
+    int b = a + 1;
+    int c = a + CONIFER_FRAME_GRID_WIDTH;
+    int d = c + 1;
+    int first;
+    int second;
+    vec2 p0;
+    vec2 p1;
+    if (abs(poleDelta.x) >= abs(poleDelta.y)) {
+        if (poleDelta.x >= 0.0) { // b -> d -> zenith
+            first = b; second = d; p0 = vec2(1.0, 0.0); p1 = vec2(1.0, 1.0);
+        } else { // c -> a -> zenith
+            first = c; second = a; p0 = vec2(0.0, 1.0); p1 = vec2(0.0, 0.0);
+        }
+    } else if (poleDelta.y >= 0.0) { // d -> c -> zenith
+        first = d; second = c; p0 = vec2(1.0, 1.0); p1 = vec2(0.0, 1.0);
+    } else { // a -> b -> zenith
+        first = a; second = b; p0 = vec2(0.0, 0.0); p1 = vec2(1.0, 0.0);
+    }
+    ids = ivec3(first, second, CONIFER_FRAME_ZENITH);
+    weights = ConiferFrameBarycentric(local, p0, p1, vec2(0.5));
+    ConiferNormalizeFrameWeights(weights);
+    return true;
+}
+
+/**
+ * Select the containing octahedral triangle for a source-local observer
+ * direction. Returns false below the horizon; layer 64 is the explicit pole.
+ */
+bool ConiferSelectFrames(vec3 toObserver, out ivec3 layers, out vec3 weights) {
+    layers = ivec3(-1);
+    weights = vec3(0.0);
+    float lengthSquared = dot(toObserver, toObserver);
+    if (!(lengthSquared > 1e-30) || isnan(lengthSquared) || isinf(lengthSquared)
+            || any(isnan(toObserver)) || any(isinf(toObserver))) return false;
+    vec3 direction = toObserver * inversesqrt(lengthSquared);
+    if (direction.y < 0.0) return false;
+
+    vec3 l1 = abs(direction);
+    float l1sum = l1.x + l1.y + l1.z;
+    vec2 octa = vec2(direction.x + direction.z, direction.x - direction.z) / l1sum;
+    vec2 grid = clamp((octa + vec2(1.0)) * 0.5 * 7.0, vec2(0.0), vec2(7.0));
+    ivec2 cell = min(ivec2(floor(grid)), ivec2(6));
+    vec2 f = grid - vec2(cell);
+    int a = cell.y * CONIFER_FRAME_GRID_WIDTH + cell.x;
+    int b = a + 1;
+    int c = a + CONIFER_FRAME_GRID_WIDTH;
+    int d = c + 1;
+
+    if (cell.x == 3 && cell.y == 3) {
+        return ConiferSelectZenithFan(grid, cell, layers, weights);
+    }
+    if (cell.x + cell.y == CONIFER_FRAME_GRID_WIDTH - 2) {
+        if (f.x + f.y <= 1.0) {
+            layers = ivec3(a, b, c);
+            weights = vec3(1.0 - f.x - f.y, f.x, f.y);
+        } else {
+            layers = ivec3(b, d, c);
+            weights = vec3(1.0 - f.y, f.x + f.y - 1.0, 1.0 - f.x);
+        }
+    } else if (f.x >= f.y) {
+        layers = ivec3(a, b, d);
+        weights = vec3(1.0 - f.x, f.x - f.y, f.y);
+    } else {
+        layers = ivec3(a, d, c);
+        weights = vec3(1.0 - f.y, f.x, f.y - f.x);
+    }
+    ConiferNormalizeFrameWeights(weights);
+    return true;
+}

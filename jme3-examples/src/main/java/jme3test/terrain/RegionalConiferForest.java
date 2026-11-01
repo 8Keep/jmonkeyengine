@@ -32,6 +32,11 @@
 package jme3test.terrain;
 
 import com.jme3.material.Material;
+import com.jme3.asset.AssetManager;
+import com.jme3.renderer.RenderManager;
+import java.util.function.Consumer;
+import jme3test.terrain.forest.ConiferImpostor;
+import jme3test.terrain.forest.ConiferImpostorBaker;
 import com.jme3.math.Vector3f;
 import com.jme3.renderer.Camera;
 import com.jme3.renderer.Renderer;
@@ -66,31 +71,57 @@ final class RegionalConiferForest implements AutoCloseable {
     // Fine source XZ, scale, cosine, sine and tint. Source revision changes only
     // suitability admission, never the seeded position or random identity.
     private final float[] sites = new float[MAX_TREES * 6];
-    private final float[] packed = new float[MAX_TREES * 7];
-    private final int[] lods = new int[MAX_TREES];
+    private final float[] packed = new float[MAX_TREES * 2 * 7];
+    private final float[] weights = new float[MAX_TREES * 2];
+    private final int[] lods = new int[MAX_TREES * 2];
     private final HeightfieldPage[] pages;
     private int[] patchAtCell;
     private int siteCount, sourceCells, lookupSide;
     private long siteRevision = -1, queries, updateNanos, maximumUpdateNanos;
     private float previewHeight, worldOrigin;
     private boolean closed;
+    private final ConiferImpostorBaker baker;
+    private final AssetManager assets;
+    private final Material template;
+    private final Consumer<Material> addReceiver;
+    private ConiferImpostor farAsset;
+    private int farCount, transitionCopies, peakFarCount, peakTransitionCopies, atlasReadyUpdate;
+    private final long bakeStarted = System.nanoTime();
+    private double bakeWallMs;
+    private long activeInstanceTriangles;
     private int updates, nearCount, coarseHidden, revisionBuilds, peakGroups;
     private final long staticMeshBytes, frondMipBytes;
 
-    RegionalConiferForest(Renderer renderer, Node parent, Material template, int pageCapacity) {
-        this.renderer = renderer;
+    RegionalConiferForest(RenderManager manager, AssetManager assets, Node parent, Material template,
+            int pageCapacity, boolean farMode, Consumer<Material> addReceiver) {
+        this.renderer = manager.getRenderer();
+        this.assets = assets;
+        this.template = template;
+        this.addReceiver = addReceiver;
         this.parent = parent;
         asset = OriginalConifer.build(20261031L);
         frondMipBytes = template.getTextureParam("FrondTexture").getTextureValue().getImage().getData(0).capacity();
         staticMeshBytes = meshBytes(asset.getNearMesh()) + meshBytes(asset.getMidMesh());
-        instances = new InstancedConifers(renderer, asset, template, parent, MAX_TREES);
+        instances = new InstancedConifers(renderer, asset, template, parent, MAX_TREES * 2);
+        baker = farMode ? new ConiferImpostorBaker(manager, assets, asset, template) : null;
         pages = new HeightfieldPage[pageCapacity];
     }
 
     Material getMaterial() { return instances.getMaterial(); }
+    Material getFarMaterial() { return instances.getFarMaterial(); }
 
     void update(RegionalHeightfieldSource source, HeightfieldHierarchy hierarchy, long revision,
             List<Patch> patches, Function<HeightfieldHierarchy.Node, HeightfieldPage> pageOf, Camera camera, boolean coverSettled) {
+        if (baker != null && farAsset == null && updates > 0 && baker.update()) {
+            farAsset = new ConiferImpostor(renderer, assets, template,
+                    baker.getColorFrames(), baker.getNormalDepthFrames());
+            instances.installImpostor(farAsset);
+            atlasReadyUpdate = updates;
+            addReceiver.accept(instances.getFarMaterial());
+            bakeWallMs = (System.nanoTime() - bakeStarted) / 1e6;
+            System.out.println("HEIGHTFIELD_FOREST_BAKE_PASS logicalBytes=" + baker.getLogicalBytes()
+                    + " metadataBytes=" + farAsset.getMetadataBytes() + " wallMs=" + bakeWallMs);
+        }
         long begin = System.nanoTime();
         if (siteRevision != revision || sourceCells != source.getCells()) rebuildSites(source, revision);
         int side = hierarchy.getCells() / hierarchy.getPatchCells();
@@ -113,7 +144,8 @@ final class RegionalConiferForest implements AutoCloseable {
             }
         }
         int count = 0;
-        nearCount = coarseHidden = 0;
+        nearCount = coarseHidden = farCount = transitionCopies = 0;
+        activeInstanceTriangles = 0;
         float origin = source.getWorldOrigin();
         for (int i = 0; i < siteCount; i++) {
             int offset = i * 6;
@@ -136,18 +168,49 @@ final class RegionalConiferForest implements AutoCloseable {
             float dy = y - camera.getLocation().y;
             float dz = z + origin - camera.getLocation().z;
             int lod = dx * dx + dy * dy + dz * dz < NEAR_DISTANCE_SQUARED ? 0 : 1;
-            if (lod == 0) nearCount++;
-            int out = count * 7;
-            packed[out] = x; packed[out + 1] = y; packed[out + 2] = z;
-            System.arraycopy(sites, offset + 2, packed, out + 3, 4);
-            lods[count++] = lod;
+            float meshWeight = 1;
+            if (farAsset != null) {
+                Vector3f direction = camera.getDirection();
+                float depth = dx * direction.x + dy * direction.y + dz * direction.z;
+                float pixels = 18 * sites[offset + 2] * camera.getHeight()
+                        * Math.abs(camera.getProjectionMatrix().m11) * .5f;
+                if (!camera.isParallelProjection()) pixels /= Math.max(1, depth);
+                float centerDy = dy + 9 * sites[offset + 2];
+                float distance = (float) Math.sqrt(dx * dx + centerDy * centerDy + dz * dz);
+                float observerUp = distance > 0 ? -centerDy / distance : 0;
+                meshWeight = ConiferImpostor.meshWeight(pixels, distance / sites[offset + 2], observerUp,
+                        -((Vector3f) template.getParam("SunDirection").getValue()).y,
+                        (updates - atlasReadyUpdate) / 20f);
+            }
+            if (meshWeight > 0) {
+                append(count++, offset, x, y, z, lod, meshWeight);
+                if (lod == 0) nearCount++;
+            }
+            if (meshWeight < 1) {
+                append(count++, offset, x, y, z, 2, 1 - meshWeight);
+                farCount++;
+                if (meshWeight > 0) transitionCopies++;
+            }
         }
-        instances.update(packed, lods, count);
+        if (farAsset == null) instances.update(packed, lods, count);
+        else instances.update(packed, lods, weights, count);
         peakGroups = Math.max(peakGroups, instances.getGroupCount());
+        peakFarCount = Math.max(peakFarCount, farCount);
+        peakTransitionCopies = Math.max(peakTransitionCopies, transitionCopies);
         long elapsed = System.nanoTime() - begin;
         updateNanos += elapsed;
         maximumUpdateNanos = Math.max(maximumUpdateNanos, elapsed);
         updates++;
+    }
+
+    private void append(int count, int siteOffset, float x, float y, float z, int lod, float weight) {
+        activeInstanceTriangles += lod == 2 ? 2 : lod == 0
+                ? asset.getNearMesh().getTriangleCount() : asset.getMidMesh().getTriangleCount();
+        int out = count * 7;
+        packed[out] = x; packed[out + 1] = y; packed[out + 2] = z;
+        System.arraycopy(sites, siteOffset + 2, packed, out + 3, 4);
+        lods[count] = lod;
+        weights[count] = weight;
     }
 
     private void rebuildSites(RegionalHeightfieldSource source, long revision) {
@@ -202,6 +265,10 @@ final class RegionalConiferForest implements AutoCloseable {
     }
     long getRevision() { return siteRevision; }
     void printStats() {
+        if (baker != null && farAsset == null) throw new IllegalStateException("far atlas did not finish");
+        System.out.println("HEIGHTFIELD_FOREST_FAR_PASS enabled=" + (baker != null) + " trees=" + farCount
+                + " transitionCopies=" + transitionCopies + " peakFar=" + peakFarCount
+                + " peakTransitionCopies=" + peakTransitionCopies + " activeInstanceTriangles=" + activeInstanceTriangles + " textureBytes=" + (baker == null ? 0 : baker.getLogicalBytes()));
         System.out.printf(Locale.ROOT,
                 "HEIGHTFIELD_FOREST_PASS revision=%d builds=%d sites=%d instances=%d near=%d hiddenCoarse=%d groups=%d peakGroups=%d groundQueries=%d updateMeanMs=%.3f updateMaxMs=%.3f instanceBufferBytes=%d staticMeshBytes=%d sharedFrondMipBytes=%d%n",
                 siteRevision, revisionBuilds, siteCount, instances.getInstanceCount(), nearCount, coarseHidden,
@@ -221,6 +288,8 @@ final class RegionalConiferForest implements AutoCloseable {
         if (closed) return;
         closed = true;
         instances.close();
+        if (farAsset != null) farAsset.close();
+        if (baker != null) baker.close();
         // This controller created these two static assets. Groups merely borrow
         // them, and all opaque/caster users have drained before this close.
         releaseMesh(asset.getNearMesh());

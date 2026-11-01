@@ -2,6 +2,9 @@ MaterialDef Original Conifer {
     MaterialParameters {
         Texture2D FrondTexture
         Float AlphaDiscardThreshold : 0.42
+        Int ConiferBakeMode : 0
+        Vector3 ConiferBakeToObserver : 0.0 0.0 1.0
+        Boolean UseConiferLodFade : false
         Color SunColor : 4.08407 3.70708 3.01593 1.0
         Color AmbientColor : 0.34 0.39 0.31 1.0
         Vector3 SunDirection : -0.35 -0.82 -0.45
@@ -46,6 +49,8 @@ MaterialDef Original Conifer {
             DIRECTIONAL_HARDWARE_SHADOWS : DirectionalHardwareShadows
             CONIFER_INSTANCING : UseConiferInstances
             CONIFER_SKY_IRRADIANCE : UseHeightfieldSkyIrradiance
+            CONIFER_BAKE_MODE : ConiferBakeMode
+            CONIFER_LOD_FADE : UseConiferLodFade
         }
     }
 
@@ -61,6 +66,7 @@ MaterialDef Original Conifer {
 
         Defines {
             CONIFER_INSTANCING : UseConiferInstances
+            CONIFER_LOD_FADE : UseConiferLodFade
         }
 
         ForcedRenderState {

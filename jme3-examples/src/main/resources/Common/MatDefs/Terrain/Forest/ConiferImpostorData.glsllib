@@ -1,0 +1,10 @@
+struct ConiferFrame {
+    vec4 direction;
+    vec4 rightHalfWidth;
+    vec4 upHalfHeight;
+};
+layout(std140) uniform m_ConiferFrameData {
+    vec4 coniferCenter;
+    vec4 coniferExtents;
+    ConiferFrame coniferFrames[65];
+};
