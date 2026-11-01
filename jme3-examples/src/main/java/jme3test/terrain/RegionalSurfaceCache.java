@@ -84,6 +84,7 @@ final class RegionalSurfaceCache implements AutoCloseable {
 
     private final Renderer renderer;
     private final int regionCells;
+    private final RegionalSurfaceSource.Style style;
     private final int tableSide;
     private final int rootBaseStride;
     private final int rootSpanCells;
@@ -131,14 +132,20 @@ final class RegionalSurfaceCache implements AutoCloseable {
     private long maxFrameUploadBytes;
 
     RegionalSurfaceCache(Renderer renderer) {
-        this(renderer, REGION_CELLS);
+        this(renderer, REGION_CELLS, RegionalSurfaceSource.Style.LEGACY);
     }
 
     RegionalSurfaceCache(Renderer renderer, int regionCells) {
+        this(renderer, regionCells, RegionalSurfaceSource.Style.LEGACY);
+    }
+
+    RegionalSurfaceCache(Renderer renderer, int regionCells, RegionalSurfaceSource.Style style) {
         if (regionCells != 1024 && regionCells != 2048) {
             throw new IllegalArgumentException("regional surface cache supports 1024 or 2048 canonical cells");
         }
+        if (style == null) throw new IllegalArgumentException("surface style is required");
         this.regionCells = regionCells;
+        this.style = style;
         maxSourceCacheBytes = 2 * RegionalSurfaceSource.maximumCacheBytes(regionCells);
         tableSide = regionCells / TABLE_CELL_CELLS;
         rootBaseStride = regionCells / (ROOTS_PER_AXIS * PAGE_RESOLUTION);
@@ -507,7 +514,7 @@ final class RegionalSurfaceCache implements AutoCloseable {
         if (Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException();
         RegionalSurfaceSource source = sources.get(key.revision.getHeight());
         if (source == null) {
-            source = new RegionalSurfaceSource(regionCells, key.revision.getHeight());
+            source = new RegionalSurfaceSource(regionCells, key.revision.getHeight(), style);
             sources.put(key.revision.getHeight(), source);
         }
         HeightfieldSurfacePage page = new HeightfieldSurfacePage(key.revision, key.originX, key.originZ,

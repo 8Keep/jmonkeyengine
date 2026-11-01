@@ -42,6 +42,7 @@ final class TestRegionalSurfaceSource {
     public static void main(String[] args) {
         HeightfieldSurfacePage.Revision rev = new HeightfieldSurfacePage.Revision(0, 0, 0);
         RegionalSurfaceSource source = new RegionalSurfaceSource(0);
+        verifyStyles(rev);
         HeightfieldSurfacePage fineWest = page(rev, 0, 0, 1, source);
         HeightfieldSurfacePage fineEast = page(rev, 8, 0, 1, source);
         HeightfieldSurfacePage strideTwo = page(rev, 0, 0, 2, source);
@@ -88,6 +89,69 @@ final class TestRegionalSurfaceSource {
         }
         require(cancelled && Thread.currentThread().isInterrupted(), "sampling cleared or ignored interruption");
         Thread.interrupted();
+    }
+
+    private static void verifyStyles(HeightfieldSurfacePage.Revision revision) {
+        RegionalSurfaceSource legacy = new RegionalSurfaceSource(1024, 0,
+                RegionalSurfaceSource.Style.LEGACY);
+        RegionalSurfaceSource legacyDefault = new RegionalSurfaceSource(0);
+        RegionalSurfaceSource connected = new RegionalSurfaceSource(1024, 0,
+                RegionalSurfaceSource.Style.CONNECTED);
+        RegionalSurfaceSource connectedReplay = new RegionalSurfaceSource(1024, 0,
+                RegionalSurfaceSource.Style.CONNECTED);
+        HeightfieldSurfacePage.Sample old = new HeightfieldSurfacePage.Sample();
+        HeightfieldSurfacePage.Sample defaultSample = new HeightfieldSurfacePage.Sample();
+        HeightfieldSurfacePage.Sample current = new HeightfieldSurfacePage.Sample();
+        HeightfieldSurfacePage.Sample replay = new HeightfieldSurfacePage.Sample();
+        boolean foundNonzeroWeight = false;
+        boolean foundFractionalWeight = false;
+        boolean foundColorDifference = false;
+        for (int z = 48; z <= 976; z += 73) for (int x = 48; x <= 976; x += 71) {
+            legacy.sample(x, z, old);
+            legacyDefault.sample(x, z, defaultSample);
+            connected.sample(x, z, current);
+            connectedReplay.sample(x, z, replay);
+            require(sameSample(old, defaultSample), "legacy constructor remains bit-identical");
+            require(sameSample(current, replay), "connected source replay is deterministic");
+            require(current.normalX == old.normalX && current.normalY == old.normalY
+                            && current.normalZ == old.normalZ,
+                    "material style preserves source micro-normal detail");
+            require(Float.isFinite(current.albedoR) && Float.isFinite(current.albedoG)
+                            && Float.isFinite(current.albedoB) && current.albedoR >= 0 && current.albedoR <= 1
+                            && current.albedoG >= 0 && current.albedoG <= 1
+                            && current.albedoB >= 0 && current.albedoB <= 1,
+                    "connected palette stays finite and normalized");
+            require(Float.isFinite(current.detailWeight) && current.detailWeight >= 0 && current.detailWeight <= 1,
+                    "connected detail weight stays normalized");
+            require(current.roughness == .88f, "connected roughness matches the fallback material");
+            require(current.semanticId == 0 || current.semanticId == 1 || current.semanticId == 3,
+                    "connected semantic IDs retain the compact snow/rock/other categories");
+            if (current.semanticId == 1) require(current.detailWeight > .45f,
+                    "rock semantic threshold follows connected detail coverage");
+            foundNonzeroWeight |= current.detailWeight > 0;
+            foundFractionalWeight |= current.detailWeight > 0 && current.detailWeight < 1;
+            foundColorDifference |= old.albedoR != current.albedoR || old.albedoG != current.albedoG
+                    || old.albedoB != current.albedoB;
+        }
+        require(foundNonzeroWeight && foundFractionalWeight,
+                "connected source exposes continuous nonzero rock detail weight");
+        require(foundColorDifference, "connected palette is distinct from the legacy material");
+        require(RegionalSurfaceSource.maximumCacheBytes(1024) >= connected.getCachedBytes(),
+                "connected source respects the existing bounded tile budget");
+
+        HeightfieldSurfacePage connectedWest = page(revision, 0, 0, 1, connected);
+        HeightfieldSurfacePage connectedEast = page(revision, 8, 0, 1, connected);
+        HeightfieldSurfacePage connectedCoarse = page(revision, 0, 0, 2, connected);
+        compareSharedTexels(connectedWest, connectedEast);
+        compareFootprint(connectedWest, connectedCoarse);
+
+        boolean nullRejected = false;
+        try {
+            new RegionalSurfaceSource(1024, 0, null);
+        } catch (IllegalArgumentException expected) {
+            nullRejected = true;
+        }
+        require(nullRejected, "null style must be rejected");
     }
 
 

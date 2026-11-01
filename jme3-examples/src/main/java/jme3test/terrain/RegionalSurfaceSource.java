@@ -42,6 +42,9 @@ import java.util.concurrent.CancellationException;
  * must not be shared with rendering or metadata workers.
  */
 final class RegionalSurfaceSource implements HeightfieldSurfacePage.Source {
+    /** Selects historical authored pages or the unfiltered shader fallback recipe. */
+    enum Style { LEGACY, CONNECTED }
+
     private static final int TILE_SIDE = 64;
     private static final int HEIGHT_WINDOW_SIDE = TILE_SIDE + 3;
     private static final long HEIGHT_WINDOW_BYTES = (long) HEIGHT_WINDOW_SIDE * HEIGHT_WINDOW_SIDE * Float.BYTES;
@@ -54,6 +57,7 @@ final class RegionalSurfaceSource implements HeightfieldSurfacePage.Source {
 
     // Channels: linear albedo RGB, tangent normal XYZ, roughness, semantic ID, detail weight.
     private final int regionCells;
+    private final Style style;
     private final float[] heightWindow = new float[HEIGHT_WINDOW_SIDE * HEIGHT_WINDOW_SIDE];
     private long heightWindowX, heightWindowZ;
     private final RegionalHeightfieldSource heights;
@@ -77,15 +81,21 @@ final class RegionalSurfaceSource implements HeightfieldSurfacePage.Source {
     }
 
     RegionalSurfaceSource(long revision) {
-        this(RegionalSurfaceCache.REGION_CELLS, revision);
+        this(RegionalSurfaceCache.REGION_CELLS, revision, Style.LEGACY);
     }
 
     RegionalSurfaceSource(int regionCells, long revision) {
+        this(regionCells, revision, Style.LEGACY);
+    }
+
+    RegionalSurfaceSource(int regionCells, long revision, Style style) {
         if (regionCells != 1024 && regionCells != 2048) {
             throw new IllegalArgumentException("regional surface source supports 1024 or 2048 canonical cells");
         }
         if (revision < 0) throw new IllegalArgumentException("revision must be nonnegative");
+        if (style == null) throw new IllegalArgumentException("surface style is required");
         this.regionCells = regionCells;
+        this.style = style;
         this.tileLimit = tileLimit(regionCells);
         this.heights = new RegionalHeightfieldSource(regionCells, revision);
     }
@@ -163,6 +173,10 @@ final class RegionalSurfaceSource implements HeightfieldSurfacePage.Source {
     }
 
     private void compose(int x, int z, float[] out, int p) {
+        if (style == Style.CONNECTED) {
+            composeConnected(x, z, out, p);
+            return;
+        }
         double worldX = x * SPACING + OFFSET_X;
         double worldZ = z * SPACING + OFFSET_Z;
         double centerX = x + .5;
@@ -191,6 +205,46 @@ final class RegionalSurfaceSource implements HeightfieldSurfacePage.Source {
         int semantic = snow > .45 ? 3 : rock > .45 ? 1 : soilBand > .45 ? 2 : 0;
         out[p + 7] = semantic;
 
+        writeMicroNormal(worldX, worldZ, out, p);
+        out[p + 6] = (float) clamp01(.86 - rock * .12 - snow * .19 + (grain - .5) * .05);
+        out[p + 8] = (float) rock;
+        composedSamples++;
+    }
+
+    /** Matches the unfiltered procedural fallback at canonical texel centers. */
+    private void composeConnected(int x, int z, float[] out, int p) {
+        float worldX = (x + .5f) * (float) SPACING;
+        float worldZ = (z + .5f) * (float) SPACING;
+        double centerX = x + .5;
+        double centerZ = z + .5;
+        double h = heightAt(centerX, centerZ);
+        double dx = (heightAt(centerX + 1, centerZ) - heightAt(centerX - 1, centerZ)) / (2 * SPACING);
+        double dz = (heightAt(centerX, centerZ + 1) - heightAt(centerX, centerZ - 1)) / (2 * SPACING);
+        float slope = (float) Math.hypot(dx, dz);
+
+        float exposure = connectedNoise(worldX + 310f, worldZ - 170f, .007f);
+        float patch = connectedNoise(worldX - 90f, worldZ + 230f, .028f);
+        float grain = connectedNoise(worldX + 50f, worldZ - 410f, .14f);
+        float breakup = (exposure - .5f) * .18f + (patch - .5f) * .13f;
+        float rock = smoothstep(.35f, 1.05f, slope + breakup);
+        float snowHeight = (float) h + (exposure - .5f) * 150f + (patch - .5f) * 32f;
+        float snow = smoothstep(175f, 245f, snowHeight) * (1f - smoothstep(.50f, 1.15f, slope));
+        float detailWeight = rock * (1f - snow);
+        float variation = .86f + patch * .20f + grain * .08f;
+
+        out[p] = (.20f * (1f - rock) + .34f * rock) * variation * (1f - snow) + .76f * snow;
+        out[p + 1] = (.35f * (1f - rock) + .33f * rock) * variation * (1f - snow) + .79f * snow;
+        out[p + 2] = (.12f * (1f - rock) + .28f * rock) * variation * (1f - snow) + .84f * snow;
+        out[p + 7] = snow > .45f ? 3 : detailWeight > .45f ? 1 : 0;
+
+        writeMicroNormal(x * SPACING + OFFSET_X, z * SPACING + OFFSET_Z, out, p);
+        out[p + 6] = .88f;
+        out[p + 8] = detailWeight;
+        composedSamples++;
+    }
+
+    /** Retain identical fine source-normal detail across both appearance styles. */
+    private static void writeMicroNormal(double worldX, double worldZ, float[] out, int p) {
         double microX = (noise(worldX * .55 + .13, worldZ * .55)
                 - noise(worldX * .55 - .13, worldZ * .55)) * .24;
         double microZ = (noise(worldX * .55, worldZ * .55 + .13)
@@ -199,9 +253,6 @@ final class RegionalSurfaceSource implements HeightfieldSurfacePage.Source {
         out[p + 3] = (float) (microX * inverse);
         out[p + 4] = (float) inverse;
         out[p + 5] = (float) (microZ * inverse);
-        out[p + 6] = (float) clamp01(.86 - rock * .12 - snow * .19 + (grain - .5) * .05);
-        out[p + 8] = (float) rock;
-        composedSamples++;
     }
 
     /** Bilinear height lookup at fine-lattice cell centers, clamped to terrain. */
@@ -231,6 +282,11 @@ final class RegionalSurfaceSource implements HeightfieldSurfacePage.Source {
         return t * t * (3 - 2 * t);
     }
 
+    private static float smoothstep(float low, float high, float value) {
+        float t = Math.max(0f, Math.min(1f, (value - low) / (high - low)));
+        return t * t * (3f - 2f * t);
+    }
+
     private static double clamp01(double value) {
         return Math.max(0, Math.min(1, value));
     }
@@ -242,6 +298,28 @@ final class RegionalSurfaceSource implements HeightfieldSurfacePage.Source {
         double a = hash(ix, iz) * (1 - fx) + hash(ix + 1, iz) * fx;
         double b = hash(ix, iz + 1) * (1 - fx) + hash(ix + 1, iz + 1) * fx;
         return a * (1 - fz) + b * fz;
+    }
+
+    private static float connectedNoise(float worldX, float worldZ, float frequency) {
+        float x = worldX * frequency;
+        float z = worldZ * frequency;
+        int ix = (int) Math.floor(x), iz = (int) Math.floor(z);
+        float fx = x - ix, fz = z - iz;
+        fx = fx * fx * (3f - 2f * fx);
+        fz = fz * fz * (3f - 2f * fz);
+        float a = connectedHash(ix, iz) * (1f - fx) + connectedHash(ix + 1, iz) * fx;
+        float b = connectedHash(ix, iz + 1) * (1f - fx) + connectedHash(ix + 1, iz + 1) * fx;
+        return a * (1f - fz) + b * fz;
+    }
+
+    private static float connectedHash(int x, int z) {
+        int h = x * 0x9e3779b9 ^ z * 0x85ebca6b;
+        h ^= h >>> 16;
+        h *= 0x85ebca6b;
+        h ^= h >>> 13;
+        h *= 0xc2b2ae35;
+        h ^= h >>> 16;
+        return (h >>> 8) * (1f / 16777216f);
     }
 
     private static double hash(long x, long z) {

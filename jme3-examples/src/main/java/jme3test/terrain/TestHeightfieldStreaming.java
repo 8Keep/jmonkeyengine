@@ -544,7 +544,10 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             if (surfaceCacheMode) {
                 int surfaceCells = regionCells == RegionalHeightfieldSource.FAR_CELLS
                         ? 2048 : regionCells;
-                surfaces = new RegionalSurfaceCache(renderer, surfaceCells);
+                RegionalSurfaceSource.Style style = regionCells == RegionalHeightfieldSource.FAR_CELLS
+                        ? RegionalSurfaceSource.Style.CONNECTED : RegionalSurfaceSource.Style.LEGACY;
+                surfaces = new RegionalSurfaceCache(renderer, surfaceCells, style);
+                System.out.println("HEIGHTFIELD_SURFACE_STYLE style=" + style);
                 surfaces.requestRevision(0);
                 if (regionCells == RegionalHeightfieldSource.FAR_CELLS) {
                     rockDetail = new RegionalRockDetail(assetManager);
