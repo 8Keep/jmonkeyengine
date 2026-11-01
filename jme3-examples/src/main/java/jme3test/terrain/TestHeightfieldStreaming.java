@@ -200,7 +200,8 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     private RegionalTerrainBatches terrainBatches;
     private final List<RetiredTerrainBatches> retiredTerrainBatches = new ArrayList<>();
     private int peakBatchDraws;
-    private List<Node> demandOrder;
+    private List<PageKey> hierarchyPageKeys = Collections.emptyList();
+    private List<PageKey> demandPageKeys = Collections.emptyList();
     private final List<Geometry> spareGeometry = new ArrayList<>();
     private int createdGeometry, peakActiveGeometry;
     private HeightfieldSource source, pendingSource;
@@ -701,11 +702,14 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                 : new HeightfieldLodGpuProbe(assetManager, renderManager, renderer, page);
         lod = new HeightfieldLod(hierarchy);
         transition = new Transition(hierarchy);
-        demandOrder = hierarchy.getNodes();
+        List<Node> demandOrder = hierarchy.getNodes();
         if (largeRegionMode) {
             demandOrder = new ArrayList<>(demandOrder);
             demandOrder.sort(java.util.Comparator.comparingInt(Node::getLevel));
         }
+        List<PageKey> orderedDemandKeys = new ArrayList<>(demandOrder.size());
+        for (Node node : demandOrder) orderedDemandKeys.add(key(node, revision));
+        demandPageKeys = orderedDemandKeys;
         if (batchTerrain) {
             terrainBatches = new RegionalTerrainBatches(renderer, hierarchy, patchGrid, capacity,
                     terrainParent, this::createTerrainMaterial,
@@ -719,10 +723,14 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     private void ensurePageKeyCache() {
         if (pageKeyHierarchy == hierarchy && pageKeyRevision == revision) return;
         Map<Node, PageKey> keys = new IdentityHashMap<>(hierarchy.getNodes().size());
+        List<PageKey> orderedKeys = new ArrayList<>(hierarchy.getNodes().size());
         for (Node node : hierarchy.getNodes()) {
-            keys.put(node, new PageKey(revision, node.getOriginX(), node.getOriginZ(), node.getStride()));
+            PageKey pageKey = new PageKey(revision, node.getOriginX(), node.getOriginZ(), node.getStride());
+            keys.put(node, pageKey);
+            orderedKeys.add(pageKey);
         }
         pageKeys = keys;
+        hierarchyPageKeys = orderedKeys;
         pageKeyHierarchy = hierarchy;
         pageKeyRevision = revision;
     }
@@ -973,8 +981,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             if (profileMode && samplingStopped) {
                 List<PageKey> drainKeys = new ArrayList<>();
                 if (gpuSelectionMode) {
-                    for (Node node : hierarchy.getNodes()) {
-                        PageKey candidate = key(node, revision);
+                    for (PageKey candidate : hierarchyPageKeys) {
                         if (residency.ready(candidate) != null) drainKeys.add(candidate);
                     }
                 } else {
@@ -1040,8 +1047,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             Set<PageKey> retained = new LinkedHashSet<>();
             if (gpuTransitionsMode) {
                 if (gpuFeedbackPending) {
-                    for (Node node : hierarchy.getNodes()) {
-                        PageKey ready = key(node, revision);
+                    for (PageKey ready : hierarchyPageKeys) {
                         if (residency.ready(ready) != null) retained.add(ready);
                     }
                 } else {
@@ -1056,21 +1062,21 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             // Parent-first ordering keeps coarse fallback and sibling transactions useful.
             Set<PageKey> idealAncestors = new LinkedHashSet<>();
             for (Node leaf : ideal.getLeaves()) addAncestors(idealAncestors, leaf, revision);
-            if (!initialMetadataPending) for (Node node : demandOrder) {
-                if (idealAncestors.contains(key(node, revision))) wanted.add(key(node, revision));
+            if (!initialMetadataPending) for (PageKey candidate : demandPageKeys) {
+                if (idealAncestors.contains(candidate)) wanted.add(candidate);
             }
             if (validationEnabled && !initialMetadataPending
                     && frame >= pressureStartFrame && frame < pressureEndFrame) {
                 // Deliberately retain more desired cache pages than the atlas can
                 // hold. This is a finite capacity-pressure test, not useful prefetch.
                 int pressurePages = 0;
-                for (Node node : largeRegionMode ? demandOrder : hierarchy.getNodes()) {
-                    wanted.add(key(node, revision));
+                List<PageKey> pressureOrder = largeRegionMode ? demandPageKeys : hierarchyPageKeys;
+                for (PageKey candidate : pressureOrder) {
+                    wanted.add(candidate);
                     if (largeRegionMode ? ++pressurePages >= capacity + 8 : wanted.size() >= capacity + 8) break;
                 }
             }
-            if (!initialMetadataPending) for (Node node : hierarchy.getNodes()) {
-                PageKey candidate = key(node, revision);
+            if (!initialMetadataPending) for (PageKey candidate : hierarchyPageKeys) {
                 if (!retained.contains(candidate) && !wanted.contains(candidate)) {
                     residency.evict(candidate);
                     residency.cancelPrepared(candidate);
@@ -1145,8 +1151,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             if (gpuSelectionMode) {
                 // GPU instance count stays opaque, so lease every ready page
                 // this frame's complete-cover selector could address.
-                for (Node node : hierarchy.getNodes()) {
-                    PageKey candidate = key(node, revision);
+                for (PageKey candidate : hierarchyPageKeys) {
                     if (residency.ready(candidate) != null) drawKeys.add(candidate);
                 }
             } else {
