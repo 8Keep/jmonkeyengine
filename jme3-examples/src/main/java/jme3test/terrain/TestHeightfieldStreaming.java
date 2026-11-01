@@ -229,6 +229,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     private Selection currentSelection;
     private CameraPath cameraPath;
     private RegionalRockDetail rockDetail;
+    private HeightfieldExplorerControls explorerControls;
     private Camera selectorCamera;
     private final Vector3f selectorLocation = new Vector3f();
     private com.jme3.scene.Node terrainParent;
@@ -499,6 +500,11 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         }
     }
 
+    @Override public void loseFocus() {
+        if (explorerControls != null) explorerControls.clearBoost();
+        super.loseFocus();
+    }
+
     @Override public void handleError(String message, Throwable error) {
         fail(error == null ? new IllegalStateException(message) : error);
     }
@@ -567,6 +573,12 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             addLightingAndCapture();
             cameraPath = new CameraPath();
             cameraPath.apply(0);
+            if (output == null) {
+                setDisplayStatView(false);
+                setDisplayFps(false);
+                explorerControls = new HeightfieldExplorerControls(flyCam, forestMode);
+                stateManager.attach(explorerControls);
+            }
             if (forestMode) {
                 inputManager.addMapping("forest-focus", new com.jme3.input.controls.KeyTrigger(com.jme3.input.KeyInput.KEY_4));
                 inputManager.addListener((com.jme3.input.controls.ActionListener) (name, pressed, tpf) -> {
