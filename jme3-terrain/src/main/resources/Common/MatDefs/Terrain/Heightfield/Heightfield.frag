@@ -30,6 +30,12 @@ uniform float m_TextureScale;
 uniform float m_SnowLine;
 uniform float m_SnowFade;
 uniform vec4 g_AmbientLightColor;
+#ifdef ROCK_DETAIL
+uniform sampler2D m_RockDetailMap;
+uniform vec3 m_RockDetailMean;
+uniform float m_RockDetailWorldScale;
+uniform float m_RockDetailStrength;
+#endif
 #ifdef HEIGHTFIELD_SKY_IRRADIANCE
 uniform bool g_IsFirstLightPass;
 uniform vec3 m_SkyIrradianceSH[9];
@@ -62,11 +68,33 @@ float farMaterialNoise(vec2 position, float frequency, float footprint) {
 }
 #endif
 
-void proceduralMaterial(vec3 worldPosition, vec3 normal, float footprint,
+#ifdef ROCK_DETAIL
+vec3 rockDetailModulation(vec3 position, vec3 normal, vec3 dxPosition, vec3 dyPosition) {
+    float scale = max(m_RockDetailWorldScale, 0.00001);
+    vec3 p = position * scale;
+    vec3 dx = dxPosition * scale;
+    vec3 dy = dyPosition * scale;
+    vec3 weights = abs(normal);
+    weights *= weights;
+    weights *= weights;
+    weights /= max(weights.x + weights.y + weights.z, 0.00001);
+    // Explicit gradients remain defined when this procedural fallback is
+    // evaluated in a nonuniform material-page region branch. Coordinates stay
+    // unwrapped: the sampler performs mirrored repeat after LOD selection.
+    vec3 detail = textureGrad(m_RockDetailMap, p.yz, dx.yz, dy.yz).rgb * weights.x
+            + textureGrad(m_RockDetailMap, p.xz, dx.xz, dy.xz).rgb * weights.y
+            + textureGrad(m_RockDetailMap, p.xy, dx.xy, dy.xy).rgb * weights.z;
+    vec3 modulation = clamp(detail / max(m_RockDetailMean, vec3(0.01)), vec3(0.45), vec3(1.8));
+    return mix(vec3(1.0), modulation, clamp(m_RockDetailStrength, 0.0, 1.0));
+}
+#endif
+
+void proceduralMaterial(vec3 worldPosition, vec3 normal, vec3 dxPosition, vec3 dyPosition,
         out vec3 albedo, out float roughness) {
     #ifdef SURFACE_REGION_FALLBACK
         // Metre-scale fields continue across streamed height pages. Broad
         // exposure/snow variation avoids a perfectly horizontal snow ring.
+        float footprint = max(length(dxPosition.xz), length(dyPosition.xz));
         float exposure = farMaterialNoise(worldPosition.xz + vec2(310.0, -170.0), 0.007, footprint);
         float patches = farMaterialNoise(worldPosition.xz + vec2(-90.0, 230.0), 0.028, footprint);
         float grain = farMaterialNoise(worldPosition.xz + vec2(50.0, -410.0), 0.14, footprint);
@@ -82,7 +110,11 @@ void proceduralMaterial(vec3 worldPosition, vec3 normal, float footprint,
         float steepness = 1.0 - clamp(normal.y, 0.0, 1.0);
         float rockWeight = smoothstep(0.22, 0.68, steepness + breakup);
     #endif
-    vec3 groundColor = mix(m_GrassColor.rgb, m_RockColor.rgb, rockWeight);
+    vec3 rockColor = m_RockColor.rgb;
+    #ifdef ROCK_DETAIL
+        rockColor *= rockDetailModulation(worldPosition, normal, dxPosition, dyPosition);
+    #endif
+    vec3 groundColor = mix(m_GrassColor.rgb, rockColor, rockWeight);
     #ifdef SURFACE_REGION_FALLBACK
         groundColor *= 0.86 + patches * 0.20 + grain * 0.08;
     #else
@@ -105,6 +137,14 @@ void proceduralMaterial(vec3 worldPosition, vec3 normal, float footprint,
 void main() {
     vec3 worldPosition = PBRLightingUtils_getWorldPosition();
     vec3 normal = normalize(PBRLightingUtils_getWorldNormal());
+    // Capture derivatives before any dependent cache or procedural branch.
+    #if defined(HEIGHTFIELD_SURFACE) || defined(ROCK_DETAIL) || defined(SURFACE_REGION_FALLBACK)
+        vec3 dxPosition = dFdx(worldPosition);
+        vec3 dyPosition = dFdy(worldPosition);
+    #else
+        vec3 dxPosition = vec3(0.0);
+        vec3 dyPosition = vec3(0.0);
+    #endif
     PBRSurface surface = PBRLightingUtils_createPBRSurface(
         normalize(g_CameraPosition - worldPosition));
     surface.position = worldPosition;
@@ -114,8 +154,8 @@ void main() {
 
     #ifdef HEIGHTFIELD_SURFACE
         // Compute derivatives before dependent page-table lookup.
-        vec2 dxWorld = dFdx(worldPosition.xz);
-        vec2 dyWorld = dFdy(worldPosition.xz);
+        vec2 dxWorld = dxPosition.xz;
+        vec2 dyWorld = dyPosition.xz;
         #ifdef SURFACE_REGION_FALLBACK
             vec2 regionPosition = worldPosition.xz - m_SurfaceRegionOrigin;
             float edgeDistance = min(min(regionPosition.x, regionPosition.y),
@@ -125,7 +165,7 @@ void main() {
             vec3 fallbackAlbedo = vec3(0.0);
             float fallbackRoughness = 0.0;
             if (cacheWeight < 1.0) {
-                proceduralMaterial(worldPosition, normal, max(length(dxWorld), length(dyWorld)),
+                proceduralMaterial(worldPosition, normal, dxPosition, dyPosition,
                         fallbackAlbedo, fallbackRoughness);
             }
             surface.albedo = fallbackAlbedo;
@@ -179,7 +219,7 @@ void main() {
             }
         #endif
     #else
-        proceduralMaterial(worldPosition, normal, 0.0, surface.albedo, surface.roughness);
+        proceduralMaterial(worldPosition, normal, dxPosition, dyPosition, surface.albedo, surface.roughness);
     #endif
 
     PBRLightingUtils_calculatePreLightingValues(surface);

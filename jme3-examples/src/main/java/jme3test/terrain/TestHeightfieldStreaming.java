@@ -215,6 +215,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     private Transition transition;
     private Selection currentSelection;
     private CameraPath cameraPath;
+    private RegionalRockDetail rockDetail;
     private Camera selectorCamera;
     private final Vector3f selectorLocation = new Vector3f();
     private com.jme3.scene.Node terrainParent;
@@ -509,6 +510,11 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                         ? 2048 : regionCells;
                 surfaces = new RegionalSurfaceCache(renderer, surfaceCells);
                 surfaces.requestRevision(0);
+                if (regionCells == RegionalHeightfieldSource.FAR_CELLS) {
+                    rockDetail = new RegionalRockDetail(assetManager);
+                    System.out.println("HEIGHTFIELD_ROCK_DETAIL baseImageBytes=" + rockDetail.getBaseImageBytes()
+                            + " estimatedRgb8MipBytes=" + rockDetail.getEstimatedMipChainRgb8Bytes());
+                }
             }
             if (largeRegionMode && patchCells > DEFAULT_PATCH_CELLS && !synchronousRegionPages) {
                 pagePreparation = new RegionalPagePreparation(patchCells, MAX_JOBS, regionCells);
@@ -687,6 +693,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         material.setColor("RockColor", new ColorRGBA(.29f, .26f, .22f, 1));
         material.setColor("SnowColor", new ColorRGBA(.83f, .87f, .9f, 1));
         if (skyIrradiance != null) skyIrradiance.bind(material);
+        if (rockDetail != null) rockDetail.bind(material);
         geometry.setMaterial(material);
         if (regionalVisibility != null) regionalVisibility.addReceiver(material);
         configurePatchGeometry(geometry, node);
@@ -2131,6 +2138,14 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         void apply(int f) {
             if (surfaces != null && surfaceActivationFrame >= 0) {
                 int elapsed = f - surfaceActivationFrame;
+                if (regionCells == RegionalHeightfieldSource.FAR_CELLS && elapsed >= 85 && elapsed < 125) {
+                    cam.setParallelProjection(false);
+                    cam.setFrustumPerspective(55, (float) cam.getWidth() / cam.getHeight(), .5f, 6500f);
+                    float y = visibleSurfaceHeight(-1450, 1000, worldHeight(-1450, 1000) + 55);
+                    cam.setLocation(new Vector3f(-1450, y, 1000));
+                    cam.lookAt(new Vector3f(-1450, worldHeight(-1450, 1300), 1300), Vector3f.UNIT_Y);
+                    return;
+                }
                 if (regionCells > 1024 && elapsed >= 125 && elapsed < 170) {
                     cam.setParallelProjection(false);
                     cam.setFrustumPerspective(55, (float) cam.getWidth() / cam.getHeight(), .5f, 2200f);
