@@ -1,4 +1,5 @@
 #import "Common/ShaderLib/GLSLCompat.glsllib"
+#import "Common/MatDefs/Terrain/Forest/ConiferInstance.glsllib"
 
 uniform mat4 g_WorldViewProjectionMatrix;
 uniform mat4 g_WorldMatrix;
@@ -13,12 +14,19 @@ varying vec3 vWorldPosition;
 varying vec3 vWorldNormal;
 varying vec3 vTexCoord;
 varying vec4 vColor;
+varying vec3 vInstanceTint;
 
 void main() {
-    vec4 worldPosition = g_WorldMatrix * vec4(inPosition, 1.0);
+    vec3 localPosition = ConiferInstancePosition(inPosition);
+    vec4 worldPosition = g_WorldMatrix * vec4(localPosition, 1.0);
     vWorldPosition = worldPosition.xyz;
-    vWorldNormal = normalize(g_WorldNormalMatrix * inNormal);
+    vWorldNormal = normalize(g_WorldNormalMatrix * ConiferInstanceNormal(inNormal));
     vTexCoord = inTexCoord;
     vColor = inColor;
+    vInstanceTint = ConiferInstanceTint();
+#ifdef CONIFER_INSTANCING
+    gl_Position = g_WorldViewProjectionMatrix * vec4(localPosition, 1.0);
+#else
     gl_Position = g_WorldViewProjectionMatrix * vec4(inPosition, 1.0);
+#endif
 }

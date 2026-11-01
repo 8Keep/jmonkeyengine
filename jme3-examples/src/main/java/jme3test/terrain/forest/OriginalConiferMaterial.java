@@ -48,9 +48,14 @@ public final class OriginalConiferMaterial {
 
     public static Material create(AssetManager assets) {
         return create(assets, new Vector3f(-.35f, -.82f, -.45f).normalizeLocal(),
-                new ColorRGBA(1.3f, 1.18f, .96f, 1f), new ColorRGBA(.34f, .39f, .31f, 1f));
+                new ColorRGBA(4.08407f, 3.70708f, 3.01593f, 1f),
+                new ColorRGBA(.34f, .39f, .31f, 1f));
     }
 
+    /**
+     * Create the prototype material. {@code sunColor} is linear incident
+     * irradiance; the diffuse shader divides its Lambertian response by pi.
+     */
     public static Material create(AssetManager assets, Vector3f sunDirection,
             ColorRGBA sunColor, ColorRGBA ambientColor) {
         Material material = new Material(assets, DEFINITION);

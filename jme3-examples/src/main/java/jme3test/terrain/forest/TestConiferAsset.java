@@ -57,7 +57,7 @@ public final class TestConiferAsset extends SimpleApplication {
     private static final int HEIGHT = 640;
     private static final int FRAMES_PER_VIEW = 36;
     private static final int FINITE_TIMEOUT_SECONDS = 120;
-    private static final ColorRGBA SUN_COLOR = new ColorRGBA(1.2f, 1.08f, .9f, 1f);
+    private static final ColorRGBA SUN_COLOR = new ColorRGBA(3.76991f, 3.39292f, 2.82743f, 1f);
     private static final ColorRGBA AMBIENT_COLOR = new ColorRGBA(.34f, .39f, .31f, 1f);
     private static final Vector3f SUN_DIRECTION = new Vector3f(-.35f, -.82f, -.45f).normalizeLocal();
     private static final String[] SHOTS = {

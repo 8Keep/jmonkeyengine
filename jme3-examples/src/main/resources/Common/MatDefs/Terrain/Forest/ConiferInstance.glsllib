@@ -1,0 +1,30 @@
+// Shared instance transform for the color and alpha-tested shadow passes.
+#ifdef CONIFER_INSTANCING
+attribute vec4 inTexCoord2; // source-local xyz and uniform scale
+attribute vec3 inTexCoord3; // yaw cosine, yaw sine, scalar tint
+
+vec3 ConiferInstancePosition(vec3 position) {
+    float c = inTexCoord3.x;
+    float s = inTexCoord3.y;
+    vec3 scaled = position * inTexCoord2.w;
+    return vec3(c * scaled.x + s * scaled.z,
+                scaled.y,
+               -s * scaled.x + c * scaled.z) + inTexCoord2.xyz;
+}
+
+vec3 ConiferInstanceNormal(vec3 normal) {
+    float c = inTexCoord3.x;
+    float s = inTexCoord3.y;
+    return vec3(c * normal.x + s * normal.z,
+                normal.y,
+               -s * normal.x + c * normal.z);
+}
+
+vec3 ConiferInstanceTint() {
+    return vec3(inTexCoord3.z);
+}
+#else
+vec3 ConiferInstancePosition(vec3 position) { return position; }
+vec3 ConiferInstanceNormal(vec3 normal) { return normal; }
+vec3 ConiferInstanceTint() { return vec3(1.0); }
+#endif

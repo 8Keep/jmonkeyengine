@@ -148,6 +148,8 @@ import javax.imageio.ImageIO;
  * Both larger sources bootstrap a coarse root while measured metadata prepares.
  * The default 1024-cell control stays at 512 metres. --batch-terrain opts into
  * spatial CPU-remapped instance draws using the same LOD cover and page leases.
+ * --forest adds bounded original groves grounded on the current morphed surface;
+ * it is separate from dense forest streaming and distant impostor acceptance.
  */
 public final class TestHeightfieldStreaming extends SimpleApplication {
     private static final int CELLS = 128, DEFAULT_PATCH_CELLS = 16, DEFAULT_CAPACITY = 32;
@@ -190,7 +192,9 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     private GpuAtmosphereSkyView skyView;
     private volatile boolean cleanupComplete;
     private HeightfieldGrid patchGrid;
-    private final boolean batchTerrain;
+    private final boolean batchTerrain, forestMode;
+    private RegionalConiferForest forest;
+    private final Vector3f forestFocus = new Vector3f();
     private RegionalTerrainBatches terrainBatches;
     private final List<RetiredTerrainBatches> retiredTerrainBatches = new ArrayList<>();
     private int peakBatchDraws;
@@ -263,9 +267,10 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     private TestHeightfieldStreaming(Path output, boolean gpuSelectionMode,
             boolean gpuTransitionsMode, boolean profileMode, boolean sourceGradientMode, boolean largeRegionMode,
             boolean synchronousRegionEdits, boolean revisionStress, boolean surfaceCacheMode,
-            boolean validationEnabled, boolean batchTerrain, RegionalOptions region) {
+            boolean validationEnabled, boolean batchTerrain, boolean forestMode, RegionalOptions region) {
         this.output = output;
         this.batchTerrain = batchTerrain;
+        this.forestMode = forestMode;
         this.gpuSelectionMode = gpuSelectionMode;
         this.gpuTransitionsMode = gpuTransitionsMode;
         this.profileMode = profileMode;
@@ -336,7 +341,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         boolean gpuSelectionMode = false;
         boolean gpuTransitionsMode = false;
         boolean profileMode = false;
-        boolean explicitValidation = false, batchTerrain = false;
+        boolean explicitValidation = false, batchTerrain = false, forestMode = false;
         boolean sourceGradientMode = false, largeRegionMode = false;
         boolean synchronousRegionEdits = false, revisionStress = false, surfaceCacheMode = false;
         boolean regionDetailExplicit = false, synchronousPages = false;
@@ -349,6 +354,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         for (String arg : args) {
             if ("--gpu-selection".equals(arg)) gpuSelectionMode = true;
             else if ("--gpu-transitions".equals(arg)) gpuTransitionsMode = true;
+            else if ("--forest".equals(arg)) forestMode = true;
             else if ("--batch-terrain".equals(arg)) batchTerrain = true;
             else if ("--profile".equals(arg)) profileMode = true;
             else if ("--validation".equals(arg)) explicitValidation = true;
@@ -378,6 +384,9 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             }
             else if (arg.startsWith("--")) throw new IllegalArgumentException("Unknown option: " + arg);
             else positional.add(arg);
+        }
+        if (forestMode && !largeRegionMode) {
+            throw new IllegalArgumentException("--forest requires --large-region CPU terrain");
         }
         if (batchTerrain && !largeRegionMode) {
             throw new IllegalArgumentException("--batch-terrain requires --large-region CPU selection");
@@ -426,7 +435,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                 + " revisionStress=" + revisionStress + " automaticCameraTour=" + (output != null));
         TestHeightfieldStreaming app = new TestHeightfieldStreaming(output, gpuSelectionMode,
                 gpuTransitionsMode, profileMode, sourceGradientMode, largeRegionMode,
-                synchronousRegionEdits, revisionStress, surfaceCacheMode, validationEnabled, batchTerrain,
+                synchronousRegionEdits, revisionStress, surfaceCacheMode, validationEnabled, batchTerrain, forestMode,
                 new RegionalOptions(detail, synchronousPages, plainLighting, sunElevation, regionCells, referenceSky, singleScattering, hemisphereFill, aerialPerspective, skyViewEnabled));
         AppSettings settings = new AppSettings(true);
         settings.setRenderer(rendererName);
@@ -536,6 +545,12 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             addLightingAndCapture();
             cameraPath = new CameraPath();
             cameraPath.apply(0);
+            if (forestMode) {
+                inputManager.addMapping("forest-focus", new com.jme3.input.controls.KeyTrigger(com.jme3.input.KeyInput.KEY_4));
+                inputManager.addListener((com.jme3.input.controls.ActionListener) (name, pressed, tpf) -> {
+                    if (pressed) focusForest();
+                }, "forest-focus");
+            }
         } catch (Throwable error) { fail(error); }
     }
 
@@ -1132,6 +1147,16 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                 }
             } else {
                 syncDrawSet(patches);
+                if (forest != null) {
+                    forest.update((RegionalHeightfieldSource) source, hierarchy, revision, patches, node -> {
+                        Handle handle = residency.ready(key(node, revision));
+                        require(handle != null && residency.isRetained(handle), "forest ground uses retained current pages");
+                        return residency.get(handle);
+                    }, cam, !initialMetadataPending && !transition.isTransitioning()
+                            && !currentSelection.isReadinessLimited()
+                            && displayed.size() == currentSelection.getLeaves().size()
+                            && displayed.containsAll(currentSelection.getLeaves()));
+                }
             }
             if (!validationEnabled && !explorationReadyReported && !initialMetadataPending
                     && (surfaces == null || surfaces.isRevisionReady(revision))
@@ -1941,6 +1966,12 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                     + " allocatedBatches=" + terrainBatches.getAllocatedCount()
                     + " ownedBufferCapacityBytes=" + terrainBatches.getBufferCapacityBytes());
         }
+        if (forest != null) {
+            require(forest.getRevision() == revision
+                            && (forest.getSiteCount() == 0 || forest.getInstanceCount() > 0),
+                    "forest roots follow the published terrain revision");
+            forest.printStats();
+        }
         if (pagePreparation != null) pagePreparation.printStats();
         if (largeRegionMode && patchCells > DEFAULT_PATCH_CELLS) {
             require(!currentSelection.isReadinessLimited() && matchesDesiredCover(currentSelection),
@@ -2188,6 +2219,13 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             shadows.setShadowIntensity(.45f);
             post.addFilter(shadows);
         }
+        if (forestMode) {
+            Material treeMaterial = jme3test.terrain.forest.OriginalConiferMaterial.create(
+                    assetManager, sun.getDirection(), sun.getColor(), sky.getColor());
+            if (skyIrradiance != null) skyIrradiance.bind(treeMaterial);
+            forest = new RegionalConiferForest(renderer, terrainParent, treeMaterial, capacity);
+            regionalVisibility.addReceiver(forest.getMaterial());
+        }
         if (aerialPerspective) {
             aerial = new AtmosphereAerialPerspectiveFilter((GpuAtmosphereSky) atmosphereSky);
             post.addFilter(aerial);
@@ -2212,16 +2250,35 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         }
     }
 
+    /** Jump to an admitted grove without putting the camera inside coarse terrain. */
+    private boolean focusForest() {
+        if (forest == null || forest.previewFocus(forestFocus) == null) return false;
+        float origin = ((RegionalHeightfieldSource) source).getWorldOrigin();
+        float end = origin + regionCells * SPACING;
+        float x = Math.max(origin + 4, Math.min(end - 4, forestFocus.x + 45));
+        float z = Math.max(origin + 4, Math.min(end - 4, forestFocus.z - 65));
+        float y = cameraPath.visibleSurfaceHeight(x, z, cameraPath.worldHeight(x, z) + 45);
+        cam.setParallelProjection(false);
+        cam.setFrustumPerspective(55, (float) cam.getWidth() / cam.getHeight(), .5f,
+                regionCells == RegionalHeightfieldSource.FAR_CELLS ? FAR_VIEW_DISTANCE : 2200f);
+        cam.setLocation(new Vector3f(x, y, z));
+        cam.lookAt(new Vector3f(forestFocus.x, forestFocus.y + 8, forestFocus.z), Vector3f.UNIT_Y);
+        return true;
+    }
+
     private final class CameraPath {
         void apply(int f) {
             if (surfaces != null && surfaceActivationFrame >= 0) {
                 int elapsed = f - surfaceActivationFrame;
+                if (forestMode && regionCells == 2048 && elapsed >= 85 && elapsed < 125 && focusForest()) return;
                 if (regionCells == RegionalHeightfieldSource.FAR_CELLS && elapsed >= 85 && elapsed < 125) {
                     cam.setParallelProjection(false);
                     cam.setFrustumPerspective(55, (float) cam.getWidth() / cam.getHeight(), .5f, FAR_VIEW_DISTANCE);
-                    float y = visibleSurfaceHeight(-1450, 1000, worldHeight(-1450, 1000) + 55);
-                    cam.setLocation(new Vector3f(-1450, y, 1000));
-                    cam.lookAt(new Vector3f(-1450, worldHeight(-1450, 1300), 1300), Vector3f.UNIT_Y);
+                    float x = forestMode ? -1320 : -1450;
+                    float z = 1000;
+                    float y = visibleSurfaceHeight(x, z, worldHeight(x, z) + 55);
+                    cam.setLocation(new Vector3f(x, y, z));
+                    cam.lookAt(new Vector3f(x, worldHeight(x, forestMode ? 1200 : 1300), forestMode ? 1200 : 1300), Vector3f.UNIT_Y);
                     return;
                 }
                 if (regionCells > 1024 && elapsed >= 125 && elapsed < 170) {
@@ -2375,6 +2432,11 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                 }
                 require(residency.stats().frames == 0, "draws drained before image disposal");
             }
+            if (forest != null) {
+                if (regionalVisibility != null) regionalVisibility.removeReceiver(forest.getMaterial());
+                forest.close();
+                forest = null;
+            }
             if (batchTerrain) {
                 if (terrainBatches != null) { terrainBatches.close(); terrainBatches = null; }
                 long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
@@ -2478,6 +2540,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         private void writeCapture(String label) throws Exception {
             if (regionCells == RegionalHeightfieldSource.FAR_CELLS) {
                 float origin = ((RegionalHeightfieldSource) source).getWorldOrigin();
+                if (forest != null) forest.validateWorldOrigin(origin);
                 if (batchTerrain) terrainBatches.validateWorldOrigin(origin, displayed.size());
                 else for (Node node : displayed) {
                     Geometry geometry = geometryByNode.get(node);
