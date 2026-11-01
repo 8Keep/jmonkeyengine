@@ -44,7 +44,6 @@ import com.jme3.scene.Node;
 import com.jme3.terrain.heightfield.HeightfieldHierarchy;
 import com.jme3.terrain.heightfield.HeightfieldLod.Patch;
 import com.jme3.terrain.heightfield.HeightfieldPage;
-import com.jme3.terrain.heightfield.HeightfieldSource;
 import com.jme3.terrain.heightfield.HeightfieldSurfaceSampler;
 import java.util.Arrays;
 import java.util.List;
@@ -55,45 +54,67 @@ import jme3test.terrain.forest.OriginalConifer;
 
 /** Bounded decorative groves attached to the currently displayed terrain surface. */
 final class RegionalConiferForest implements AutoCloseable {
-    private static final int MAX_TREES = 2048;
     private static final float SPACING = RegionalHeightfieldSource.SPACING;
-    private static final float SITE_STEP = 14f;
     private static final float NEAR_DISTANCE_SQUARED = 140f * 140f;
-    private static final float[] GROVES = {
-        .17f, .22f, .34f, .55f, .64f, .26f, .80f, .72f,
-        .42f, .84f, .72f, .48f, .20f, .78f, .53f, .42f
-    };
+    private static final int PAGE_BUILDS_PER_UPDATE = 4;
     private final InstancedConifers instances;
     private final OriginalConifer.Asset asset;
     private final Renderer renderer;
     private final Node parent;
+    private final Vector3f cameraDirection = new Vector3f();
     private final HeightfieldSurfaceSampler sampler = new HeightfieldSurfaceSampler();
     // Fine source XZ, scale, cosine, sine and tint. Source revision changes only
     // suitability admission, never the seeded position or random identity.
-    private final float[] sites = new float[MAX_TREES * 6];
-    private final float[] packed = new float[MAX_TREES * 2 * 7];
-    private final float[] weights = new float[MAX_TREES * 2];
-    private final int[] lods = new int[MAX_TREES * 2];
+    private final float[] sites;
+    private final float[] packed;
+    private final float[] weights;
+    private final int[] lods;
     private final HeightfieldPage[] pages;
     private int[] patchAtCell;
     private int siteCount, sourceCells, lookupSide;
     private long siteRevision = -1, queries, updateNanos, maximumUpdateNanos;
     private float previewHeight, worldOrigin;
     private boolean closed;
-    private final ConiferImpostorBaker baker;
+    private ConiferImpostorBaker baker;
+    private final RenderManager manager;
+    private final boolean farMode;
+    private final float siteStep;
+    private final int maxTrees, pageBudget;
+    private RegionalForestPages placement;
+    private RegionalForestDemand demand;
+    private long copiedLoads = -1, copiedEvictions = -1, rootCacheHits;
+    private int pendingPlacement, maxPageBuilds;
+    private boolean preservePreviousPlacement;
+    private long admissionRevision = -1;
+    private final HeightfieldHierarchy.Node[] rootNodes;
+    private final float[] rootHeights, rootMorphs;
+    private long bakeNanos;
+    private int bakeCalls;
     private final AssetManager assets;
     private final Material template;
     private final Consumer<Material> addReceiver;
     private ConiferImpostor farAsset;
     private int farCount, transitionCopies, peakFarCount, peakTransitionCopies, atlasReadyUpdate;
-    private final long bakeStarted = System.nanoTime();
+    private long bakeStarted;
     private double bakeWallMs;
     private long activeInstanceTriangles;
     private int updates, nearCount, coarseHidden, revisionBuilds, peakGroups;
     private final long staticMeshBytes, frondMipBytes;
 
     RegionalConiferForest(RenderManager manager, AssetManager assets, Node parent, Material template,
-            int pageCapacity, boolean farMode, Consumer<Material> addReceiver) {
+            int pageCapacity, boolean farMode, float siteStep, int pageBudget, Consumer<Material> addReceiver) {
+        this.manager = manager;
+        this.farMode = farMode;
+        this.siteStep = siteStep;
+        this.pageBudget = pageBudget;
+        maxTrees = siteStep < 14 ? 8192 : 2048;
+        sites = new float[maxTrees * 6];
+        packed = new float[maxTrees * 2 * 7];
+        weights = new float[maxTrees * 2];
+        lods = new int[maxTrees * 2];
+        rootNodes = new HeightfieldHierarchy.Node[maxTrees];
+        rootHeights = new float[maxTrees];
+        rootMorphs = new float[maxTrees * 5];
         this.renderer = manager.getRenderer();
         this.assets = assets;
         this.template = template;
@@ -102,8 +123,7 @@ final class RegionalConiferForest implements AutoCloseable {
         asset = OriginalConifer.build(20261031L);
         frondMipBytes = template.getTextureParam("FrondTexture").getTextureValue().getImage().getData(0).capacity();
         staticMeshBytes = meshBytes(asset.getNearMesh()) + meshBytes(asset.getMidMesh());
-        instances = new InstancedConifers(renderer, asset, template, parent, MAX_TREES * 2);
-        baker = farMode ? new ConiferImpostorBaker(manager, assets, asset, template) : null;
+        instances = new InstancedConifers(renderer, asset, template, parent, maxTrees * 2);
         pages = new HeightfieldPage[pageCapacity];
     }
 
@@ -112,18 +132,30 @@ final class RegionalConiferForest implements AutoCloseable {
 
     void update(RegionalHeightfieldSource source, HeightfieldHierarchy hierarchy, long revision,
             List<Patch> patches, Function<HeightfieldHierarchy.Node, HeightfieldPage> pageOf, Camera camera, boolean coverSettled) {
-        if (baker != null && farAsset == null && updates > 0 && baker.update()) {
-            farAsset = new ConiferImpostor(renderer, assets, template,
-                    baker.getColorFrames(), baker.getNormalDepthFrames());
-            instances.installImpostor(farAsset);
-            atlasReadyUpdate = updates;
-            addReceiver.accept(instances.getFarMaterial());
-            bakeWallMs = (System.nanoTime() - bakeStarted) / 1e6;
-            System.out.println("HEIGHTFIELD_FOREST_BAKE_PASS logicalBytes=" + baker.getLogicalBytes()
-                    + " metadataBytes=" + farAsset.getMetadataBytes() + " wallMs=" + bakeWallMs);
-        }
         long begin = System.nanoTime();
-        if (siteRevision != revision || sourceCells != source.getCells()) rebuildSites(source, revision);
+        if (siteRevision != revision || sourceCells != source.getCells()) resetPlacement(source, revision);
+        advancePlacement(source, hierarchy, camera);
+        long bakeElapsed = 0;
+        if (farMode && farAsset == null && siteCount > 0) {
+            long bakeBegin = System.nanoTime();
+            if (baker == null) {
+                baker = new ConiferImpostorBaker(manager, assets, asset, template);
+                bakeStarted = System.nanoTime();
+            }
+            if (baker.update()) {
+                farAsset = new ConiferImpostor(renderer, assets, template,
+                        baker.getColorFrames(), baker.getNormalDepthFrames());
+                instances.installImpostor(farAsset);
+                atlasReadyUpdate = updates;
+                addReceiver.accept(instances.getFarMaterial());
+                bakeWallMs = (System.nanoTime() - bakeStarted) / 1e6;
+                System.out.println("HEIGHTFIELD_FOREST_BAKE_PASS logicalBytes=" + baker.getLogicalBytes()
+                        + " metadataBytes=" + farAsset.getMetadataBytes() + " wallMs=" + bakeWallMs);
+            }
+            bakeElapsed = System.nanoTime() - bakeBegin;
+            bakeNanos += bakeElapsed;
+            bakeCalls++;
+        }
         int side = hierarchy.getCells() / hierarchy.getPatchCells();
         if (side != lookupSide) {
             lookupSide = side;
@@ -147,6 +179,13 @@ final class RegionalConiferForest implements AutoCloseable {
         nearCount = coarseHidden = farCount = transitionCopies = 0;
         activeInstanceTriangles = 0;
         float origin = source.getWorldOrigin();
+        Vector3f direction = camera.getDirection(cameraDirection);
+        Vector3f eye = camera.getLocation();
+        int viewportHeight = camera.getHeight();
+        float projectionY = Math.abs(camera.getProjectionMatrix().m11);
+        float sunUp = -((Vector3f) template.getParam("SunDirection").getValue()).y;
+        float readyFraction = (updates - atlasReadyUpdate) / 20f;
+        boolean parallel = camera.isParallelProjection();
         for (int i = 0; i < siteCount; i++) {
             int offset = i * 6;
             float fineX = sites[offset], fineZ = sites[offset + 1];
@@ -160,27 +199,23 @@ final class RegionalConiferForest implements AutoCloseable {
                 coarseHidden++;
                 continue;
             }
-            float y = (float) sampler.height(patch, pages[index], fineX, fineZ);
+            float y = groundHeight(i, patch, pages[index], fineX, fineZ);
             if (!Float.isFinite(y)) throw new IllegalStateException("forest root height must be finite");
-            queries++;
             float x = fineX * SPACING, z = fineZ * SPACING;
-            float dx = x + origin - camera.getLocation().x;
-            float dy = y - camera.getLocation().y;
-            float dz = z + origin - camera.getLocation().z;
+            float dx = x + origin - eye.x;
+            float dy = y - eye.y;
+            float dz = z + origin - eye.z;
             int lod = dx * dx + dy * dy + dz * dz < NEAR_DISTANCE_SQUARED ? 0 : 1;
             float meshWeight = 1;
             if (farAsset != null) {
-                Vector3f direction = camera.getDirection();
                 float depth = dx * direction.x + dy * direction.y + dz * direction.z;
-                float pixels = 18 * sites[offset + 2] * camera.getHeight()
-                        * Math.abs(camera.getProjectionMatrix().m11) * .5f;
-                if (!camera.isParallelProjection()) pixels /= Math.max(1, depth);
+                float pixels = 18 * sites[offset + 2] * viewportHeight * projectionY * .5f;
+                if (!parallel) pixels /= Math.max(1, depth);
                 float centerDy = dy + 9 * sites[offset + 2];
                 float distance = (float) Math.sqrt(dx * dx + centerDy * centerDy + dz * dz);
                 float observerUp = distance > 0 ? -centerDy / distance : 0;
                 meshWeight = ConiferImpostor.meshWeight(pixels, distance / sites[offset + 2], observerUp,
-                        -((Vector3f) template.getParam("SunDirection").getValue()).y,
-                        (updates - atlasReadyUpdate) / 20f);
+                        sunUp, readyFraction);
             }
             if (meshWeight > 0) {
                 append(count++, offset, x, y, z, lod, meshWeight);
@@ -197,7 +232,7 @@ final class RegionalConiferForest implements AutoCloseable {
         peakGroups = Math.max(peakGroups, instances.getGroupCount());
         peakFarCount = Math.max(peakFarCount, farCount);
         peakTransitionCopies = Math.max(peakTransitionCopies, transitionCopies);
-        long elapsed = System.nanoTime() - begin;
+        long elapsed = System.nanoTime() - begin - bakeElapsed;
         updateNanos += elapsed;
         maximumUpdateNanos = Math.max(maximumUpdateNanos, elapsed);
         updates++;
@@ -213,48 +248,77 @@ final class RegionalConiferForest implements AutoCloseable {
         weights[count] = weight;
     }
 
-    private void rebuildSites(RegionalHeightfieldSource source, long revision) {
+    private void resetPlacement(RegionalHeightfieldSource source, long revision) {
+        preservePreviousPlacement = siteCount > 0 && sourceCells == source.getCells();
+        if (sourceCells != source.getCells()) siteCount = 0;
+        Arrays.fill(rootNodes, null);
         sourceCells = source.getCells();
-        siteCount = 0;
-        float size = sourceCells * SPACING;
-        float radius = Math.max(28f, size * .035f);
-        float radius2 = radius * radius;
-        HeightfieldSource samples = source.pageSamples(2); // Exact point view; do not thrash fine tile cache.
-        int cells = (int) Math.ceil(size / SITE_STEP);
-        for (int z = 0; z < cells && siteCount < MAX_TREES; z++) {
-            for (int x = 0; x < cells && siteCount < MAX_TREES; x++) {
-                long seed = mix(((long) x << 32) ^ (z & 0xffffffffL));
-                if (unit(seed) > .60f) continue;
-                float px = (x + .2f + .6f * unit(mix(seed + 1))) * SITE_STEP;
-                float pz = (z + .2f + .6f * unit(mix(seed + 2))) * SITE_STEP;
-                if (px < 4 || pz < 4 || px > size - 4 || pz > size - 4) continue;
-                boolean inGrove = false;
-                for (int g = 0; g < GROVES.length; g += 2) {
-                    float dx = px - GROVES[g] * size, dz = pz - GROVES[g + 1] * size;
-                    if (dx * dx + dz * dz < radius2) { inGrove = true; break; }
-                }
-                if (!inGrove) continue;
-                int fx = Math.round(px / SPACING), fz = Math.round(pz / SPACING);
-                float height = samples.getHeight(fx, fz);
-                float slopeX = (samples.getHeight(fx + 2, fz) - samples.getHeight(fx - 2, fz)) / (4 * SPACING);
-                float slopeZ = (samples.getHeight(fx, fz + 2) - samples.getHeight(fx, fz - 2)) / (4 * SPACING);
-                // A simple original demo rule, not an ecological simulation.
-                if (height < 12 || height > 185 || slopeX * slopeX + slopeZ * slopeZ > .65f * .65f) continue;
-                if (siteCount == 0) previewHeight = height;
-                int out = siteCount++ * 6;
-                sites[out] = fx; sites[out + 1] = fz;
-                sites[out + 2] = .8f + .35f * unit(mix(seed + 3));
-                double yaw = unit(mix(seed + 4)) * Math.PI * 2;
-                sites[out + 3] = (float) Math.cos(yaw);
-                sites[out + 4] = (float) Math.sin(yaw);
-                sites[out + 5] = .85f + .25f * unit(mix(seed + 5));
-            }
-        }
         siteRevision = revision;
         worldOrigin = source.getWorldOrigin();
+        placement = new RegionalForestPages(source, siteStep, pageBudget, maxTrees);
+        demand = new RegionalForestDemand(placement.getPageCountPerAxis());
+        copiedLoads = copiedEvictions = -1;
         revisionBuilds++;
-        System.out.println("HEIGHTFIELD_FOREST_SITES revision=" + revision + " cells=" + sourceCells
-                + " candidates=" + siteCount + " limit=" + MAX_TREES + " seed=stable-world-cells");
+        System.out.println("HEIGHTFIELD_FOREST_PAGER revision=" + revision + " spacing=" + siteStep
+                + " pageBudget=" + pageBudget + " treeBudget=" + maxTrees);
+    }
+
+    private void advancePlacement(RegionalHeightfieldSource source, HeightfieldHierarchy hierarchy, Camera camera) {
+        RegionalForestDemand.Cell[] order = demand.update(camera, source.getWorldOrigin(),
+                hierarchy.getRoot().getMetadata().getMinimumHeight(), hierarchy.getRoot().getMetadata().getMaximumHeight(),
+                (Vector3f) template.getParam("SunDirection").getValue());
+        placement.beginDemand();
+        long before = placement.getLoads();
+        // A priority-ordered pass protects higher-ranked cells first. A new
+        // close cell may evict a lower-ranked cached cell, even if both are
+        // technically camera-visible. Cached unrequested cells remain casters.
+        for (RegionalForestDemand.Cell cell : order) {
+            if (!placement.mayContainTrees(cell.x, cell.z)) continue;
+            if (placement.peek(cell.x, cell.z) == null
+                    && placement.getLoads() - before >= PAGE_BUILDS_PER_UPDATE) continue;
+            placement.request(cell.x, cell.z);
+        }
+        maxPageBuilds = Math.max(maxPageBuilds, (int) (placement.getLoads() - before));
+        pendingPlacement = 0;
+        for (RegionalForestDemand.Cell cell : order) {
+            if (placement.mayContainTrees(cell.x, cell.z) && placement.peek(cell.x, cell.z) == null) pendingPlacement++;
+        }
+        // Keep the previous eligibility layout while a new revision prepares.
+        // Roots already sample the newly displayed terrain; eligibility swaps
+        // atomically when replacement pages are ready (or explicitly limited).
+        if ((!preservePreviousPlacement || pendingPlacement == 0 || placement.getBudgetLimitedCount() > 0)
+                && (copiedLoads != placement.getLoads() || copiedEvictions != placement.getEvictions())) {
+            siteCount = 0;
+            // Retain cached off-camera cells as real shadow casters. Only pages
+            // evicted by the explicit budget leave the scene.
+            placement.forEachResidentPage(page -> {
+                page.copyRecords(sites, siteCount * 6);
+                siteCount += page.getTreeCount();
+            });
+            Arrays.fill(rootNodes, null);
+            admissionRevision = siteRevision;
+            preservePreviousPlacement = false;
+            copiedLoads = placement.getLoads(); copiedEvictions = placement.getEvictions();
+            if (siteCount > 0) previewHeight = source.pageSamples(2).getHeight((int) sites[0], (int) sites[1]);
+        }
+    }
+
+    private float groundHeight(int site, Patch patch, HeightfieldPage page, float fineX, float fineZ) {
+        int offset = site * 5;
+        if (rootNodes[site] == patch.getNode() && rootMorphs[offset] == patch.getMorph()
+                && rootMorphs[offset + 1] == patch.getEdgeMorph(0)
+                && rootMorphs[offset + 2] == patch.getEdgeMorph(1)
+                && rootMorphs[offset + 3] == patch.getEdgeMorph(2)
+                && rootMorphs[offset + 4] == patch.getEdgeMorph(3)) {
+            rootCacheHits++;
+            return rootHeights[site];
+        }
+        float height = (float) sampler.height(patch, page, fineX, fineZ);
+        rootNodes[site] = patch.getNode(); rootHeights[site] = height;
+        rootMorphs[offset] = patch.getMorph();
+        for (int edge = 0; edge < 4; edge++) rootMorphs[offset + edge + 1] = patch.getEdgeMorph(edge);
+        queries++;
+        return height;
     }
 
     int getInstanceCount() { return instances.getInstanceCount(); }
@@ -265,8 +329,16 @@ final class RegionalConiferForest implements AutoCloseable {
     }
     long getRevision() { return siteRevision; }
     void printStats() {
-        if (baker != null && farAsset == null) throw new IllegalStateException("far atlas did not finish");
-        System.out.println("HEIGHTFIELD_FOREST_FAR_PASS enabled=" + (baker != null) + " trees=" + farCount
+        if (farMode && farAsset == null && siteCount > 0) throw new IllegalStateException("far atlas did not finish");
+        if (maxPageBuilds > PAGE_BUILDS_PER_UPDATE || placement.getResidentPages() > pageBudget
+                || placement.getResidentTrees() > maxTrees) throw new IllegalStateException("placement budget exceeded");
+        System.out.println("HEIGHTFIELD_FOREST_PAGING_PASS pages=" + placement.getResidentPages()
+                + " trees=" + placement.getResidentTrees() + " pageLimit=" + pageBudget + " treeLimit=" + maxTrees
+                + " payloadBytes=" + placement.getPrimitivePayloadBytes() + " loads=" + placement.getLoads()
+                + " evictions=" + placement.getEvictions() + " pending=" + pendingPlacement
+                + " budgetLimited=" + placement.getBudgetLimitedCount() + " maxBuilds=" + maxPageBuilds
+                + " admissionRevision=" + admissionRevision + " rootCacheHits=" + rootCacheHits + " bakeMeanMs=" + bakeNanos / 1e6 / Math.max(1,bakeCalls));
+        System.out.println("HEIGHTFIELD_FOREST_FAR_PASS enabled=" + farMode + " trees=" + farCount
                 + " transitionCopies=" + transitionCopies + " peakFar=" + peakFarCount
                 + " peakTransitionCopies=" + peakTransitionCopies + " activeInstanceTriangles=" + activeInstanceTriangles + " textureBytes=" + (baker == null ? 0 : baker.getLogicalBytes()));
         System.out.printf(Locale.ROOT,
@@ -307,11 +379,5 @@ final class RegionalConiferForest implements AutoCloseable {
             bytes += (long) buffer.getData().capacity() * buffer.getFormat().getComponentSize();
         }
         return bytes;
-    }
-    private static float unit(long value) { return (float) ((value >>> 40) * 0x1.0p-24); }
-    private static long mix(long x) {
-        x = (x ^ (x >>> 30)) * 0xbf58476d1ce4e5b9L;
-        x = (x ^ (x >>> 27)) * 0x94d049bb133111ebL;
-        return x ^ (x >>> 31);
     }
 }

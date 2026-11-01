@@ -72,6 +72,17 @@ public final class TestInstancedConifers {
             checkFades(geometry, new float[]{1, 1, 1, 1, 1}, 5);
             long grownBytes = batch.getInstanceBufferBytes();
 
+            clearInstanceUpdateFlags(geometry);
+            batch.update(five, new int[]{0, 0, 0, 0, 0}, 5);
+            checkInstanceUpdateFlags(geometry, false, false, false,
+                    "identical update does not mark instance buffers dirty");
+
+            five[0] = 1.25f;
+            batch.update(five, new int[]{0, 0, 0, 0, 0}, 5);
+            checkInstanceUpdateFlags(geometry, true, false, false,
+                    "changed position updates only the position stream");
+            checkRecords(geometry, five, 5);
+
             float[] split = {
                 1, 2, 3, 1, 1, 0, .8f,
                 2, 2, 3, 1, 1, 0, .9f,
@@ -152,6 +163,22 @@ public final class TestInstancedConifers {
         for (int i = 0; i < count; i++) {
             check(fades.get(i) == source[i], "fade weight record " + i);
         }
+    }
+
+    private static void clearInstanceUpdateFlags(Geometry geometry) {
+        geometry.getMesh().getBuffer(VertexBuffer.Type.TexCoord2).clearUpdateNeeded();
+        geometry.getMesh().getBuffer(VertexBuffer.Type.TexCoord3).clearUpdateNeeded();
+        geometry.getMesh().getBuffer(VertexBuffer.Type.Size).clearUpdateNeeded();
+    }
+
+    private static void checkInstanceUpdateFlags(Geometry geometry, boolean positions,
+            boolean rotations, boolean fades, String message) {
+        check(geometry.getMesh().getBuffer(VertexBuffer.Type.TexCoord2).isUpdateNeeded() == positions,
+                message + " (positions)");
+        check(geometry.getMesh().getBuffer(VertexBuffer.Type.TexCoord3).isUpdateNeeded() == rotations,
+                message + " (rotations)");
+        check(geometry.getMesh().getBuffer(VertexBuffer.Type.Size).isUpdateNeeded() == fades,
+                message + " (fades)");
     }
 
     private static void check(boolean condition, String message) {

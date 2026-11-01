@@ -193,6 +193,8 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     private volatile boolean cleanupComplete;
     private HeightfieldGrid patchGrid;
     private final boolean batchTerrain, forestMode, forestImpostors;
+    private final float forestSpacing;
+    private final int forestPages;
     private RegionalConiferForest forest;
     private final Vector3f forestFocus = new Vector3f();
     private RegionalTerrainBatches terrainBatches;
@@ -272,6 +274,8 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         this.batchTerrain = batchTerrain;
         this.forestMode = forestMode;
         this.forestImpostors = forestImpostors;
+        forestSpacing = region.forestSpacing;
+        forestPages = region.forestPages;
         this.gpuSelectionMode = gpuSelectionMode;
         this.gpuTransitionsMode = gpuTransitionsMode;
         this.profileMode = profileMode;
@@ -317,15 +321,17 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     private static final class RegionalOptions {
         final RegionalDetail detail;
         final boolean synchronousPages, plainLighting;
-        final float sunElevation;
+        final float sunElevation, forestSpacing;
+        final int forestPages;
         final int regionCells;
         final boolean referenceSky, singleScattering, hemisphereFill, aerialPerspective, skyViewEnabled;
         RegionalOptions(RegionalDetail detail, boolean synchronousPages, boolean plainLighting,
-                float sunElevation, int regionCells, boolean referenceSky, boolean singleScattering, boolean hemisphereFill, boolean aerialPerspective, boolean skyViewEnabled) {
+                float sunElevation, int regionCells, boolean referenceSky, boolean singleScattering, boolean hemisphereFill, boolean aerialPerspective, boolean skyViewEnabled, float forestSpacing, int forestPages) {
             this.detail = detail;
             this.synchronousPages = synchronousPages;
             this.plainLighting = plainLighting;
             this.sunElevation = sunElevation;
+            this.forestSpacing = forestSpacing; this.forestPages = forestPages;
             this.regionCells = regionCells;
             this.referenceSky = referenceSky;
             this.singleScattering = singleScattering;
@@ -347,7 +353,8 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         boolean synchronousRegionEdits = false, revisionStress = false, surfaceCacheMode = false;
         boolean regionDetailExplicit = false, synchronousPages = false;
         boolean plainLighting = false, sunExplicit = false;
-        float sunElevation = 55;
+        float sunElevation = 55, forestSpacing = 14;
+        int forestPages = 96;
         int regionCells = RegionalHeightfieldSource.CELLS;
         boolean regionCellsExplicit = false;
         boolean referenceSky = false, singleScattering = false, hemisphereFill = false, aerialPerspective = false, skyViewEnabled = false;
@@ -357,6 +364,8 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             else if ("--gpu-transitions".equals(arg)) gpuTransitionsMode = true;
             else if ("--forest".equals(arg)) forestMode = true;
             else if ("--forest-impostors".equals(arg)) forestImpostors = true;
+            else if (arg.startsWith("--forest-spacing=")) forestSpacing = Float.parseFloat(arg.substring("--forest-spacing=".length()));
+            else if (arg.startsWith("--forest-pages=")) forestPages = Integer.parseInt(arg.substring("--forest-pages=".length()));
             else if ("--batch-terrain".equals(arg)) batchTerrain = true;
             else if ("--profile".equals(arg)) profileMode = true;
             else if ("--validation".equals(arg)) explicitValidation = true;
@@ -386,6 +395,9 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             }
             else if (arg.startsWith("--")) throw new IllegalArgumentException("Unknown option: " + arg);
             else positional.add(arg);
+        }
+        if (!Float.isFinite(forestSpacing) || forestSpacing < 6 || forestPages < 1 || forestPages > 128) {
+            throw new IllegalArgumentException("forest spacing must be >=6m and page budget1..128");
         }
         if (forestImpostors && !forestMode) throw new IllegalArgumentException("--forest-impostors requires --forest");
         if (forestMode && !largeRegionMode) {
@@ -439,7 +451,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         TestHeightfieldStreaming app = new TestHeightfieldStreaming(output, gpuSelectionMode,
                 gpuTransitionsMode, profileMode, sourceGradientMode, largeRegionMode,
                 synchronousRegionEdits, revisionStress, surfaceCacheMode, validationEnabled, batchTerrain, forestMode, forestImpostors,
-                new RegionalOptions(detail, synchronousPages, plainLighting, sunElevation, regionCells, referenceSky, singleScattering, hemisphereFill, aerialPerspective, skyViewEnabled));
+                new RegionalOptions(detail, synchronousPages, plainLighting, sunElevation, regionCells, referenceSky, singleScattering, hemisphereFill, aerialPerspective, skyViewEnabled, forestSpacing, forestPages));
         AppSettings settings = new AppSettings(true);
         settings.setRenderer(rendererName);
         settings.setResolution(960, 640);
@@ -2227,7 +2239,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                     assetManager, sun.getDirection(), sun.getColor(), sky.getColor());
             if (skyIrradiance != null) skyIrradiance.bind(treeMaterial);
             forest = new RegionalConiferForest(renderManager, assetManager, terrainParent, treeMaterial,
-                    capacity, forestImpostors, regionalVisibility::addReceiver);
+                    capacity, forestImpostors, forestSpacing, forestPages, regionalVisibility::addReceiver);
             regionalVisibility.addReceiver(forest.getMaterial());
         }
         if (aerialPerspective) {

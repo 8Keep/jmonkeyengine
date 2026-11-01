@@ -454,24 +454,45 @@ public final class InstancedConifers implements AutoCloseable {
         }
 
         void publish() {
-            positionData.clear();
-            rotationData.clear();
-            fadeData.clear();
-            positionData.put(positions, 0, count * POSITION_COMPONENTS);
-            rotationData.put(rotations, 0, count * ROTATION_COMPONENTS);
-            fadeData.put(fades, 0, count);
-            positionData.flip();
-            rotationData.flip();
-            fadeData.flip();
-            positionBuffer.updateData(positionData);
-            rotationBuffer.updateData(rotationData);
-            fadeBuffer.updateData(fadeData);
+            int positionCount = count * POSITION_COMPONENTS;
+            int rotationCount = count * ROTATION_COMPONENTS;
+            boolean positionChanged = !matches(positionData, positions, positionCount);
+            boolean rotationChanged = !matches(rotationData, rotations, rotationCount);
+            boolean fadeChanged = !matches(fadeData, fades, count);
+            if (positionChanged) {
+                positionData.clear();
+                positionData.put(positions, 0, positionCount);
+                positionData.flip();
+                positionBuffer.updateData(positionData);
+            }
+            if (rotationChanged) {
+                rotationData.clear();
+                rotationData.put(rotations, 0, rotationCount);
+                rotationData.flip();
+                rotationBuffer.updateData(rotationData);
+            }
+            if (fadeChanged) {
+                fadeData.clear();
+                fadeData.put(fades, 0, count);
+                fadeData.flip();
+                fadeBuffer.updateData(fadeData);
+            }
             mesh.updateCounts();
             bounds.getCenter().set((minX + maxX) * .5f, (minY + maxY) * .5f, (minZ + maxZ) * .5f);
             bounds.setXExtent((maxX - minX) * .5f);
             bounds.setYExtent((maxY - minY) * .5f);
             bounds.setZExtent((maxZ - minZ) * .5f);
             geometry.setModelBound(bounds);
+        }
+
+        boolean matches(FloatBuffer current, float[] values, int length) {
+            if (current == null || current.limit() != length) return false;
+            for (int i = 0; i < length; i++) {
+                if (Float.floatToRawIntBits(current.get(i)) != Float.floatToRawIntBits(values[i])) {
+                    return false;
+                }
+            }
+            return true;
         }
 
         void releaseBuffers() {
