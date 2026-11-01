@@ -80,12 +80,12 @@ public final class HeightfieldProjection {
         }
 
         Vector3f center = worldBounds.getCenter();
-        double[] c = {center.x, center.y, center.z};
-        double[] e = {worldBounds.getXExtent(), worldBounds.getYExtent(), worldBounds.getZExtent()};
-        for (int i = 0; i < 3; i++) {
-            if (!Double.isFinite(c[i]) || !Double.isFinite(e[i]) || e[i] < 0) {
-                throw new IllegalArgumentException("worldBounds must have finite center and extents");
-            }
+        double cx = center.x, cy = center.y, cz = center.z;
+        double ex = worldBounds.getXExtent(), ey = worldBounds.getYExtent(), ez = worldBounds.getZExtent();
+        if (!Double.isFinite(cx) || !Double.isFinite(ex) || ex < 0
+                || !Double.isFinite(cy) || !Double.isFinite(ey) || ey < 0
+                || !Double.isFinite(cz) || !Double.isFinite(ez) || ez < 0) {
+            throw new IllegalArgumentException("worldBounds must have finite center and extents");
         }
 
         Matrix4f matrix = camera.getViewProjectionMatrix();
@@ -113,12 +113,10 @@ public final class HeightfieldProjection {
             return 0;
         }
 
-        double[] low = new double[3];
-        double[] high = new double[3];
+        double radiusX = ex + worldError, radiusY = ey + worldError, radiusZ = ez + worldError;
+        double[] low = {cx - radiusX, cy - radiusY, cz - radiusZ};
+        double[] high = {cx + radiusX, cy + radiusY, cz + radiusZ};
         for (int i = 0; i < 3; i++) {
-            double radius = e[i] + worldError;
-            low[i] = c[i] - radius;
-            high[i] = c[i] + radius;
             if (!Double.isFinite(low[i]) || !Double.isFinite(high[i])) {
                 return Double.POSITIVE_INFINITY;
             }
@@ -127,38 +125,44 @@ public final class HeightfieldProjection {
         // Homogeneous OpenGL clip inequalities: x+w, w-x, y+w, w-y,
         // z+w (near), and w-z (far). Interval tests are outward-rounded by
         // a small relative allowance before using the result for culling.
-        double[][] planes = {
-            add(rows[0], rows[3]), subtract(rows[3], rows[0]),
-            add(rows[1], rows[3]), subtract(rows[3], rows[1]),
-            add(rows[2], rows[3]), subtract(rows[3], rows[2])
-        };
-        for (double[] plane : planes) {
-            Interval range = interval(plane, low, high);
-            if (range == null) {
+        // One call-local output record is reused for all interval queries;
+        // no shared scratch can be overwritten by a nested or concurrent call.
+        Interval range = new Interval();
+        double nearMin = 0;
+        for (int plane = 0; plane < 6; plane++) {
+            double[] row = rows[plane / 2];
+            boolean positive = (plane & 1) == 0;
+            double x = positive ? row[0] + rows[3][0] : rows[3][0] - row[0];
+            double y = positive ? row[1] + rows[3][1] : rows[3][1] - row[1];
+            double z = positive ? row[2] + rows[3][2] : rows[3][2] - row[2];
+            double w = positive ? row[3] + rows[3][3] : rows[3][3] - row[3];
+            if (!interval(x, y, z, w, low, high, range)) {
                 return Double.POSITIVE_INFINITY;
             }
             double tolerance = 1e-12 * Math.max(1, Math.max(Math.abs(range.min), Math.abs(range.max)));
             if (range.max < -tolerance) {
                 return 0;
             }
+            if (plane == 4) nearMin = range.min;
         }
-        Interval near = interval(planes[4], low, high);
-        if (near == null || near.min <= 0) {
+        // Preserve the original precedence: all six cull tests finish before
+        // rejecting a box that reaches the near plane.
+        if (nearMin <= 0) {
             return Double.POSITIVE_INFINITY;
         }
 
-        Interval w = interval(rows[3], low, high);
-        if (w == null || w.min <= 0) {
+        if (!interval(rows[3], low, high, range) || range.min <= 0) {
             return Double.POSITIVE_INFINITY;
         }
-        Interval clipX = interval(rows[0], low, high);
-        Interval clipY = interval(rows[1], low, high);
-        if (clipX == null || clipY == null) {
+        double denominator = range.min;
+        if (!interval(rows[0], low, high, range)) {
             return Double.POSITIVE_INFINITY;
         }
-        double maxAbsX = Math.max(Math.abs(clipX.min), Math.abs(clipX.max));
-        double maxAbsY = Math.max(Math.abs(clipY.min), Math.abs(clipY.max));
-        double denominator = w.min;
+        double maxAbsX = Math.max(Math.abs(range.min), Math.abs(range.max));
+        if (!interval(rows[1], low, high, range)) {
+            return Double.POSITIVE_INFINITY;
+        }
+        double maxAbsY = Math.max(Math.abs(range.min), Math.abs(range.max));
         double denominatorSquared = denominator * denominator;
         if (!Double.isFinite(denominatorSquared) || denominatorSquared == 0) {
             return Double.POSITIVE_INFINITY;
@@ -199,39 +203,34 @@ public final class HeightfieldProjection {
         return result;
     }
 
-    private static double[] add(double[] a, double[] b) {
-        double[] result = new double[4];
-        for (int i = 0; i < 4; i++) result[i] = a[i] + b[i];
-        return result;
+    private static boolean interval(double[] row, double[] low, double[] high, Interval store) {
+        return interval(row[0], row[1], row[2], row[3], low, high, store);
     }
 
-    private static double[] subtract(double[] a, double[] b) {
-        double[] result = new double[4];
-        for (int i = 0; i < 4; i++) result[i] = a[i] - b[i];
-        return result;
-    }
-
-    private static Interval interval(double[] row, double[] low, double[] high) {
-        double min = row[3];
-        double max = row[3];
-        double magnitude = Math.abs(row[3]);
+    private static boolean interval(double x, double y, double z, double w,
+            double[] low, double[] high, Interval store) {
+        double min = w;
+        double max = w;
+        double magnitude = Math.abs(w);
         for (int i = 0; i < 3; i++) {
-            double a = row[i] * low[i];
-            double b = row[i] * high[i];
+            double coefficient = i == 0 ? x : i == 1 ? y : z;
+            double a = coefficient * low[i];
+            double b = coefficient * high[i];
             min += Math.min(a, b);
             max += Math.max(a, b);
             magnitude += Math.max(Math.abs(a), Math.abs(b));
         }
         if (!Double.isFinite(min) || !Double.isFinite(max) || !Double.isFinite(magnitude)) {
-            return null;
+            return false;
         }
         double pad = 1e-12 * Math.max(1, magnitude);
-        return new Interval(min - pad, max + pad);
+        store.min = min - pad;
+        store.max = max + pad;
+        return true;
     }
 
     private static final class Interval {
-        final double min;
-        final double max;
-        Interval(double min, double max) { this.min = min; this.max = max; }
+        double min;
+        double max;
     }
 }
