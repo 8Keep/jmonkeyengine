@@ -762,6 +762,11 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             if (regionCells == RegionalHeightfieldSource.FAR_CELLS && surfaces != null) {
                 material.setBoolean("UseHeightfieldSurfaceRegionFallback", true);
                 material.setFloat("SurfaceRegionFade", 64f);
+                // Align broad colors with cached materials, retaining the far
+                // classification and continuous noise rather than adding soil.
+                material.setColor("GrassColor", new ColorRGBA(.20f, .35f, .12f, 1));
+                material.setColor("RockColor", new ColorRGBA(.34f, .33f, .28f, 1));
+                material.setColor("SnowColor", new ColorRGBA(.76f, .79f, .84f, 1));
             }
         }
         if (regionalVisibility != null) regionalVisibility.addReceiver(material);
