@@ -17,6 +17,8 @@ MaterialDef Heightfield {
         // owns the range/count and keeps page/patch uniforms uniform per batch.
         Boolean UseHeightfieldInstances : false
         Boolean UseHeightfieldInstanceMorphs : false
+        // CPU-remapped instance ordinals from the per-instance Size buffer.
+        Boolean UseHeightfieldCpuInstances : false
         // Physical node-local halo pages; requires instance records and live bindings.
         Boolean UseHeightfieldNodePages : false
         // Optional canonical height-slope samples aligned with node-page layers.
@@ -139,6 +141,7 @@ MaterialDef Heightfield {
             HEIGHTFIELD_LOD : UseHeightfieldLod
             HEIGHTFIELD_INSTANCES : UseHeightfieldInstances
             HEIGHTFIELD_INSTANCE_MORPHS : UseHeightfieldInstanceMorphs
+            HEIGHTFIELD_CPU_INSTANCES : UseHeightfieldCpuInstances
             HEIGHTFIELD_NODE_PAGES : UseHeightfieldNodePages
             HEIGHTFIELD_SOURCE_GRADIENTS : UseHeightfieldSourceGradients
             HEIGHTFIELD_PATCH_RECORD_VECS : PatchRecordVectors
@@ -167,6 +170,7 @@ MaterialDef Heightfield {
             HEIGHTFIELD_LOD : UseHeightfieldLod
             HEIGHTFIELD_INSTANCES : UseHeightfieldInstances
             HEIGHTFIELD_INSTANCE_MORPHS : UseHeightfieldInstanceMorphs
+            HEIGHTFIELD_CPU_INSTANCES : UseHeightfieldCpuInstances
             HEIGHTFIELD_NODE_PAGES : UseHeightfieldNodePages
             HEIGHTFIELD_PATCH_RECORD_VECS : PatchRecordVectors
         }

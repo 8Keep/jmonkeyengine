@@ -146,7 +146,8 @@ import javax.imageio.ImageIO;
  * --region-cells=2048 expands to one kilometre; --region-cells=8192 connects a
  * four-kilometre synthetic landscape around the existing central one-kilometre area.
  * Both larger sources bootstrap a coarse root while measured metadata prepares.
- * The default 1024-cell control stays at 512 metres.
+ * The default 1024-cell control stays at 512 metres. --batch-terrain opts into
+ * spatial CPU-remapped instance draws using the same LOD cover and page leases.
  */
 public final class TestHeightfieldStreaming extends SimpleApplication {
     private static final int CELLS = 128, DEFAULT_PATCH_CELLS = 16, DEFAULT_CAPACITY = 32;
@@ -189,6 +190,10 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     private GpuAtmosphereSkyView skyView;
     private volatile boolean cleanupComplete;
     private HeightfieldGrid patchGrid;
+    private final boolean batchTerrain;
+    private RegionalTerrainBatches terrainBatches;
+    private final List<RetiredTerrainBatches> retiredTerrainBatches = new ArrayList<>();
+    private int peakBatchDraws;
     private List<Node> demandOrder;
     private final List<Geometry> spareGeometry = new ArrayList<>();
     private int createdGeometry, peakActiveGeometry;
@@ -258,8 +263,9 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     private TestHeightfieldStreaming(Path output, boolean gpuSelectionMode,
             boolean gpuTransitionsMode, boolean profileMode, boolean sourceGradientMode, boolean largeRegionMode,
             boolean synchronousRegionEdits, boolean revisionStress, boolean surfaceCacheMode,
-            boolean validationEnabled, RegionalOptions region) {
+            boolean validationEnabled, boolean batchTerrain, RegionalOptions region) {
         this.output = output;
+        this.batchTerrain = batchTerrain;
         this.gpuSelectionMode = gpuSelectionMode;
         this.gpuTransitionsMode = gpuTransitionsMode;
         this.profileMode = profileMode;
@@ -330,7 +336,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         boolean gpuSelectionMode = false;
         boolean gpuTransitionsMode = false;
         boolean profileMode = false;
-        boolean explicitValidation = false;
+        boolean explicitValidation = false, batchTerrain = false;
         boolean sourceGradientMode = false, largeRegionMode = false;
         boolean synchronousRegionEdits = false, revisionStress = false, surfaceCacheMode = false;
         boolean regionDetailExplicit = false, synchronousPages = false;
@@ -343,6 +349,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         for (String arg : args) {
             if ("--gpu-selection".equals(arg)) gpuSelectionMode = true;
             else if ("--gpu-transitions".equals(arg)) gpuTransitionsMode = true;
+            else if ("--batch-terrain".equals(arg)) batchTerrain = true;
             else if ("--profile".equals(arg)) profileMode = true;
             else if ("--validation".equals(arg)) explicitValidation = true;
             else if ("--source-gradients".equals(arg)) sourceGradientMode = true;
@@ -371,6 +378,9 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             }
             else if (arg.startsWith("--")) throw new IllegalArgumentException("Unknown option: " + arg);
             else positional.add(arg);
+        }
+        if (batchTerrain && !largeRegionMode) {
+            throw new IllegalArgumentException("--batch-terrain requires --large-region CPU selection");
         }
         if (largeRegionMode && (gpuSelectionMode || gpuTransitionsMode)) {
             throw new IllegalArgumentException("--large-region uses CPU selection; the GPU ABI remains capped at 85 nodes");
@@ -416,7 +426,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                 + " revisionStress=" + revisionStress + " automaticCameraTour=" + (output != null));
         TestHeightfieldStreaming app = new TestHeightfieldStreaming(output, gpuSelectionMode,
                 gpuTransitionsMode, profileMode, sourceGradientMode, largeRegionMode,
-                synchronousRegionEdits, revisionStress, surfaceCacheMode, validationEnabled,
+                synchronousRegionEdits, revisionStress, surfaceCacheMode, validationEnabled, batchTerrain,
                 new RegionalOptions(detail, synchronousPages, plainLighting, sunElevation, regionCells, referenceSky, singleScattering, hemisphereFill, aerialPerspective, skyViewEnabled));
         AppSettings settings = new AppSettings(true);
         settings.setRenderer(rendererName);
@@ -645,6 +655,11 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
 
     private void rebuildScene() {
         ensurePageKeyCache();
+        if (terrainBatches != null) {
+            terrainBatches.detach();
+            retiredTerrainBatches.add(new RetiredTerrainBatches(terrainBatches, renderer.createFence()));
+            terrainBatches = null;
+        }
         for (Node node : displayed) detachTerrain(geometryByNode.get(node));
         displayed.clear();
         if (largeRegionMode) spareGeometry.addAll(geometryByNode.values());
@@ -660,6 +675,11 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         if (largeRegionMode) {
             demandOrder = new ArrayList<>(demandOrder);
             demandOrder.sort(java.util.Comparator.comparingInt(Node::getLevel));
+        }
+        if (batchTerrain) {
+            terrainBatches = new RegionalTerrainBatches(renderer, hierarchy, patchGrid, capacity,
+                    terrainParent, this::createTerrainMaterial,
+                    material -> { if (regionalVisibility != null) regionalVisibility.removeReceiver(material); });
         }
         if (gpuSelectionMode || largeRegionMode) return;
         for (Node node : hierarchy.getNodes()) geometryByNode.put(node, createPatchGeometry(node));
@@ -682,6 +702,16 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         geometry.setShadowMode(ShadowMode.CastAndReceive);
         // Opaque terrain and shadows finish before Capture.postFrame fences it.
         geometry.setQueueBucket(RenderQueue.Bucket.Opaque);
+        geometry.setMaterial(createTerrainMaterial());
+        configurePatchGeometry(geometry, node);
+        if (largeRegionMode) {
+            createdGeometry++;
+            require(createdGeometry <= capacity, "geometry pool is bounded by physical page capacity");
+        }
+        return geometry;
+    }
+
+    private Material createTerrainMaterial() {
         Material material = new Material(assetManager, "Common/MatDefs/Terrain/Heightfield/Heightfield.j3md");
         material.setBoolean("UseHeightfieldLod", true);
         material.setInt("PageCells", patchCells);
@@ -695,14 +725,35 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         material.setColor("SnowColor", new ColorRGBA(.83f, .87f, .9f, 1));
         if (skyIrradiance != null) skyIrradiance.bind(material);
         if (rockDetail != null) rockDetail.bind(material);
-        geometry.setMaterial(material);
-        if (regionalVisibility != null) regionalVisibility.addReceiver(material);
-        configurePatchGeometry(geometry, node);
+        material.setTexture("HeightPages", atlas);
         if (largeRegionMode) {
-            createdGeometry++;
-            require(createdGeometry <= capacity, "geometry pool is bounded by physical page capacity");
+            material.setTexture("HeightGradientPages", gradientAtlas);
+            material.setBoolean("UseHeightfieldSourceGradients", true);
+            if (regionCells == RegionalHeightfieldSource.FAR_CELLS && surfaces != null) {
+                material.setBoolean("UseHeightfieldSurfaceRegionFallback", true);
+                material.setFloat("SurfaceRegionFade", 64f);
+            }
         }
-        return geometry;
+        if (regionalVisibility != null) regionalVisibility.addReceiver(material);
+        return material;
+    }
+
+    private void pollRetiredTerrainBatches() {
+        for (Iterator<RetiredTerrainBatches> it = retiredTerrainBatches.iterator(); it.hasNext();) {
+            RetiredTerrainBatches retired = it.next();
+            if (!renderer.isFenceSignaled(retired.fence)) continue;
+            retired.batches.close();
+            renderer.deleteFence(retired.fence);
+            it.remove();
+        }
+    }
+
+    private static final class RetiredTerrainBatches {
+        final RegionalTerrainBatches batches;
+        final GLFence fence;
+        RetiredTerrainBatches(RegionalTerrainBatches batches, GLFence fence) {
+            this.batches = batches; this.fence = fence;
+        }
     }
 
     private void configurePatchGeometry(Geometry geometry, Node node) {
@@ -871,6 +922,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             long feedbackStart = profileMode ? System.nanoTime() : 0;
             if (gpuTransitionsMode) pollGpuFeedback();
             if (gpuSelectionMode) pollRetiredGpuResources();
+            if (batchTerrain) pollRetiredTerrainBatches();
             if (profileMode) {
                 recordStage(feedbackPollNanos, System.nanoTime() - feedbackStart, feedbackPollAttempt);
             }
@@ -1523,6 +1575,18 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
     }
 
     private void syncDrawSet(List<Patch> patches) {
+        if (batchTerrain) {
+            terrainBatches.update(patches, node -> {
+                Handle handle = residency.ready(key(node, revision));
+                require(handle != null && residency.isRetained(handle), "batch references a retained slot generation");
+                return handle.getSlot();
+            }, material -> { if (surfaces != null) surfaces.bind(material); });
+            displayed.clear();
+            for (Patch patch : patches) displayed.add(patch.getNode());
+            peakBatchDraws = Math.max(peakBatchDraws, terrainBatches.getDrawCount());
+            peakActiveGeometry = Math.max(peakActiveGeometry, terrainBatches.getDrawCount());
+            return;
+        }
         Set<Node> next = Collections.newSetFromMap(new IdentityHashMap<>());
         for (Patch patch : patches) next.add(patch.getNode());
         if (largeRegionMode) {
@@ -1870,6 +1934,12 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             System.out.println("HEIGHTFIELD_REGION_STARTUP_PASS cells=" + regionCells
                     + " coarseFrames=" + initialPreparingFrames
                     + " initialMetadataCompletedFrame=" + initialMetadataCompletedFrame);
+        }
+        if (batchTerrain) {
+            System.out.println("HEIGHTFIELD_CPU_BATCH_PASS patches=" + displayed.size()
+                    + " draws=" + terrainBatches.getDrawCount() + " peakDraws=" + peakBatchDraws
+                    + " allocatedBatches=" + terrainBatches.getAllocatedCount()
+                    + " ownedBufferCapacityBytes=" + terrainBatches.getBufferCapacityBytes());
         }
         if (pagePreparation != null) pagePreparation.printStats();
         if (largeRegionMode && patchCells > DEFAULT_PATCH_CELLS) {
@@ -2305,6 +2375,15 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                 }
                 require(residency.stats().frames == 0, "draws drained before image disposal");
             }
+            if (batchTerrain) {
+                if (terrainBatches != null) { terrainBatches.close(); terrainBatches = null; }
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (!retiredTerrainBatches.isEmpty() && System.nanoTime() < deadline) {
+                    pollRetiredTerrainBatches();
+                    Thread.yield();
+                }
+                require(retiredTerrainBatches.isEmpty(), "retired batch buffers drained before disposal");
+            }
             if (atmosphereSky != null) atmosphereSky.close(renderer);
             // Discard the physical storage before invalidating its leases.
             if (atlas != null) discardAtlas();
@@ -2399,7 +2478,8 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         private void writeCapture(String label) throws Exception {
             if (regionCells == RegionalHeightfieldSource.FAR_CELLS) {
                 float origin = ((RegionalHeightfieldSource) source).getWorldOrigin();
-                for (Node node : displayed) {
+                if (batchTerrain) terrainBatches.validateWorldOrigin(origin, displayed.size());
+                else for (Node node : displayed) {
                     Geometry geometry = geometryByNode.get(node);
                     Vector3f world = geometry.getWorldTranslation();
                     require(geometry.getParent() == terrainParent

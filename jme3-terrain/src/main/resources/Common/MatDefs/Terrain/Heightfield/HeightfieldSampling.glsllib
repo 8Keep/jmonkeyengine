@@ -4,7 +4,7 @@ precision highp sampler2DArray;
 
 // Instance records use the same page uniforms and LOD reconstruction as the
 // ordinary path. The caller supplies the matching page/patch uniforms, record
-// range, and indirect instance count for each batch.
+// range, and instance count for each batch.
 #ifdef HEIGHTFIELD_INSTANCES
 #ifndef HEIGHTFIELD_LOD
 #define HEIGHTFIELD_LOD
@@ -14,6 +14,16 @@ layout(std140) uniform m_PatchRecords {
     vec4 heightfieldRecords[HEIGHTFIELD_PATCH_RECORD_VECS];
 };
 uniform int m_PatchRecordBase;
+#ifdef HEIGHTFIELD_CPU_INSTANCES
+attribute float inSize;
+#endif
+int Heightfield_instanceIndex() {
+#ifdef HEIGHTFIELD_CPU_INSTANCES
+    return int(floor(inSize + 0.5));
+#else
+    return gl_InstanceID;
+#endif
+}
 #ifdef HEIGHTFIELD_NODE_PAGES
 layout(std140) uniform m_HeightfieldPageBindings {
     ivec4 heightfieldPageLayers[85]; // own layer, parent layer, reserved, reserved
@@ -77,9 +87,9 @@ float Heightfield_readGlobalHeight(ivec2 globalGrid) {
 #ifdef HEIGHTFIELD_NODE_PAGES
 vec4 Heightfield_instancePatch() {
 #ifdef HEIGHTFIELD_INSTANCE_MORPHS
-    return heightfieldRecords[m_PatchRecordBase + 4 * gl_InstanceID];
+    return heightfieldRecords[m_PatchRecordBase + 4 * Heightfield_instanceIndex()];
 #else
-    return heightfieldRecords[m_PatchRecordBase + 2 * gl_InstanceID];
+    return heightfieldRecords[m_PatchRecordBase + 2 * Heightfield_instanceIndex()];
 #endif
 }
 
@@ -97,12 +107,14 @@ vec3 Heightfield_lodGradient(ivec2 globalGrid, bool parent) {
     int stride = int(patchRecord.w);
     ivec2 origin = ivec2(patchRecord.yz);
     int layer = heightfieldPageLayers[node].x;
+#ifndef HEIGHTFIELD_CPU_INSTANCES
     if (parent && node != 0) {
         int span = m_PatchGridCells * stride * 2;
         origin = (origin / span) * span;
         stride *= 2;
         layer = heightfieldPageLayers[node].y;
     }
+#endif
     ivec2 grid = (globalGrid - Heightfield_pageOrigin() - origin) / stride;
 #ifdef HEIGHTFIELD_SOURCE_GRADIENTS
     // RG stores canonical half-height differences, without node-stride division.
@@ -248,7 +260,7 @@ vec3 Heightfield_lodPosition(ivec2 patchVertex, out ivec2 globalGrid,
                             out ivec2 parentGrid, out float alpha) {
 #ifdef HEIGHTFIELD_INSTANCES
 #ifdef HEIGHTFIELD_INSTANCE_MORPHS
-    int firstRecord = m_PatchRecordBase + 4 * gl_InstanceID;
+    int firstRecord = m_PatchRecordBase + 4 * Heightfield_instanceIndex();
     // Four-vec4 layout: node/origin/stride, span/flags/error/revision,
     // interior/west/east/south weights, then north weight.
     vec4 patchData = heightfieldRecords[firstRecord];
@@ -258,7 +270,7 @@ vec3 Heightfield_lodPosition(ivec2 patchVertex, out ivec2 globalGrid,
     return Heightfield_lodPosition(patchVertex, ivec2(patchData.y, patchData.z), int(patchData.w),
             m_PatchGridCells, morphWeights.x, edgeMorph, globalGrid, parentGrid, alpha);
 #else
-    int firstRecord = m_PatchRecordBase + 2 * gl_InstanceID;
+    int firstRecord = m_PatchRecordBase + 2 * Heightfield_instanceIndex();
     // Pair layout: id/originX/originZ/stride, then span/edgeBits/error/revision.
     vec4 patchData = heightfieldRecords[firstRecord];
     vec4 details = heightfieldRecords[firstRecord + 1];
