@@ -355,8 +355,8 @@ public final class TestHeightfieldSurfaceLandscape extends SimpleApplication {
 
     private void initStorage() {
         pool = new HeightfieldSurfaceResidency(RESOLUTION, MIPS,
-                new HeightfieldSurfaceResidency.Limits(SLOTS, 12, 12L * 1840 * 29,
-                        12L * 1840 * 29, 1, 1840L * 25, SLOTS, 8));
+                new HeightfieldSurfaceResidency.Limits(SLOTS, 12, 12L * 1840 * HeightfieldSurfacePage.CPU_BYTES_PER_TEXEL,
+                        12L * 1840 * HeightfieldSurfacePage.CPU_BYTES_PER_TEXEL, 1, 1840L * 25, SLOTS, 8));
         albedoPages = atlas(Image.Format.RGBA16F, 8, false);
         normalPages = atlas(Image.Format.RGBA32F, 16, false);
         semanticPages = atlas(Image.Format.Luminance8, 1, true);

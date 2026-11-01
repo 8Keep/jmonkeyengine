@@ -30,6 +30,7 @@
  */
 package com.jme3.terrain.heightfield;
 
+import com.jme3.math.FastMath;
 import com.jme3.texture.Image;
 import java.nio.ByteBuffer;
 import org.junit.jupiter.api.Test;
@@ -101,11 +102,38 @@ class HeightfieldSurfacePageTest {
     }
 
     @Test
+    void detailWeightDefaultsToOneAndFiltersThroughMipsAndGutters() {
+        HeightfieldSurfacePage legacy = page(0, 0, 8, 1, 2, WORLD);
+        assertEquals(1f, legacy.getDetailWeight(0, 0, 0));
+        assertEquals(1f, legacy.getDetailWeight(1, -1, 0));
+
+        HeightfieldSurfacePage weighted = page(0, 0, 8, 1, 2, (x, z, s) -> {
+            s.albedoR = s.albedoG = s.albedoB = .5f;
+            s.normalY = 1;
+            s.roughness = .5f;
+            s.semanticId = 1;
+            // The odd-x callback intentionally leaves the field untouched.
+            // It must see the compatibility default, not the prior callback's 0.
+            if (Math.floorMod(x, 2) == 0) {
+                s.detailWeight = 0;
+            }
+        });
+        assertEquals(0f, weighted.getDetailWeight(0, 0, 0));
+        assertEquals(1f, weighted.getDetailWeight(0, 1, 0));
+        assertEquals(.5f, weighted.getDetailWeight(1, 0, 0));
+        assertEquals(.5f, weighted.getDetailWeight(1, -1, 0));
+
+        ByteBuffer encoded = weighted.createAlbedoImage(1).getData(0);
+        int alphaOffset = (weighted.getTextureSize(1) * 2 + 2) * 8 + 6;
+        assertEquals(.5f, FastMath.convertHalfToFloat(encoded.getShort(alphaOffset)), 1e-3f);
+    }
+
+    @Test
     void reportsWorkAndOwnsInputsAndReturnedImages() {
         HeightfieldSurfacePage p = page(0, 0, 8, 1, 2, WORLD);
         assertEquals(12L * 12 + 8L * 8 * 4, p.getSourceSampleCount());
         assertEquals((12L * 12 + 8L * 8) * 25, p.getEncodedByteCount());
-        assertEquals((12L * 12 + 8L * 8) * 29, p.getCpuArrayByteCount());
+        assertEquals((12L * 12 + 8L * 8) * 33, p.getCpuArrayByteCount());
         Image first = p.createAlbedoImage(0);
         assertEquals(Image.Format.RGBA16F, first.getFormat());
         Image second = p.createAlbedoImage(0);
@@ -140,6 +168,12 @@ class HeightfieldSurfacePageTest {
         }));
         assertThrows(IllegalArgumentException.class, () -> page(0, 0, 8, 1, 1, (x, z, s) -> {
             s.normalY = 1; s.roughness = .5f; s.semanticId = 256;
+        }));
+        assertThrows(IllegalArgumentException.class, () -> page(0, 0, 8, 1, 1, (x, z, s) -> {
+            s.normalY = 1; s.roughness = .5f; s.detailWeight = Float.NaN;
+        }));
+        assertThrows(IllegalArgumentException.class, () -> page(0, 0, 8, 1, 1, (x, z, s) -> {
+            s.normalY = 1; s.roughness = .5f; s.detailWeight = 1.01f;
         }));
     }
 }

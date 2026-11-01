@@ -39,7 +39,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class HeightfieldSurfaceResidencyTest {
     private static final HeightfieldSurfacePage.Revision REVISION =
             new HeightfieldSurfacePage.Revision(1, 2, 3);
-    private static final long CPU_BYTES = 12L * 12 * 29;
+    private static final long CPU_BYTES = 12L * 12 * HeightfieldSurfacePage.CPU_BYTES_PER_TEXEL;
     private static final long ENCODED_BYTES = 12L * 12 * 25;
 
     private static HeightfieldSurfaceResidency.Limits limits(int slots, int requests,

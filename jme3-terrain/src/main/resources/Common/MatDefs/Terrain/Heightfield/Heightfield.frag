@@ -144,34 +144,32 @@ float sampleRockHeight(vec3 position, vec3 normal, vec3 dxPosition, vec3 dyPosit
 // screen-space form: https://mmikk.github.io/papers3d/mm_sfgrad_bump.pdf
 // The relative determinant guard avoids unstable inversion near grazing or
 // collapsed screen-space parameterizations.
-vec3 perturbRockNormal(vec3 normal, vec3 dxPosition, vec3 dyPosition,
-        float heightDx, float heightDy, float rockCoverage) {
+vec3 rockWeightedNormal(vec3 normal, vec3 baseNormal, float rockCoverage,
+        vec3 dxPosition, vec3 dyPosition, float heightDx, float heightDy) {
     float amplitude = max(m_RockHeightMetres, 0.0) * clamp(rockCoverage, 0.0, 1.0);
-    if (!(amplitude > 0.0)) return normal;
+    if (!(amplitude > 0.0)) return baseNormal;
 
+    // Convert the existing world-space micro-normal to a surface gradient,
+    // add the image height gradient, then resolve once (Mikkelsen2020 §3.4).
+    // Multiplying through by its positive normal projection avoids division.
+    float baseProjection = dot(normal, baseNormal);
+    if (!(baseProjection > 1.0e-4)) return baseNormal;
     vec3 r1 = cross(dyPosition, normal);
     vec3 r2 = cross(normal, dxPosition);
     float determinant = dot(dxPosition, r1);
     float screenArea = length(cross(dxPosition, dyPosition));
     if (!(screenArea > 1.0e-12) || !(abs(determinant) > screenArea * 1.0e-4)
             || isnan(determinant) || isinf(determinant)) {
-        return normal;
+        return baseNormal;
     }
     vec3 surfaceGradient = sign(determinant)
             * (heightDx * r1 + heightDy * r2) * amplitude;
-    vec3 perturbed = abs(determinant) * normal - surfaceGradient;
+    vec3 perturbed = abs(determinant) * baseNormal - surfaceGradient * baseProjection;
     float lengthSquared = dot(perturbed, perturbed);
     if (!(lengthSquared > 1.0e-20) || isnan(lengthSquared) || isinf(lengthSquared)) {
-        return normal;
+        return baseNormal;
     }
     return perturbed * inversesqrt(lengthSquared);
-}
-
-vec3 rockWeightedNormal(vec3 normal, float rockCoverage,
-        vec3 dxPosition, vec3 dyPosition, float heightDx, float heightDy) {
-    if (!(m_RockHeightMetres > 0.0) || !(rockCoverage > 0.0)) return normal;
-    return perturbRockNormal(normal, dxPosition, dyPosition,
-            heightDx, heightDy, rockCoverage);
 }
 #endif
 
@@ -264,7 +262,7 @@ void main() {
                 proceduralMaterial(worldPosition, normal, dxPosition, dyPosition,
                         fallbackAlbedo, fallbackRoughness, fallbackRockCoverage);
                 #ifdef ROCK_HEIGHT
-                    fallbackNormal = rockWeightedNormal(normal, fallbackRockCoverage,
+                    fallbackNormal = rockWeightedNormal(normal, normal, fallbackRockCoverage,
                             dxPosition, dyPosition, rockHeightDx, rockHeightDy);
                 #endif
             }
@@ -280,6 +278,13 @@ void main() {
             HeightfieldSurfaceSample material = HeightfieldSurface_readCache(
                     worldPosition.xz, dxWorld, dyWorld, m_SurfaceFixedLod);
         #endif
+        #ifdef ROCK_DETAIL
+            // Continuous coverage, filtered with the same material footprint;
+            // semantic IDs remain categorical and never become blend weights.
+            material.albedo *= mix(vec3(1.0),
+                    rockDetailModulation(worldPosition, normal, dxPosition, dyPosition),
+                    clamp(material.detailWeight, 0.0, 1.0));
+        #endif
         // Canonical material normals use +Y as the tangent-space up direction.
         vec3 tangentAxis = abs(normal.x) < 0.99 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 0.0, 1.0);
         vec3 tangent = normalize(tangentAxis - normal * dot(tangentAxis, normal));
@@ -291,6 +296,10 @@ void main() {
                 cachedNormal = normalize(tangent * material.normalMoment.x
                         + normal * material.normalMoment.y + bitangent * material.normalMoment.z);
             }
+            #ifdef ROCK_HEIGHT
+                cachedNormal = rockWeightedNormal(normal, cachedNormal, material.detailWeight,
+                        dxPosition, dyPosition, rockHeightDx, rockHeightDy);
+            #endif
             // Blend variance in roughness-squared space, before recovering roughness.
             float variance = clamp(1.0 - momentLength, 0.0, 1.0);
             vec3 blendedNormal = mix(fallbackNormal, cachedNormal, cacheWeight);
@@ -310,6 +319,10 @@ void main() {
             surface.normal = normalize(tangent * material.normalMoment.x
                     + normal * material.normalMoment.y + bitangent * material.normalMoment.z);
         }
+        #ifdef ROCK_HEIGHT
+            surface.normal = rockWeightedNormal(normal, surface.normal, material.detailWeight,
+                    dxPosition, dyPosition, rockHeightDx, rockHeightDy);
+        #endif
         surface.albedo = material.albedo;
         // Bounded variance broadening suppresses unresolved normal sparkle.
         // This is a filtering heuristic, not a calibrated microfacet fit.
@@ -324,7 +337,7 @@ void main() {
         proceduralMaterial(worldPosition, normal, dxPosition, dyPosition,
                 surface.albedo, surface.roughness, rockCoverage);
         #ifdef ROCK_HEIGHT
-            surface.normal = rockWeightedNormal(normal, rockCoverage,
+            surface.normal = rockWeightedNormal(normal, normal, rockCoverage,
                     dxPosition, dyPosition, rockHeightDx, rockHeightDy);
         #endif
     #endif

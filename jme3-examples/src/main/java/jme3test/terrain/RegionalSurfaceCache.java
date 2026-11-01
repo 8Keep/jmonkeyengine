@@ -349,7 +349,8 @@ final class RegionalSurfaceCache implements AutoCloseable {
                         for (int i = 0; i < PHYSICAL_SIDE * PHYSICAL_SIDE * 4; i++) {
                             float want = FastMath.convertHalfToFloat(expected.getShort(i * 2));
                             float got = actual.get(i);
-                            if (!Float.isFinite(got) || Math.abs(got - want) > 1e-6f || i % 4 == 3 && want != 1) {
+                            if (!Float.isFinite(got) || Math.abs(got - want) > 1e-6f
+                                    || (i % 4 == 3 && (want < 0 || want > 1))) {
                                 throw new IllegalStateException("surface GPU storage mismatch revision=" + visibleRevision
                                         + " origin=" + key.originX + "," + key.originZ + " slot=" + slot
                                         + " mip=" + mip + " texel=" + i / 4 + " channel=" + i % 4
@@ -783,7 +784,7 @@ final class RegionalSurfaceCache implements AutoCloseable {
         long bytes = 0;
         for (int mip = 0; mip < MIP_COUNT; mip++) {
             long side = (PAGE_RESOLUTION >> mip) + 2L * HeightfieldSurfacePage.GUTTER;
-            bytes += side * side * 29;
+            bytes += side * side * HeightfieldSurfacePage.CPU_BYTES_PER_TEXEL;
         }
         return bytes;
     }

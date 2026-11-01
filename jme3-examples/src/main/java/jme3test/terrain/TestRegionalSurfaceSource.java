@@ -51,7 +51,7 @@ final class TestRegionalSurfaceSource {
         require(source.getCachedBytes() <= RegionalSurfaceSource.maximumCacheBytes(1024),
                 "cache exceeded its bounded payload");
         require(source.getPeakCachedBytes() <=
-                        RegionalSurfaceSource.maximumCacheBytes(1024) + (64L * 64 * 8 + 64L * 64) * Float.BYTES,
+                        RegionalSurfaceSource.maximumCacheBytes(1024) + (64L * 64 * 9 + 64L * 64) * Float.BYTES,
                 "peak cache exceeded the conservative resident-plus-loader bound");
 
         verifyExpandedCoverage();
@@ -63,14 +63,21 @@ final class TestRegionalSurfaceSource {
         HeightfieldSurfacePage.Sample b = new HeightfieldSurfacePage.Sample();
         HeightfieldSurfacePage.Sample c = new HeightfieldSurfacePage.Sample();
         boolean foundEdit = false;
+        boolean foundFractionalRockWeight = false;
         for (int z = 432; z < 448; z++) for (int x = 552; x < 568; x++) {
             original.sample(x, z, a);
             editA.sample(x, z, b);
             editB.sample(x, z, c);
             equalSample(b, c);
             foundEdit |= !sameSample(a, b);
+            for (HeightfieldSurfacePage.Sample sample : new HeightfieldSurfacePage.Sample[]{a, b, c}) {
+                require(Float.isFinite(sample.detailWeight) && sample.detailWeight >= 0 && sample.detailWeight <= 1,
+                        "regional detail weight must remain normalized");
+                foundFractionalRockWeight |= sample.detailWeight > 0 && sample.detailWeight < 1;
+            }
         }
         require(foundEdit, "edited source revision did not change the local material");
+        require(foundFractionalRockWeight, "regional source did not produce a continuous rock detail weight");
 
         Thread.currentThread().interrupt();
         boolean cancelled = false;
@@ -158,13 +165,15 @@ final class TestRegionalSurfaceSource {
             require(a.getNormalMoment(mipA, ax, az, c) == b.getNormalMoment(mipB, bx, bz, c), "shared normal differed");
         }
         require(a.getRoughnessSquared(mipA, ax, az) == b.getRoughnessSquared(mipB, bx, bz), "roughness differed");
+        require(a.getDetailWeight(mipA, ax, az) == b.getDetailWeight(mipB, bx, bz), "detail weight differed");
         require(a.getSemanticId(mipA, ax, az) == b.getSemanticId(mipB, bx, bz), "semantic ID differed");
     }
 
     private static boolean sameSample(HeightfieldSurfacePage.Sample a, HeightfieldSurfacePage.Sample b) {
         return a.albedoR == b.albedoR && a.albedoG == b.albedoG && a.albedoB == b.albedoB
                 && a.normalX == b.normalX && a.normalY == b.normalY && a.normalZ == b.normalZ
-                && a.roughness == b.roughness && a.semanticId == b.semanticId;
+                && a.roughness == b.roughness && a.semanticId == b.semanticId
+                && a.detailWeight == b.detailWeight;
     }
 
     private static void equalSample(HeightfieldSurfacePage.Sample a, HeightfieldSurfacePage.Sample b) {

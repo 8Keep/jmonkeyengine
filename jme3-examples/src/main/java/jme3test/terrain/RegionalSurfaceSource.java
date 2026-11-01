@@ -46,13 +46,13 @@ final class RegionalSurfaceSource implements HeightfieldSurfacePage.Source {
     private static final int HEIGHT_WINDOW_SIDE = TILE_SIDE + 3;
     private static final long HEIGHT_WINDOW_BYTES = (long) HEIGHT_WINDOW_SIDE * HEIGHT_WINDOW_SIDE * Float.BYTES;
     private final int tileLimit;
-    private static final int CHANNELS = 8;
+    private static final int CHANNELS = 9;
     private static final long TILE_BYTES = (long) TILE_SIDE * TILE_SIDE * CHANNELS * Float.BYTES;
     private static final double SPACING = RegionalHeightfieldSource.SPACING;
     private static final double OFFSET_X = 100;
     private static final double OFFSET_Z = 200;
 
-    // Channels: linear albedo RGB, tangent normal XYZ, roughness, semantic ID.
+    // Channels: linear albedo RGB, tangent normal XYZ, roughness, semantic ID, detail weight.
     private final int regionCells;
     private final float[] heightWindow = new float[HEIGHT_WINDOW_SIDE * HEIGHT_WINDOW_SIDE];
     private long heightWindowX, heightWindowZ;
@@ -113,6 +113,7 @@ final class RegionalSurfaceSource implements HeightfieldSurfacePage.Source {
         store.normalZ = tile[p + 5];
         store.roughness = tile[p + 6];
         store.semanticId = Math.round(tile[p + 7]);
+        store.detailWeight = tile[p + 8];
     }
 
     long getCachedBytes() {
@@ -199,6 +200,7 @@ final class RegionalSurfaceSource implements HeightfieldSurfacePage.Source {
         out[p + 4] = (float) inverse;
         out[p + 5] = (float) (microZ * inverse);
         out[p + 6] = (float) clamp01(.86 - rock * .12 - snow * .19 + (grain - .5) * .05);
+        out[p + 8] = (float) rock;
         composedSamples++;
     }
 

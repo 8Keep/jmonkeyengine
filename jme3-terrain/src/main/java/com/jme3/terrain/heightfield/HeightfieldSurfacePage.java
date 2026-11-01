@@ -39,6 +39,9 @@ import java.nio.ByteOrder;
 
 /** Immutable, CPU-composed material payload for one canonical terrain page. */
 public final class HeightfieldSurfacePage {
+    /** Logical primitive-array payload per composed texel; excludes Java object headers. */
+    public static final int CPU_BYTES_PER_TEXEL = 8 * Float.BYTES + 1;
+
     public static final int GUTTER = 2;
     public static final int MAX_FILTER_FOOTPRINT = 32;
 
@@ -89,6 +92,8 @@ public final class HeightfieldSurfacePage {
         public float albedoR, albedoG, albedoB;
         public float normalX, normalY, normalZ;
         public float roughness;
+        /** Fractional strength of optional fine material detail; defaults to enabled. */
+        public float detailWeight = 1f;
         public int semanticId;
     }
 
@@ -103,6 +108,7 @@ public final class HeightfieldSurfacePage {
         final float[] albedo;
         final float[] normalMoment;
         final float[] roughnessSquared;
+        final float[] detailWeight;
         final byte[] semantic;
 
         Level(int interior) {
@@ -112,6 +118,7 @@ public final class HeightfieldSurfacePage {
             albedo = new float[Math.multiplyExact(count, 3)];
             normalMoment = new float[Math.multiplyExact(count, 3)];
             roughnessSquared = new float[count];
+            detailWeight = new float[count];
             semantic = new byte[count];
         }
         int index(int x, int z) {
@@ -189,6 +196,7 @@ public final class HeightfieldSurfacePage {
                     double ny = 0;
                     double nz = 0;
                     double rr = 0;
+                    double detail = 0;
                     long area = Math.multiplyExact((long) footprint, footprint);
                     int centerOffset = (footprint - 1) / 2;
                     int semanticId = -1;
@@ -196,6 +204,9 @@ public final class HeightfieldSurfacePage {
                         long cz = Math.addExact(startZ, dz);
                         for (int dx = 0; dx < footprint; dx++) {
                             long cx = Math.addExact(startX, dx);
+                            // Legacy sources need not know this channel. Reset it
+                            // because one mutable Sample is reused for every call.
+                            sample.detailWeight = 1f;
                             source.sample(cx, cz, sample);
                             validate(sample);
                             ar += sample.albedoR;
@@ -205,6 +216,7 @@ public final class HeightfieldSurfacePage {
                             ny += sample.normalY;
                             nz += sample.normalZ;
                             rr += (double) sample.roughness * sample.roughness;
+                            detail += sample.detailWeight;
                             if (dx == centerOffset && dz == centerOffset) {
                                 semanticId = sample.semanticId;
                             }
@@ -220,13 +232,14 @@ public final class HeightfieldSurfacePage {
                     level.normalMoment[c + 1] = (float) (ny / area);
                     level.normalMoment[c + 2] = (float) (nz / area);
                     level.roughnessSquared[index] = (float) (rr / area);
+                    level.detailWeight[index] = (float) (detail / area);
                     level.semantic[index] = (byte) semanticId;
                 }
             }
             long texels = (long) level.side * level.side;
             encodedBytes = Math.addExact(encodedBytes, Math.multiplyExact(texels, 8L + 16L + 1L));
             arrayBytes = Math.addExact(arrayBytes, Math.multiplyExact(texels,
-                    7L * Float.BYTES + 1L));
+                    CPU_BYTES_PER_TEXEL));
         }
         sourceSampleCount = samples;
         encodedByteCount = encodedBytes;
@@ -237,6 +250,7 @@ public final class HeightfieldSurfacePage {
         if (!unit(s.albedoR) || !unit(s.albedoG) || !unit(s.albedoB)
                 || !Float.isFinite(s.normalX) || !Float.isFinite(s.normalY) || !Float.isFinite(s.normalZ)
                 || !Float.isFinite(s.roughness) || s.roughness < 0 || s.roughness > 1
+                || !unit(s.detailWeight)
                 || s.semanticId < 0 || s.semanticId > 255) {
             throw new IllegalArgumentException("source sample is outside the surface value ranges");
         }
@@ -316,6 +330,12 @@ public final class HeightfieldSurfacePage {
         return l.roughnessSquared[l.index(x, z)];
     }
 
+    /** Returns the filtered optional-detail weight in the inclusive range [0, 1]. */
+    public float getDetailWeight(int mip, int x, int z) {
+        Level l = level(mip);
+        return l.detailWeight[l.index(x, z)];
+    }
+
     public int getSemanticId(int mip, int x, int z) {
         Level l = level(mip);
         return l.semantic[l.index(x, z)] & 0xff;
@@ -328,7 +348,7 @@ public final class HeightfieldSurfacePage {
         return levels[mip];
     }
 
-    /** Creates independent linear RGBA16F albedo storage for one logical level. */
+    /** Creates linear RGBA16F albedo RGB and continuous detail weight in alpha. */
     public Image createAlbedoImage(int mip) {
         Level l = level(mip);
         ByteBuffer data = BufferUtils.createByteBuffer(l.side * l.side * 8).order(ByteOrder.nativeOrder());
@@ -336,7 +356,7 @@ public final class HeightfieldSurfacePage {
             data.putShort(FastMath.convertFloatToHalf(l.albedo[i * 3]));
             data.putShort(FastMath.convertFloatToHalf(l.albedo[i * 3 + 1]));
             data.putShort(FastMath.convertFloatToHalf(l.albedo[i * 3 + 2]));
-            data.putShort(FastMath.convertFloatToHalf(1));
+            data.putShort(FastMath.convertFloatToHalf(l.detailWeight[i]));
         }
         data.flip();
         return new Image(Image.Format.RGBA16F, l.side, l.side, data, ColorSpace.Linear);

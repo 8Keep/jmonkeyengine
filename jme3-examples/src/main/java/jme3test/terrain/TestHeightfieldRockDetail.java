@@ -39,16 +39,23 @@ import com.jme3.math.Vector3f;
 import com.jme3.post.FilterPostProcessor;
 import com.jme3.post.filters.FXAAFilter;
 import com.jme3.post.filters.KHRToneMapFilter;
+import com.jme3.math.Vector2f;
 import com.jme3.renderer.queue.RenderQueue;
 import com.jme3.scene.Geometry;
 import com.jme3.system.AppSettings;
 import com.jme3.terrain.heightfield.HeightfieldGrid;
 import com.jme3.terrain.heightfield.HeightfieldPage;
+import com.jme3.terrain.heightfield.HeightfieldSurfacePage;
 import com.jme3.texture.Image;
 import com.jme3.texture.Texture;
 import com.jme3.texture.TextureArray;
+import com.jme3.texture.Texture2D;
+import com.jme3.texture.image.ColorSpace;
+import com.jme3.util.BufferUtils;
 import java.io.File;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -77,12 +84,15 @@ public final class TestHeightfieldRockDetail extends SimpleApplication {
     private final Path output;
     private final boolean finiteRun;
     private final boolean heightDisabled;
+    private final boolean cached;
     private final float heightMetres;
     private final String rendererName;
     private final CountDownLatch finished = new CountDownLatch(1);
     private volatile Throwable failure;
     private ScreenshotAppState screenshots;
     private FilterPostProcessor post;
+    private TextureArray cachedAlbedo, cachedNormal, cachedSemantic;
+    private Texture2D cachedPageTable;
     private int frame;
     private int written;
 
@@ -135,6 +145,7 @@ public final class TestHeightfieldRockDetail extends SimpleApplication {
         output = options.output;
         finiteRun = output != null;
         heightDisabled = options.heightDisabled;
+        cached = options.cached;
         heightMetres = options.heightMetres;
         rendererName = options.renderer;
     }
@@ -169,6 +180,7 @@ public final class TestHeightfieldRockDetail extends SimpleApplication {
             detail.bind(material);
             if (heightDisabled) detail.unbindHeight(material);
             else detail.bindHeight(material, heightMetres);
+            if (cached) bindCachedSurface(material);
 
             Geometry ramp = new Geometry("bedrock-height-detail-ramp",
                     new HeightfieldGrid(CELLS).createPatchMesh(page));
@@ -193,8 +205,8 @@ public final class TestHeightfieldRockDetail extends SimpleApplication {
             post.addFilter(new FXAAFilter());
             viewPort.addProcessor(post);
             System.out.printf("ROCK_DETAIL_IMAGE renderer=%s disabled=%s amplitudeMetres=%.3f "
-                            + "baseBytes=%d mipBytes=%d mipLevels=%d bitsPerPixel=%d albedoBaseBytes=%d albedoRgb8MipEstimate=%d%n",
-                    rendererName, heightDisabled, heightDisabled ? 0 : heightMetres,
+                            + "cached=%s baseBytes=%d mipBytes=%d mipLevels=%d bitsPerPixel=%d albedoBaseBytes=%d albedoRgb8MipEstimate=%d%n",
+                    rendererName, heightDisabled, heightDisabled ? 0 : heightMetres, cached,
                     detail.getHeightBaseImageBytes(), detail.getHeightMipChainBytes(),
                     detail.getHeightMipLevels(), detail.getHeightBitsPerPixel(),
                     detail.getBaseImageBytes(), detail.getEstimatedMipChainRgb8Bytes());
@@ -218,6 +230,51 @@ public final class TestHeightfieldRockDetail extends SimpleApplication {
             }
         }
         return new HeightfieldPage(CELLS, (float) SPACING, heights);
+    }
+
+    private void bindCachedSurface(Material material) {
+        HeightfieldSurfacePage.Source source = (x, z, sample) -> {
+            float nx = .07f * (float) Math.sin(x * .11);
+            float nz = .05f * (float) Math.cos(z * .09);
+            float inverse = 1f / (float) Math.sqrt(nx * nx + 1f + nz * nz);
+            sample.albedoR = .43f;
+            sample.albedoG = .37f;
+            sample.albedoB = .30f;
+            sample.normalX = nx * inverse;
+            sample.normalY = inverse;
+            sample.normalZ = nz * inverse;
+            sample.roughness = .82f;
+            sample.semanticId = 1;
+            sample.detailWeight = Math.max(0f, Math.min(1f, (x + .5f) / 64f));
+        };
+        HeightfieldSurfacePage page = new HeightfieldSurfacePage(
+                new HeightfieldSurfacePage.Revision(0, 0, 0), 0, 0, 64, 1, 1, source);
+        cachedAlbedo = new TextureArray(Collections.singletonList(page.createAlbedoImage(0)));
+        cachedNormal = new TextureArray(Collections.singletonList(page.createNormalImage(0)));
+        cachedSemantic = new TextureArray(Collections.singletonList(page.createSemanticImage(0)));
+        bilinear(cachedAlbedo);
+        bilinear(cachedNormal);
+        nearest(cachedSemantic);
+
+        ByteBuffer tableData = BufferUtils.createByteBuffer(4 * Float.BYTES).order(ByteOrder.nativeOrder());
+        tableData.putFloat(0f).putFloat(0f).putFloat(1f).putFloat(0f).flip();
+        cachedPageTable = new Texture2D(new Image(Image.Format.RGBA32F, 1, 1, tableData, ColorSpace.Linear));
+        nearest(cachedPageTable);
+        HeightfieldSurfaceBindings.bind(material, cachedAlbedo, cachedNormal, cachedSemantic,
+                cachedPageTable, 68, HeightfieldSurfacePage.GUTTER, 1,
+                new Vector2f(-16f, -16f), 32f, .5f);
+    }
+
+    private static void bilinear(Texture texture) {
+        texture.setMinFilter(Texture.MinFilter.BilinearNoMipMaps);
+        texture.setMagFilter(Texture.MagFilter.Bilinear);
+        texture.setWrap(Texture.WrapMode.EdgeClamp);
+    }
+
+    private static void nearest(Texture texture) {
+        texture.setMinFilter(Texture.MinFilter.NearestNoMipMaps);
+        texture.setMagFilter(Texture.MagFilter.Nearest);
+        texture.setWrap(Texture.WrapMode.EdgeClamp);
     }
 
     private void startFiniteCapture() {
@@ -288,6 +345,14 @@ public final class TestHeightfieldRockDetail extends SimpleApplication {
             if (failure == null) failure = cleanupFailure;
             else failure.addSuppressed(cleanupFailure);
         }
+        releaseOwned(cachedAlbedo);
+        releaseOwned(cachedNormal);
+        releaseOwned(cachedSemantic);
+        releaseOwned(cachedPageTable);
+        cachedAlbedo = null;
+        cachedNormal = null;
+        cachedSemantic = null;
+        cachedPageTable = null;
         try {
             super.destroy();
         } catch (Throwable cleanupFailure) {
@@ -298,10 +363,32 @@ public final class TestHeightfieldRockDetail extends SimpleApplication {
         }
     }
 
+    private void release(Texture texture) {
+        if (texture == null || texture.getImage() == null || renderer == null) return;
+        Image image = texture.getImage();
+        try {
+            renderer.deleteImage(image);
+        } finally {
+            if (image.getData() != null) {
+                for (ByteBuffer data : image.getData()) BufferUtils.destroyDirectBuffer(data);
+            }
+        }
+    }
+
+    private void releaseOwned(Texture texture) {
+        try {
+            release(texture);
+        } catch (Throwable cleanupFailure) {
+            if (failure == null) failure = cleanupFailure;
+            else failure.addSuppressed(cleanupFailure);
+        }
+    }
+
     private static Options parseOptions(String[] args) {
         String renderer = AppSettings.ANGLE_GLES3;
         Path output = null;
         boolean rendererSet = false, heightDisabled = false, amplitudeSet = false;
+        boolean cached = false;
         float heightMetres = DEFAULT_HEIGHT_METRES;
         for (String arg : args) {
             if (arg.startsWith("--renderer=")) {
@@ -311,6 +398,8 @@ public final class TestHeightfieldRockDetail extends SimpleApplication {
                 output = outputPath(arg.substring("--output=".length()));
             } else if (arg.equals("--height-disabled")) {
                 heightDisabled = true;
+            } else if (arg.equals("--cached")) {
+                cached = true;
             } else if (arg.startsWith("--height-metres=")) {
                 try {
                     heightMetres = Float.parseFloat(arg.substring("--height-metres=".length()));
@@ -332,12 +421,12 @@ public final class TestHeightfieldRockDetail extends SimpleApplication {
             throw new IllegalArgumentException("height amplitude must be finite and non-negative");
         }
         if (heightDisabled && amplitudeSet) throw new IllegalArgumentException("choose --height-disabled or --height-metres, not both");
-        return new Options(renderer, output, heightDisabled, heightMetres);
+        return new Options(renderer, output, heightDisabled, heightMetres, cached);
     }
 
     private static IllegalArgumentException usage() {
         return new IllegalArgumentException("usage: TestHeightfieldRockDetail [renderer] [output-dir] "
-                + "[--height-metres=value | --height-disabled]");
+                + "[--height-metres=value | --height-disabled] [--cached]");
     }
 
     private static boolean isRendererName(String value) {
@@ -369,11 +458,13 @@ public final class TestHeightfieldRockDetail extends SimpleApplication {
         final Path output;
         final boolean heightDisabled;
         final float heightMetres;
-        Options(String renderer, Path output, boolean heightDisabled, float heightMetres) {
+        final boolean cached;
+        Options(String renderer, Path output, boolean heightDisabled, float heightMetres, boolean cached) {
             this.renderer = renderer;
             this.output = output;
             this.heightDisabled = heightDisabled;
             this.heightMetres = heightMetres;
+            this.cached = cached;
         }
     }
 }

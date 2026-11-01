@@ -5,7 +5,8 @@ precision highp int;
 
 // Surface cache pages store already-composed logical samples. Each logical
 // mip occupies its own array layer; these samplers must not use hardware mip
-// filtering. Albedo and normal/moment data are continuous, while semantics
+// filtering. Albedo alpha carries continuous optional-detail weight. Albedo
+// and normal/moment data are continuous, while semantics
 // are categorical and therefore use a nearest-filtered texture.
 uniform sampler2DArray m_SurfaceAlbedoPages;
 uniform sampler2DArray m_SurfaceNormalPages;
@@ -20,7 +21,8 @@ uniform float m_SurfaceCanonicalSpacing;
 
 // The direct path is an intentionally expensive reference implementation.
 // Its three source layers carry albedo/perceptual roughness and tangent-space
-// normals. Weights RGB are nonnegative normalized weights; A is an integer ID.
+// normals (source normal alpha is optional-detail weight). Weights RGB are
+// nonnegative normalized weights; A is an integer ID.
 uniform sampler2DArray m_SurfaceSourceAlbedo;
 uniform sampler2DArray m_SurfaceSourceNormal;
 uniform sampler2D m_SurfaceSourceWeights;
@@ -30,6 +32,7 @@ struct HeightfieldSurfaceSample {
     vec3 albedo;
     vec3 normalMoment;
     float roughnessSquared;
+    float detailWeight;
     float semanticId;
 };
 
@@ -61,6 +64,7 @@ HeightfieldSurfaceSample HeightfieldSurface_zeroSample() {
     value.albedo = vec3(0.0);
     value.normalMoment = vec3(0.0);
     value.roughnessSquared = 0.0;
+    value.detailWeight = 0.0;
     value.semanticId = 0.0;
     return value;
 }
@@ -71,6 +75,7 @@ HeightfieldSurfaceSample HeightfieldSurface_mixContinuous(
     value.albedo = mix(first.albedo, second.albedo, alpha);
     value.normalMoment = mix(first.normalMoment, second.normalMoment, alpha);
     value.roughnessSquared = mix(first.roughnessSquared, second.roughnessSquared, alpha);
+    value.detailWeight = mix(first.detailWeight, second.detailWeight, alpha);
     // Semantic identity is categorical: it is selected from one logical mip.
     value.semanticId = first.semanticId;
     return value;
@@ -108,13 +113,16 @@ HeightfieldSurfaceSample HeightfieldSurface_readCacheLevel(
 
     HeightfieldSurfaceSample value;
 #ifdef SURFACE_PRECISE_FILTER
-    value.albedo = HeightfieldSurface_preciseFilter(m_SurfaceAlbedoPages, pageLocal, int(layer + 0.5)).rgb;
+    vec4 albedoAndDetail = HeightfieldSurface_preciseFilter(
+            m_SurfaceAlbedoPages, pageLocal, int(layer + 0.5));
     vec4 normalAndRoughness = HeightfieldSurface_preciseFilter(m_SurfaceNormalPages, pageLocal, int(layer + 0.5));
 #else
-    value.albedo = textureGrad(m_SurfaceAlbedoPages, vec3(uv, layer), dxUV, dyUV).rgb;
+    vec4 albedoAndDetail = textureGrad(m_SurfaceAlbedoPages, vec3(uv, layer), dxUV, dyUV);
     vec4 normalAndRoughness = textureGrad(
             m_SurfaceNormalPages, vec3(uv, layer), dxUV, dyUV);
 #endif
+    value.albedo = albedoAndDetail.rgb;
+    value.detailWeight = albedoAndDetail.a;
     value.normalMoment = normalAndRoughness.rgb;
     value.roughnessSquared = normalAndRoughness.a;
 
@@ -173,14 +181,16 @@ HeightfieldSurfaceSample HeightfieldSurface_composeCanonical(ivec2 sourceTexel) 
     vec3 albedo = vec3(0.0);
     vec3 normalSum = vec3(0.0);
     float roughnessSquared = 0.0;
+    float detailWeight = 0.0;
     for (int layer = 0; layer < 3; ++layer) {
         float weight = weights[layer];
         vec4 material = texelFetch(m_SurfaceSourceAlbedo,
                                    ivec3(sourceTexel, layer), 0);
-        vec3 normal = texelFetch(m_SurfaceSourceNormal,
-                                 ivec3(sourceTexel, layer), 0).xyz;
+        vec4 normalAndDetail = texelFetch(m_SurfaceSourceNormal,
+                                          ivec3(sourceTexel, layer), 0);
         albedo += material.rgb * weight;
-        normalSum += normal * weight;
+        normalSum += normalAndDetail.xyz * weight;
+        detailWeight += normalAndDetail.a * weight;
         roughnessSquared += material.a * material.a * weight;
     }
     float normalLength = length(normalSum);
@@ -189,6 +199,7 @@ HeightfieldSurfaceSample HeightfieldSurface_composeCanonical(ivec2 sourceTexel) 
     value.normalMoment = normalLength > 1.0e-8
             ? normalSum / normalLength : vec3(0.0, 1.0, 0.0);
     value.roughnessSquared = roughnessSquared;
+    value.detailWeight = detailWeight;
     value.semanticId = floor(weights.a + 0.5);
     return value;
 }
@@ -209,12 +220,14 @@ HeightfieldSurfaceSample HeightfieldSurface_averageCanonicalBlock(
             total.albedo += sampleValue.albedo;
             total.normalMoment += sampleValue.normalMoment;
             total.roughnessSquared += sampleValue.roughnessSquared;
+            total.detailWeight += sampleValue.detailWeight;
         }
     }
     float sampleCount = float(max(footprint * footprint, 1));
     total.albedo /= sampleCount;
     total.normalMoment /= sampleCount;
     total.roughnessSquared /= sampleCount;
+    total.detailWeight /= sampleCount;
     return total;
 }
 

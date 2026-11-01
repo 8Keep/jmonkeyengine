@@ -73,6 +73,8 @@ MaterialDef Heightfield {
         // Optional material pages; geometry and material quality are independent.
         // Each logical mip has its own array layer, with world-neighbor gutters.
         Boolean UseHeightfieldSurface : false
+        // RGB is composed linear albedo; alpha is filtered optional-detail
+        // strength, not opacity. Legacy sources default the strength to one.
         TextureArray SurfaceAlbedoPages -LINEAR
         TextureArray SurfaceNormalPages -LINEAR
         TextureArray SurfaceSemanticPages -LINEAR
@@ -83,7 +85,8 @@ MaterialDef Heightfield {
         // Optional procedural fallback outside a bounded material-page region.
         Boolean UseHeightfieldSurfaceRegionFallback : false
         Float SurfaceRegionFade : 64.0
-        // Optional original/image-backed detail for the procedural rock blend.
+        // Optional image-backed world-space rock detail. Cached pages control
+        // its strength with albedo alpha; semantic IDs remain categorical.
         Texture2D RockDetailMap
         // Optional scalar rock relief in metres; shares the triplanar detail scale.
         Texture2D RockHeightMap -LINEAR

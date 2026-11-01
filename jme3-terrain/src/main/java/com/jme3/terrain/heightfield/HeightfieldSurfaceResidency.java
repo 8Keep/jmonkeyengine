@@ -459,7 +459,7 @@ public final class HeightfieldSurfaceResidency implements AutoCloseable {
         long bytes = 0;
         for (int mip = 0; mip < mipCount; mip++) {
             long side = (resolution >> mip) + 2L * HeightfieldSurfacePage.GUTTER;
-            bytes = Math.addExact(bytes, Math.multiplyExact(side * side, 7L * Float.BYTES + 1));
+            bytes = Math.addExact(bytes, Math.multiplyExact(side * side, HeightfieldSurfacePage.CPU_BYTES_PER_TEXEL));
         }
         return bytes;
     }

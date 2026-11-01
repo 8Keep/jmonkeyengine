@@ -42,6 +42,6 @@ void main() {
     } else if (m_SurfaceProbeOutput == 2) {
         gl_FragColor = vec4(value.semanticId, 0.0, 0.0, 1.0);
     } else {
-        gl_FragColor = vec4(value.albedo, 1.0);
+        gl_FragColor = vec4(value.albedo, value.detailWeight);
     }
 }

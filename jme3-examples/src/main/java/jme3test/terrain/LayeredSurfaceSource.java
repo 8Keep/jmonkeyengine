@@ -76,7 +76,7 @@ final class LayeredSurfaceSource implements HeightfieldSurfacePage.Source {
                 normals[layer][offset] = nx * inverseLength;
                 normals[layer][offset + 1] = inverseLength;
                 normals[layer][offset + 2] = nz * inverseLength;
-                normals[layer][offset + 3] = 1;
+                normals[layer][offset + 3] = layer == 0 ? 0f : layer == 1 ? 1f : .15f;
             }
             // A height edit changes both geometry and its material classifier.
             double dx = (heightAt(wx + SPACING, wz, revision)
@@ -113,7 +113,7 @@ final class LayeredSurfaceSource implements HeightfieldSurfacePage.Source {
             throw new IllegalArgumentException("Fixture source does not cover this canonical cell");
         }
         int offset = ((int) localZ * SIDE + (int) localX) * 4;
-        float red = 0, green = 0, blue = 0, nx = 0, ny = 0, nz = 0, roughnessSquared = 0;
+        float red = 0, green = 0, blue = 0, nx = 0, ny = 0, nz = 0, roughnessSquared = 0, detailWeight = 0;
         for (int layer = 0; layer < 3; layer++) {
             float weight = weights[offset + layer];
             red += colors[layer][offset] * weight;
@@ -124,12 +124,14 @@ final class LayeredSurfaceSource implements HeightfieldSurfacePage.Source {
             nz += normals[layer][offset + 2] * weight;
             float roughness = colors[layer][offset + 3];
             roughnessSquared += roughness * roughness * weight;
+            detailWeight += normals[layer][offset + 3] * weight;
         }
         float length = (float) Math.sqrt(nx * nx + ny * ny + nz * nz);
         store.albedoR = red; store.albedoG = green; store.albedoB = blue;
         store.normalX = nx / length; store.normalY = ny / length; store.normalZ = nz / length;
         store.roughness = (float) Math.sqrt(roughnessSquared);
         store.semanticId = (int) weights[offset + 3];
+        store.detailWeight = detailWeight;
     }
 
     void createTextures() {

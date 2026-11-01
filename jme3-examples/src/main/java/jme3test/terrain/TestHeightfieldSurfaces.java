@@ -83,7 +83,7 @@ import javax.imageio.ImageIO;
  */
 public final class TestHeightfieldSurfaces extends SimpleApplication {
     private static final int RESOLUTION = 32, MIPS = 3, SIDE = 36, SLOTS = 8;
-    private static final long CPU_PAGE_BYTES = 1840L * 29, ENCODED_PAGE_BYTES = 1840L * 25;
+    private static final long CPU_PAGE_BYTES = 1840L * HeightfieldSurfacePage.CPU_BYTES_PER_TEXEL, ENCODED_PAGE_BYTES = 1840L * 25;
     private final Path output;
     private final CountDownLatch finished = new CountDownLatch(1);
     private volatile Throwable failure;
@@ -99,7 +99,7 @@ public final class TestHeightfieldSurfaces extends SimpleApplication {
     private List<PageKey> mappedKeys;
     private PageKey root;
     private int frame, channels, uploads, scratchPeak;
-    private float maxAlbedoError, maxMomentError;
+    private float maxAlbedoError, maxMomentError, maxDetailWeightError;
 
     private TestHeightfieldSurfaces(Path output) { this.output = output; }
     public static void main(String[] args) throws Exception {
@@ -143,6 +143,7 @@ public final class TestHeightfieldSurfaces extends SimpleApplication {
                 throw new UnsupportedOperationException("Surface reference needs arrays and float linear filtering");
             }
             source = new LayeredSurfaceSource(new HeightfieldSurfacePage.Revision(0, 0, 0));
+            verifySourceDetailWeight();
             source.createTextures();
             pool = new HeightfieldSurfaceResidency(RESOLUTION, MIPS,
                     new HeightfieldSurfaceResidency.Limits(SLOTS, 6, CPU_PAGE_BYTES * 6,
@@ -192,6 +193,25 @@ public final class TestHeightfieldSurfaces extends SimpleApplication {
             texture.setWrap(Texture.WrapMode.EdgeClamp);
         }
         return texture;
+    }
+
+    private void verifySourceDetailWeight() {
+        HeightfieldSurfacePage.Sample sample = new HeightfieldSurfacePage.Sample();
+        float minimum = 1f, maximum = 0f;
+        for (int z = LayeredSurfaceSource.ORIGIN + 3; z < LayeredSurfaceSource.ORIGIN + LayeredSurfaceSource.SIDE; z += 29) {
+            for (int x = LayeredSurfaceSource.ORIGIN + 5; x < LayeredSurfaceSource.ORIGIN + LayeredSurfaceSource.SIDE; x += 31) {
+                source.sample(x, z, sample);
+                if (!Float.isFinite(sample.detailWeight) || sample.detailWeight < 0 || sample.detailWeight > 1) {
+                    throw new IllegalStateException("Layered detail weight must stay within [0,1]");
+                }
+                minimum = Math.min(minimum, sample.detailWeight);
+                maximum = Math.max(maximum, sample.detailWeight);
+            }
+        }
+        if (!(maximum - minimum > .1f)) {
+            throw new IllegalStateException("Layered fixture needs varying smooth detail weights, range="
+                    + minimum + ".." + maximum);
+        }
     }
 
     private static void nearest(Texture texture) {
@@ -310,7 +330,10 @@ public final class TestHeightfieldSurfaces extends SimpleApplication {
     private float cpuTexel(HeightfieldSurfacePage page, int mip, int x, int z,
             int kind, int component, boolean encodeAlbedo) {
         if (kind == 0) {
-            if (component == 3) return 1;
+            if (component == 3) {
+                float value = page.getDetailWeight(mip, x, z);
+                return encodeAlbedo ? FastMath.convertHalfToFloat(FastMath.convertFloatToHalf(value)) : value;
+            }
             float value = page.getAlbedo(mip, x, z, component);
             return encodeAlbedo ? FastMath.convertHalfToFloat(FastMath.convertFloatToHalf(value)) : value;
         }
@@ -328,8 +351,9 @@ public final class TestHeightfieldSurfaces extends SimpleApplication {
             for (int y = 0; y < 48; y++) for (int x = 0; x < 64; x++) {
                 int sx = (int) Math.floor((x + .5) * side / 64) - HeightfieldSurfacePage.GUTTER;
                 int sz = (int) Math.floor((y + .5) * side / 48) - HeightfieldSurfacePage.GUTTER;
-                for (int c = 0; c < 3; c++) {
-                    float expected = FastMath.convertHalfToFloat(FastMath.convertFloatToHalf(page.getAlbedo(mip, sx, sz, c)));
+                for (int c = 0; c < 4; c++) {
+                    float source = c == 3 ? page.getDetailWeight(mip, sx, sz) : page.getAlbedo(mip, sx, sz, c);
+                    float expected = FastMath.convertHalfToFloat(FastMath.convertFloatToHalf(source));
                     float value = actual[(y * 64 + x) * 4 + c];
                     if (Math.abs(value - expected) > .000001f) throw new IllegalStateException(
                             "Stored atlas mismatch mip=" + mip + " texel=" + sx + "," + sz + " c=" + c
@@ -353,6 +377,9 @@ public final class TestHeightfieldSurfaces extends SimpleApplication {
                 for (int i = 0; i < cached.length; i++) {
                     float difference = Math.abs(cached[i] - direct[i]);
                     maximum = Math.max(maximum, difference);
+                    if (kind == 0 && i % 4 == 3) {
+                        maxDetailWeightError = Math.max(maxDetailWeightError, difference);
+                    }
                     float tolerance = kind == 0 ? 2.5e-4f + 1e-5f : kind == 1 ? 1e-5f : 0;
                     if (difference > tolerance) {
                         float[] coordinates = read(false, lod, 5);
@@ -412,7 +439,8 @@ public final class TestHeightfieldSurfaces extends SimpleApplication {
                 verify(frame == 4 ? "coarse-root" : "fine-neighbors");
                 if (frame == 10) {
                     System.out.println("SURFACE_REFERENCE_PASS channels=" + channels + " uploads=" + uploads
-                            + " albedoError=" + maxAlbedoError + " momentError=" + maxMomentError
+                            + " albedoError=" + maxAlbedoError + " detailWeightError=" + maxDetailWeightError
+                            + " momentError=" + maxMomentError
                             + " peakEncodingScratch=" + scratchPeak + " physicalAtlasBytes=" + (SLOTS * MIPS * SIDE * SIDE * 25));
                     finished.countDown();
                 }
