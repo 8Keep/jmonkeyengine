@@ -150,6 +150,7 @@ import javax.imageio.ImageIO;
  */
 public final class TestHeightfieldStreaming extends SimpleApplication {
     private static final int CELLS = 128, DEFAULT_PATCH_CELLS = 16, DEFAULT_CAPACITY = 32;
+    private static final float FAR_VIEW_DISTANCE = 6500f;
     private static final float SPACING = .5f, TRANSITION_STEP = .25f;
     private static final int DEFAULT_PATCH_BUDGET = 16, MAX_FRAMES = 720, MAX_JOBS = 12;
     private static final int PROFILE_WARMUP = 60, MAX_PROFILE_STAGE_SAMPLES = 4096;
@@ -2101,7 +2102,14 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
         if (largeRegionMode) {
             regionalVisibility = new DirectionalLightVisibilityRenderer(assetManager, 2048, 3);
             regionalVisibility.setLight(sun);
-            regionalVisibility.setShadowZExtend(1400);
+            if (regionCells == RegionalHeightfieldSource.FAR_CELLS) {
+                // Low sun carries mountain shadows across the visible landscape.
+                // Cover the camera range and fade near its far limit.
+                regionalVisibility.setShadowZExtend(FAR_VIEW_DISTANCE);
+                regionalVisibility.setShadowZFadeLength(FAR_VIEW_DISTANCE * .1f);
+            } else {
+                regionalVisibility.setShadowZExtend(1400);
+            }
             regionalVisibility.setShadowIntensity(1);
             viewPort.addProcessor(regionalVisibility);
         } else {
@@ -2140,7 +2148,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
                 int elapsed = f - surfaceActivationFrame;
                 if (regionCells == RegionalHeightfieldSource.FAR_CELLS && elapsed >= 85 && elapsed < 125) {
                     cam.setParallelProjection(false);
-                    cam.setFrustumPerspective(55, (float) cam.getWidth() / cam.getHeight(), .5f, 6500f);
+                    cam.setFrustumPerspective(55, (float) cam.getWidth() / cam.getHeight(), .5f, FAR_VIEW_DISTANCE);
                     float y = visibleSurfaceHeight(-1450, 1000, worldHeight(-1450, 1000) + 55);
                     cam.setLocation(new Vector3f(-1450, y, 1000));
                     cam.lookAt(new Vector3f(-1450, worldHeight(-1450, 1300), 1300), Vector3f.UNIT_Y);
@@ -2193,7 +2201,7 @@ public final class TestHeightfieldStreaming extends SimpleApplication {
             float aspect = (float) cam.getWidth() / cam.getHeight();
             cam.setParallelProjection(false);
             if (regionCells == RegionalHeightfieldSource.FAR_CELLS) {
-                cam.setFrustumPerspective(55, aspect, .5f, 6500f);
+                cam.setFrustumPerspective(55, aspect, .5f, FAR_VIEW_DISTANCE);
                 if (f < 61 || f >= 210 && f < 291 || f >= 460 && f < 501) {
                     cam.setLocation(new Vector3f(0, 1800, -2600));
                     cam.lookAt(new Vector3f(0, 0, 0), Vector3f.UNIT_Y);
