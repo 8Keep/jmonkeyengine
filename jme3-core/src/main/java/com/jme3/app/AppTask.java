@@ -108,16 +108,17 @@ public class AppTask<V> implements Future<V> {
     @Override
     public V get(long timeout, TimeUnit unit)
         throws InterruptedException, ExecutionException, TimeoutException {
+        long remainingNanos = unit.toNanos(timeout);
         stateLock.lock();
         try {
+            while (!isDone() && remainingNanos > 0L) {
+                remainingNanos = finishedCondition.awaitNanos(remainingNanos);
+            }
             if (!isDone()) {
-                finishedCondition.await(timeout, unit);
+                throw new TimeoutException("Object not returned in time allocated.");
             }
             if (exception != null) {
                 throw exception;
-            }
-            if (result == null) {
-                throw new TimeoutException("Object not returned in time allocated.");
             }
             return result;
         } finally {
