@@ -35,12 +35,12 @@ import com.jme3.renderer.Camera;
 import com.jme3.terrain.heightfield.HeightfieldHierarchy.Node;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.BitSet;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.function.Predicate;
 
@@ -76,12 +76,13 @@ public final class HeightfieldLod {
                 || maximumPatches < 1 || ready == null) {
             throw new IllegalArgumentException("camera, positive finite error/budget and readiness required");
         }
-        Map<Node, Boolean> readiness = new HashMap<>();
+        BitSet readiness = new BitSet(hierarchy.getNodes().size());
         // Capture ancestors too: coarsening must not depend on which nodes
         // happened to be visited by this frame's refinement traversal.
-        for (Node node : hierarchy.getNodes()) readiness.put(node, ready.test(node));
-        Predicate<Node> snapshot = n -> readiness.computeIfAbsent(n, ready::test);
-        if (!snapshot.test(hierarchy.getRoot())) {
+        for (Node node : hierarchy.getNodes()) {
+            if (ready.test(node)) readiness.set(node.getIndex());
+        }
+        if (!readiness.get(hierarchy.getRoot().getIndex())) {
             throw new IllegalStateException("a ready root must remain pinned as a fallback");
         }
         List<Node> leaves = new ArrayList<>(Collections.singletonList(hierarchy.getRoot()));
@@ -116,11 +117,11 @@ public final class HeightfieldLod {
                 if (split == null) { source = true; continue; }
             }
             List<Node> proposal = new ArrayList<>(leaves);
-            int failure = split(proposal, split, maximumPatches, snapshot);
+            int failure = split(proposal, split, maximumPatches, readiness);
             while (failure == 0) {
                 Node coarse = unbalancedCoarse(proposal);
                 if (coarse == null) break;
-                failure = split(proposal, coarse, maximumPatches, snapshot);
+                failure = split(proposal, coarse, maximumPatches, readiness);
             }
             if (failure == 0) {
                 leaves = proposal;
@@ -132,15 +133,13 @@ public final class HeightfieldLod {
         }
         double achieved = maximumPixels(camera, leaves, projections);
         boolean limited = achieved > maximumPixels;
-        Set<Node> knownReady = new HashSet<>();
-        readiness.forEach((n, r) -> { if (r) knownReady.add(n); });
-        return new Selection(hierarchy, leaves, knownReady, achieved,
+        return new Selection(hierarchy, leaves, readiness, achieved,
                 limited && budget, limited && waiting, limited && source);
     }
 
-    private static int split(List<Node> cover, Node node, int budget, Predicate<Node> ready) {
+    private static int split(List<Node> cover, Node node, int budget, BitSet ready) {
         if (cover.size() + 3 > budget) return 1;
-        for (Node child : node.getChildren()) if (!ready.test(child)) return 2;
+        for (Node child : node.getChildren()) if (!ready.get(child.getIndex())) return 2;
         cover.remove(node);
         cover.addAll(node.getChildren());
         return 0;
@@ -192,20 +191,25 @@ public final class HeightfieldLod {
     public static final class Selection {
         private final HeightfieldHierarchy hierarchy;
         private final List<Node> leaves;
-        private final Set<Node> ready;
+        private final BitSet ready;
         private final double maximum;
         private final boolean budget, readiness, source;
-        private Selection(HeightfieldHierarchy h, List<Node> leaves, Set<Node> ready, double maximum,
+        private Selection(HeightfieldHierarchy h, List<Node> leaves, BitSet ready, double maximum,
                 boolean budget, boolean readiness, boolean source) {
             hierarchy = h;
             this.leaves = Collections.unmodifiableList(new ArrayList<>(leaves));
-            this.ready = Collections.unmodifiableSet(new HashSet<>(ready));
+            this.ready = (BitSet) ready.clone();
             this.maximum = maximum;
             this.budget = budget;
             this.readiness = readiness;
             this.source = source;
         }
         public List<Node> getLeaves() { return leaves; }
+        private boolean isReady(Node node) { return ready.get(node.getIndex()); }
+        private boolean hasReadyChildren(Node node) {
+            for (Node child : node.getChildren()) if (!isReady(child)) return false;
+            return true;
+        }
         public double getMaximumPixels() { return maximum; }
         public boolean isBudgetLimited() { return budget; }
         public boolean isReadinessLimited() { return readiness; }
@@ -247,11 +251,12 @@ public final class HeightfieldLod {
                 }
                 return;
             }
+            if (sameLeafSet(desired.leaves)) return;
             List<Node> ordered = new ArrayList<>(leaves);
             ordered.sort(Comparator.comparingInt(Node::getLevel));
             for (Node node : ordered) {
                 boolean finer = desired.leaves.stream().anyMatch(n -> node.contains(n) && n.getLevel() > node.getLevel());
-                if (!finer || !desired.ready.containsAll(node.getChildren())) continue;
+                if (!finer || !desired.hasReadyChildren(node)) continue;
                 List<Node> after = new ArrayList<>(leaves);
                 after.remove(node);
                 after.addAll(node.getChildren());
@@ -267,7 +272,7 @@ public final class HeightfieldLod {
             parents.sort(Comparator.comparingInt(Node::getLevel).reversed());
             for (Node parent : parents) {
                 if (parent.getChildren().isEmpty() || !leaves.containsAll(parent.getChildren())
-                        || !desired.ready.contains(parent)
+                        || !desired.isReady(parent)
                         || desired.leaves.stream().noneMatch(n -> n.contains(parent))) continue;
                 List<Node> after = new ArrayList<>(leaves);
                 after.removeAll(parent.getChildren());
@@ -278,6 +283,14 @@ public final class HeightfieldLod {
                 alpha = 0;
                 return;
             }
+        }
+
+        private boolean sameLeafSet(List<Node> desiredLeaves) {
+            if (leaves.size() != desiredLeaves.size()) return false;
+            Set<Node> remaining = Collections.newSetFromMap(new IdentityHashMap<>());
+            remaining.addAll(leaves);
+            for (Node node : desiredLeaves) if (!remaining.remove(node)) return false;
+            return remaining.isEmpty();
         }
 
         public boolean isTransitioning() { return active != null; }
