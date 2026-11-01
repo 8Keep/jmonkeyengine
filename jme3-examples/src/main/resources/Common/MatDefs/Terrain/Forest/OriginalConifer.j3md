@@ -1,0 +1,63 @@
+MaterialDef Original Conifer {
+    MaterialParameters {
+        Texture2D FrondTexture
+        Float AlphaDiscardThreshold : 0.42
+        Color SunColor : 1.3 1.18 0.96 1.0
+        Color AmbientColor : 0.34 0.39 0.31 1.0
+        Vector3 SunDirection : -0.35 -0.82 -0.45
+
+        Boolean UseDirectionalVisibility : false
+        Boolean DirectionalHardwareShadows : false
+        Int DirectionalCascadeCount : 1
+        Float DirectionalShadowMapSize : 1024.0
+        Float DirectionalShadowBias : 0.0005
+        Float DirectionalShadowStrength : 1.0
+        Color DirectionalShadowSplits
+        Vector3 DirectionalShadowLightDir
+        Vector2 DirectionalShadowFade
+        Texture2D DirectionalShadowMap0
+        Texture2D DirectionalShadowMap1
+        Texture2D DirectionalShadowMap2
+        Texture2D DirectionalShadowMap3
+        Matrix4 DirectionalLightViewProjectionMatrix0
+        Matrix4 DirectionalLightViewProjectionMatrix1
+        Matrix4 DirectionalLightViewProjectionMatrix2
+        Matrix4 DirectionalLightViewProjectionMatrix3
+    }
+
+    Technique {
+        VertexShader GLSL300 GLSL150: Common/MatDefs/Terrain/Forest/OriginalConifer.vert
+        FragmentShader GLSL300 GLSL150: Common/MatDefs/Terrain/Forest/OriginalConifer.frag
+
+        WorldParameters {
+            WorldViewProjectionMatrix
+            WorldMatrix
+            WorldNormalMatrix
+            ViewMatrix
+        }
+
+        Defines {
+            DIRECTIONAL_VISIBILITY : UseDirectionalVisibility
+            DIRECTIONAL_HARDWARE_SHADOWS : DirectionalHardwareShadows
+        }
+    }
+
+    // The forced shadow pass uses the same UV.z leaf tag as the visible pass,
+    // so transparent holes in fronds do not become solid depth silhouettes.
+    Technique PreShadow {
+        VertexShader GLSL300 GLSL150: Common/MatDefs/Terrain/Forest/OriginalConiferPreShadow.vert
+        FragmentShader GLSL300 GLSL150: Common/MatDefs/Terrain/Forest/OriginalConiferPreShadow.frag
+
+        WorldParameters {
+            WorldViewProjectionMatrix
+        }
+
+        ForcedRenderState {
+            FaceCull Back
+            DepthTest On
+            DepthWrite On
+            PolyOffset 5 3
+            ColorWrite Off
+        }
+    }
+}
