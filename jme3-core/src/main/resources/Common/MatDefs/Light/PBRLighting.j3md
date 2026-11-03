@@ -129,6 +129,9 @@ MaterialDef PBR Lighting {
         Color DirectionalShadowSplits : 100.0 300.0 900.0 3000.0
         Vector3 DirectionalShadowLightDir
         Vector2 DirectionalShadowFade : 0.0 0.0
+        Int DirectionalShadowFilterMode : 0
+        Float DirectionalCascadeBlendFraction : 0.0
+        Vector4 DirectionalCascadeBlendStarts : 0.0 0.0 0.0 0.0
         Texture2D DirectionalShadowMap0
         Texture2D DirectionalShadowMap1
         Texture2D DirectionalShadowMap2

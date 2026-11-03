@@ -40,6 +40,7 @@ import com.jme3.material.Material;
 import com.jme3.material.MatParam;
 import com.jme3.math.ColorRGBA;
 import com.jme3.math.Vector2f;
+import com.jme3.math.Vector4f;
 import com.jme3.renderer.Camera;
 import com.jme3.renderer.Caps;
 import com.jme3.renderer.RenderManager;
@@ -79,17 +80,31 @@ import java.util.Map;
  * The designated light is matched by world-space travel direction in the packed
  * PBR light data. Other collinear directional lights cannot be distinguished;
  * use one sun with this direction. Four depth samplers and four light matrices
- * consume additional fragment resources. Only Bilinear PCF is supported;
- * hardware comparison can filter each tap, unlike software raw-depth taps.
+ * consume additional fragment resources. Hardware comparison uses bilinear
+ * filtering for the optional tent kernel; the raw-depth fallback compares
+ * individual texels before applying the same weights. Older receiver
+ * definitions without the optional filter and blend parameters remain valid
+ * and use legacy filtering with no shader blend. Camera overlap is renderer-wide.
  */
 public final class DirectionalLightVisibilityRenderer extends DirectionalLightShadowRenderer {
+
+    /** Selects the receiver's shadow comparison kernel. */
+    public enum ShadowFilterMode {
+        /** Existing four comparison taps; this is the default. */
+        LEGACY,
+        /** Five-by-five tent filter, implemented with nine hardware or 36 manual taps. */
+        PCF_5X5
+    }
 
     private static final String ENABLED = "UseDirectionalVisibility";
     private static final String[] OWNED_PARAMETERS = createParameterNames();
     private static final List<ReceiverClaim> RECEIVER_CLAIMS = new ArrayList<>();
     private final Map<Material, Map<String, MatParam>> receivers = new IdentityHashMap<>();
     private final ColorRGBA worldSplits = new ColorRGBA();
+    private final Vector4f worldBlendStarts = new Vector4f();
     private float depthBias = 0.0005f;
+    private ShadowFilterMode shadowFilterMode = ShadowFilterMode.LEGACY;
+    private float cascadeBlendFraction;
     private boolean anyShadowCasters;
     private boolean activatedThisFrame;
 
@@ -121,7 +136,9 @@ public final class DirectionalLightVisibilityRenderer extends DirectionalLightSh
         List<String> names = new ArrayList<>();
         Collections.addAll(names, ENABLED, "DirectionalHardwareShadows", "DirectionalCascadeCount",
                 "DirectionalShadowMapSize", "DirectionalShadowBias", "DirectionalShadowStrength",
-                "DirectionalShadowSplits", "DirectionalShadowLightDir", "DirectionalShadowFade");
+                "DirectionalShadowSplits", "DirectionalShadowLightDir", "DirectionalShadowFade",
+                "DirectionalShadowFilterMode", "DirectionalCascadeBlendFraction",
+                "DirectionalCascadeBlendStarts");
         for (int i = 0; i < 4; i++) {
             names.add("DirectionalShadowMap" + i);
             names.add("DirectionalLightViewProjectionMatrix" + i);
@@ -146,7 +163,7 @@ public final class DirectionalLightVisibilityRenderer extends DirectionalLightSh
             return;
         }
         for (String name : OWNED_PARAMETERS) {
-            if (material.getMaterialDef().getMaterialParam(name) == null) {
+            if (!isOptionalParameter(name) && material.getMaterialDef().getMaterialParam(name) == null) {
                 throw new IllegalArgumentException("Material definition does not declare " + name);
             }
         }
@@ -163,6 +180,49 @@ public final class DirectionalLightVisibilityRenderer extends DirectionalLightSh
         }
         claimReceiver(material);
         receivers.put(material, saved);
+    }
+
+    private static boolean isOptionalParameter(String name) {
+        return "DirectionalShadowFilterMode".equals(name)
+                || "DirectionalCascadeBlendFraction".equals(name)
+                || "DirectionalCascadeBlendStarts".equals(name);
+    }
+
+    /** Returns the selected receiver filter kernel. */
+    public ShadowFilterMode getShadowFilterMode() {
+        return shadowFilterMode;
+    }
+
+    /**
+     * Selects the receiver filter kernel. The legacy kernel is the default;
+     * receiver definitions without the optional filter parameter keep that kernel.
+     */
+    public void setShadowFilterMode(ShadowFilterMode mode) {
+        if (mode == null) {
+            throw new IllegalArgumentException("shadow filter mode cannot be null");
+        }
+        shadowFilterMode = mode;
+    }
+
+    /** Returns the cascade blend band as a fraction of the preceding cascade interval. */
+    public float getCascadeBlendFraction() {
+        return cascadeBlendFraction;
+    }
+
+    /**
+     * Sets the cascade blend band as a fraction of each preceding cascade interval.
+     * A nonzero band expands each following cascade's shadow-camera frustum so
+     * both maps cover the complete transition interval. This camera overlap is
+     * renderer-wide; older receiver definitions without the optional blend
+     * parameters remain valid and do not blend their shader visibility.
+     *
+     * @param fraction finite fraction from zero through 0.2
+     */
+    public void setCascadeBlendFraction(float fraction) {
+        if (!Float.isFinite(fraction) || fraction < 0f || fraction > 0.2f) {
+            throw new IllegalArgumentException("cascade blend fraction must be finite and between zero and 0.2");
+        }
+        cascadeBlendFraction = fraction;
     }
 
     private void claimReceiver(Material material) {
@@ -282,7 +342,7 @@ public final class DirectionalLightVisibilityRenderer extends DirectionalLightSh
 
     private void checkFilterMode() {
         if (edgeFilteringMode != EdgeFilteringMode.Bilinear) {
-            throw new UnsupportedOperationException("Directional visibility supports only Bilinear four-tap PCF filtering");
+            throw new UnsupportedOperationException("Directional visibility requires the Bilinear depth-comparison setup");
         }
     }
 
@@ -315,6 +375,37 @@ public final class DirectionalLightVisibilityRenderer extends DirectionalLightSh
                 nbShadowMaps > 1 ? splitsArray[2] : last,
                 nbShadowMaps > 2 ? splitsArray[3] : last,
                 nbShadowMaps > 3 ? splitsArray[4] : last);
+        worldBlendStarts.set(worldSplits.r, worldSplits.g, worldSplits.b, worldSplits.a);
+        for (int boundary = 1; boundary < nbShadowMaps; boundary++) {
+            float split = splitsArray[boundary];
+            float previous = splitsArray[boundary - 1];
+            float start = calculateCascadeBlendStart(previous, split, cascadeBlendFraction);
+            switch (boundary) {
+                case 1:
+                    worldBlendStarts.x = start;
+                    break;
+                case 2:
+                    worldBlendStarts.y = start;
+                    break;
+                case 3:
+                    worldBlendStarts.z = start;
+                    break;
+                default:
+                    throw new IllegalStateException("Unsupported cascade boundary: " + boundary);
+            }
+        }
+    }
+
+    static float calculateCascadeBlendStart(float previousSplit, float split, float fraction) {
+        return split - (split - previousSplit) * fraction;
+    }
+
+    @Override
+    protected float getCascadeNearDepth(int shadowMapIndex, float splitNear) {
+        if (shadowMapIndex == 0 || cascadeBlendFraction == 0f) {
+            return splitNear;
+        }
+        return calculateCascadeBlendStart(splitsArray[shadowMapIndex - 1], splitNear, cascadeBlendFraction);
     }
 
     @Override
@@ -381,6 +472,15 @@ public final class DirectionalLightVisibilityRenderer extends DirectionalLightSh
         material.setFloat("DirectionalShadowBias", depthBias);
         material.setFloat("DirectionalShadowStrength", shadowIntensity);
         material.setColor("DirectionalShadowSplits", worldSplits);
+        if (material.getMaterialDef().getMaterialParam("DirectionalShadowFilterMode") != null) {
+            material.setInt("DirectionalShadowFilterMode", shadowFilterMode == ShadowFilterMode.PCF_5X5 ? 1 : 0);
+        }
+        boolean supportsBlend = material.getMaterialDef().getMaterialParam("DirectionalCascadeBlendFraction") != null
+                && material.getMaterialDef().getMaterialParam("DirectionalCascadeBlendStarts") != null;
+        if (supportsBlend) {
+            material.setFloat("DirectionalCascadeBlendFraction", cascadeBlendFraction);
+            material.setVector4("DirectionalCascadeBlendStarts", worldBlendStarts);
+        }
         material.setVector3("DirectionalShadowLightDir", light.getDirection());
         if (fadeInfo == null) {
             material.setVector2("DirectionalShadowFade", new Vector2f(0f, 0f));

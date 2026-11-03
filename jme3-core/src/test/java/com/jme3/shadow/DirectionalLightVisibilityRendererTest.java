@@ -38,6 +38,7 @@ import com.jme3.material.Material;
 import com.jme3.material.MaterialDef;
 import com.jme3.math.ColorRGBA;
 import com.jme3.math.Vector3f;
+import com.jme3.math.Vector4f;
 import com.jme3.renderer.queue.RenderQueue;
 import com.jme3.renderer.Camera;
 import com.jme3.renderer.Caps;
@@ -76,6 +77,27 @@ class DirectionalLightVisibilityRendererTest {
     }
 
     @Test
+    void validatesOptionalFilterAndCascadeBlendSettings() {
+        DirectionalLightVisibilityRenderer renderer = newRenderer();
+
+        assertEquals(DirectionalLightVisibilityRenderer.ShadowFilterMode.LEGACY,
+                renderer.getShadowFilterMode());
+        assertEquals(0f, renderer.getCascadeBlendFraction());
+        renderer.setShadowFilterMode(DirectionalLightVisibilityRenderer.ShadowFilterMode.PCF_5X5);
+        renderer.setCascadeBlendFraction(0.2f);
+        assertEquals(DirectionalLightVisibilityRenderer.ShadowFilterMode.PCF_5X5,
+                renderer.getShadowFilterMode());
+        assertEquals(0.2f, renderer.getCascadeBlendFraction());
+
+        assertThrows(IllegalArgumentException.class, () -> renderer.setShadowFilterMode(null));
+        assertThrows(IllegalArgumentException.class, () -> renderer.setCascadeBlendFraction(-0.01f));
+        assertThrows(IllegalArgumentException.class, () -> renderer.setCascadeBlendFraction(0.2001f));
+        assertThrows(IllegalArgumentException.class, () -> renderer.setCascadeBlendFraction(Float.NaN));
+        assertThrows(IllegalArgumentException.class,
+                () -> renderer.setCascadeBlendFraction(Float.POSITIVE_INFINITY));
+    }
+
+    @Test
     void rejectsNonfiniteCascadeSettingsBeforeNativeUse() {
         DirectionalLightVisibilityRenderer renderer = newRenderer();
         assertThrows(IllegalArgumentException.class, () -> renderer.setLambda(Float.NaN));
@@ -95,6 +117,9 @@ class DirectionalLightVisibilityRendererTest {
         material.setFloat("DirectionalShadowBias", 0.125f);
         ColorRGBA originalSplits = new ColorRGBA(2f, 4f, 8f, 16f);
         material.setColor("DirectionalShadowSplits", originalSplits);
+        material.setInt("DirectionalShadowFilterMode", 1);
+        material.setFloat("DirectionalCascadeBlendFraction", 0.125f);
+        material.setVector4("DirectionalCascadeBlendStarts", new Vector4f(1f, 2f, 3f, 4f));
 
         renderer.addReceiver(material);
         renderer.addReceiver(material);
@@ -106,6 +131,10 @@ class DirectionalLightVisibilityRendererTest {
         assertFalse((Boolean) material.getParamValue("UseDirectionalVisibility"));
         assertEquals(0.125f, (Float) material.getParamValue("DirectionalShadowBias"));
         assertEquals(originalSplits, material.getParamValue("DirectionalShadowSplits"));
+        assertEquals(1, (Integer) material.getParamValue("DirectionalShadowFilterMode"));
+        assertEquals(0.125f, (Float) material.getParamValue("DirectionalCascadeBlendFraction"));
+        assertEquals(new Vector4f(1f, 2f, 3f, 4f),
+                material.getParamValue("DirectionalCascadeBlendStarts"));
         assertTrue(material.getParamValue("DirectionalShadowMap0") == null);
         assertTrue(material.getParamValue("DirectionalLightViewProjectionMatrix0") == null);
     }
@@ -119,6 +148,20 @@ class DirectionalLightVisibilityRendererTest {
 
         Material ordinary = new Material(new MaterialDef(assetManager(), "ordinary"));
         assertThrows(IllegalArgumentException.class, () -> renderer.addReceiver(ordinary));
+    }
+
+    @Test
+    void acceptsOlderReceiverDefinitionsWithoutOptionalFilterAndBlendParameters() {
+        DirectionalLightVisibilityRenderer renderer = newRenderer();
+        Material oldReceiver = receiverMaterial(false);
+
+        renderer.addReceiver(oldReceiver);
+        renderer.setShadowFilterMode(DirectionalLightVisibilityRenderer.ShadowFilterMode.PCF_5X5);
+        renderer.setCascadeBlendFraction(0.1f);
+        assertTrue(renderer.removeReceiver(oldReceiver));
+        assertTrue(oldReceiver.getParam("DirectionalShadowFilterMode") == null);
+        assertTrue(oldReceiver.getParam("DirectionalCascadeBlendFraction") == null);
+        assertTrue(oldReceiver.getParam("DirectionalCascadeBlendStarts") == null);
     }
 
     @Test
@@ -176,6 +219,46 @@ class DirectionalLightVisibilityRendererTest {
 
         assertTrue(renderer.splitsArray[1] > 1f);
         assertEquals(100f, renderer.splitsArray[2]);
+    }
+
+    @Test
+    void cascadeNearHookUsesTheSameBoundedBlendBandAsReceiverSplits() {
+        DirectionalLightVisibilityRenderer renderer = newRenderer();
+        renderer.setLight(new DirectionalLight(new Vector3f(-1f, -2f, -3f).normalizeLocal()));
+        Camera camera = new Camera(800, 600);
+        camera.setFrustumPerspective(45f, 4f / 3f, 1f, 100f);
+        camera.update();
+        renderer.updateShadowCams(camera);
+
+        float split = renderer.splitsArray[1];
+        float previous = renderer.splitsArray[0];
+        assertEquals(split, renderer.getCascadeNearDepth(1, split));
+        renderer.setCascadeBlendFraction(0.1f);
+        assertEquals(split - (split - previous) * 0.1f,
+                renderer.getCascadeNearDepth(1, split), 1e-6f);
+        assertTrue(renderer.getCascadeNearDepth(1, split) < split);
+        assertEquals(split, DirectionalLightVisibilityRenderer.calculateCascadeBlendStart(previous, split, 0f));
+    }
+
+    @Test
+    void tentPcfHardwareGroupingAndRawTexelPathMatchDirectOracleAcrossUvPhasesAndEdges() {
+        float[][] comparisons = new float[8][8];
+        for (int y = 0; y < comparisons.length; y++) {
+            for (int x = 0; x < comparisons[y].length; x++) {
+                comparisons[y][x] = (x * 17 + y * 11 + x * y * 3) % 5 == 0 ? 0f : 1f;
+            }
+        }
+        float[] uvPhases = {0f, 0.03125f, 0.09375f, 0.15625f, 0.5f, 0.84375f, 0.90625f, 0.96875f, 1f};
+
+        for (float u : uvPhases) {
+            for (float v : uvPhases) {
+                float expected = directTentOracle(comparisons, u, v);
+                assertEquals(expected, groupedHardwareTent(comparisons, u, v), 2e-6f,
+                        "hardware pair grouping at UV " + u + ", " + v);
+                assertEquals(expected, rawTexelTent(comparisons, u, v), 2e-6f,
+                        "raw-depth texel path at UV " + u + ", " + v);
+            }
+        }
     }
 
     @Test
@@ -262,7 +345,109 @@ class DirectionalLightVisibilityRendererTest {
         return new DesktopAssetManager(true);
     }
 
+    /** Direct five-by-five tent of bilinear comparison samples; outside is lit. */
+    private static float directTentOracle(float[][] field, float u, float v) {
+        int size = field.length;
+        float px = u * size - 0.5f;
+        float py = v * size - 0.5f;
+        float sum = 0f;
+        for (int y = -2; y <= 2; y++) {
+            float wy = 3f - Math.abs(y);
+            for (int x = -2; x <= 2; x++) {
+                float wx = 3f - Math.abs(x);
+                sum += bilinearComparison(field, px + x, py + y) * wx * wy;
+            }
+        }
+        return sum / 81f;
+    }
+
+    private static float directSixTapWeight(int offset, float phase) {
+        switch (offset) {
+            case -2:
+                return 1f - phase;
+            case -1:
+                return 2f - phase;
+            case 0:
+                return 3f - phase;
+            case 1:
+                return 2f + phase;
+            case 2:
+                return 1f + phase;
+            case 3:
+                return phase;
+            default:
+                throw new IllegalArgumentException("offset outside the tent footprint");
+        }
+    }
+
+    /** Emulates the three bilinear pair centroids used by the hardware filter. */
+    private static float groupedHardwareTent(float[][] field, float u, float v) {
+        int size = field.length;
+        float px = u * size - 0.5f;
+        float py = v * size - 0.5f;
+        float baseX = (float) Math.floor(px);
+        float baseY = (float) Math.floor(py);
+        float phaseX = px - baseX;
+        float phaseY = py - baseY;
+        float[] weightX = {3f - 2f * phaseX, 5f, 1f + 2f * phaseX};
+        float[] weightY = {3f - 2f * phaseY, 5f, 1f + 2f * phaseY};
+        float[] offsetX = {-2f + (2f - phaseX) / weightX[0],
+            (2f + phaseX) / 5f, 2f + phaseX / weightX[2]};
+        float[] offsetY = {-2f + (2f - phaseY) / weightY[0],
+            (2f + phaseY) / 5f, 2f + phaseY / weightY[2]};
+        float sum = 0f;
+        for (int y = 0; y < 3; y++) {
+            for (int x = 0; x < 3; x++) {
+                sum += bilinearComparison(field, baseX + offsetX[x], baseY + offsetY[y])
+                        * weightX[x] * weightY[y];
+            }
+        }
+        return sum / 81f;
+    }
+
+    /** Emulates the six-by-six texelFetch fallback. */
+    private static float rawTexelTent(float[][] field, float u, float v) {
+        int size = field.length;
+        float px = u * size - 0.5f;
+        float py = v * size - 0.5f;
+        int baseX = (int) Math.floor(px);
+        int baseY = (int) Math.floor(py);
+        float phaseX = px - baseX;
+        float phaseY = py - baseY;
+        float sum = 0f;
+        for (int y = -2; y <= 3; y++) {
+            for (int x = -2; x <= 3; x++) {
+                sum += comparisonAt(field, baseX + x, baseY + y)
+                        * directSixTapWeight(x, phaseX) * directSixTapWeight(y, phaseY);
+            }
+        }
+        return sum / 81f;
+    }
+
+    private static float bilinearComparison(float[][] field, float x, float y) {
+        int baseX = (int) Math.floor(x);
+        int baseY = (int) Math.floor(y);
+        float phaseX = x - baseX;
+        float phaseY = y - baseY;
+        float lower = comparisonAt(field, baseX, baseY) * (1f - phaseX)
+                + comparisonAt(field, baseX + 1, baseY) * phaseX;
+        float upper = comparisonAt(field, baseX, baseY + 1) * (1f - phaseX)
+                + comparisonAt(field, baseX + 1, baseY + 1) * phaseX;
+        return lower * (1f - phaseY) + upper * phaseY;
+    }
+
+    private static float comparisonAt(float[][] field, int x, int y) {
+        if (x < 0 || y < 0 || y >= field.length || x >= field[y].length) {
+            return 1f;
+        }
+        return field[y][x];
+    }
+
     private static Material receiverMaterial() {
+        return receiverMaterial(true);
+    }
+
+    private static Material receiverMaterial(boolean includeOptionalParameters) {
         MaterialDef def = new MaterialDef(assetManager(), "directional-visibility-test");
         def.addMaterialParam(VarType.Boolean, "UseDirectionalVisibility", false);
         def.addMaterialParam(VarType.Boolean, "DirectionalHardwareShadows", false);
@@ -273,6 +458,11 @@ class DirectionalLightVisibilityRendererTest {
         def.addMaterialParam(VarType.Vector4, "DirectionalShadowSplits", null);
         def.addMaterialParam(VarType.Vector3, "DirectionalShadowLightDir", null);
         def.addMaterialParam(VarType.Vector2, "DirectionalShadowFade", null);
+        if (includeOptionalParameters) {
+            def.addMaterialParam(VarType.Int, "DirectionalShadowFilterMode", 0);
+            def.addMaterialParam(VarType.Float, "DirectionalCascadeBlendFraction", 0f);
+            def.addMaterialParam(VarType.Vector4, "DirectionalCascadeBlendStarts", null);
+        }
         for (int i = 0; i < 4; i++) {
             def.addMaterialParamTexture(VarType.Texture2D, "DirectionalShadowMap" + i, ColorSpace.Linear, null);
             def.addMaterialParam(VarType.Matrix4, "DirectionalLightViewProjectionMatrix" + i, null);

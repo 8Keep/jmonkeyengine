@@ -11,6 +11,9 @@ uniform float m_DirectionalShadowStrength;
 uniform vec4 m_DirectionalShadowSplits;
 uniform vec3 m_DirectionalShadowLightDir;
 uniform vec2 m_DirectionalShadowFade;
+uniform int m_DirectionalShadowFilterMode;
+uniform float m_DirectionalCascadeBlendFraction;
+uniform vec4 m_DirectionalCascadeBlendStarts;
 uniform mat4 m_DirectionalLightViewProjectionMatrix0;
 uniform mat4 m_DirectionalLightViewProjectionMatrix1;
 uniform mat4 m_DirectionalLightViewProjectionMatrix2;
@@ -49,6 +52,101 @@ float DirectionalVisibilityTap(
     return DirectionalVisibilityCompare(shadowMap, uv, depth);
 }
 
+#ifdef DIRECTIONAL_HARDWARE_SHADOWS
+float DirectionalVisibilityBilinearPcfTap(sampler2DShadow shadowMap, vec2 uv, float depth, ivec2 mapSize) {
+    vec2 p = uv * vec2(mapSize) - 0.5;
+    ivec2 base = ivec2(floor(p));
+    vec2 phase = fract(p);
+    if (any(lessThan(base, ivec2(0))) || any(greaterThanEqual(base + ivec2(1), mapSize))) {
+        // At a map edge, reconstruct the bilinear comparison from four
+        // texel-center comparisons and treat outside texels as fully lit.
+        float visibility = 0.0;
+        for (int y = 0; y <= 1; ++y) {
+            for (int x = 0; x <= 1; ++x) {
+                ivec2 coord = base + ivec2(x, y);
+                float weightX = x == 0 ? 1.0 - phase.x : phase.x;
+                float weightY = y == 0 ? 1.0 - phase.y : phase.y;
+                if (all(greaterThanEqual(coord, ivec2(0))) && all(lessThan(coord, mapSize))) {
+                    vec2 centerUv = (vec2(coord) + 0.5) / vec2(mapSize);
+                    visibility += DirectionalVisibilityCompare(shadowMap, centerUv, depth) * weightX * weightY;
+                } else {
+                    visibility += weightX * weightY;
+                }
+            }
+        }
+        return visibility;
+    }
+    return DirectionalVisibilityCompare(shadowMap, uv, depth);
+}
+#else
+float DirectionalVisibilityRawPcfTap(sampler2D shadowMap, ivec2 coord, ivec2 mapSize, float depth) {
+    if (any(lessThan(coord, ivec2(0))) || any(greaterThanEqual(coord, mapSize))) {
+        return 1.0;
+    }
+    // Compare each depth texel before filtering; hardware bilinear filtering
+    // of raw depth followed by one comparison is not PCF.
+    return step(depth, texelFetch(shadowMap, coord, 0).r);
+}
+#endif
+
+// Separable {1,2,3,2,1} tent: pair six phase-dependent texel weights
+// into three bilinear comparisons per axis. Derived from the filter weights;
+// see Castaño, https://www.ludicon.com/castano/blog/articles/shadow-mapping-summary-part-1/
+float DirectionalVisibilitySamplePcf5x5(
+        #ifdef DIRECTIONAL_HARDWARE_SHADOWS
+        sampler2DShadow shadowMap,
+        #else
+        sampler2D shadowMap,
+        #endif
+        vec2 uv, float depth) {
+    #ifdef DIRECTIONAL_HARDWARE_SHADOWS
+    ivec2 mapSize = ivec2(int(max(m_DirectionalShadowMapSize, 1.0)));
+    vec2 p = uv * vec2(mapSize) - 0.5;
+    vec2 base = floor(p);
+    vec2 phase = fract(p);
+    vec3 weightsX = vec3(3.0 - 2.0 * phase.x, 5.0, 1.0 + 2.0 * phase.x);
+    vec3 weightsY = vec3(3.0 - 2.0 * phase.y, 5.0, 1.0 + 2.0 * phase.y);
+    vec3 offsetsX = vec3(-2.0 + (2.0 - phase.x) / weightsX.x,
+                         (2.0 + phase.x) / 5.0,
+                         2.0 + phase.x / weightsX.z);
+    vec3 offsetsY = vec3(-2.0 + (2.0 - phase.y) / weightsY.x,
+                         (2.0 + phase.y) / 5.0,
+                         2.0 + phase.y / weightsY.z);
+    float visibility = 0.0;
+    for (int y = 0; y < 3; ++y) {
+        for (int x = 0; x < 3; ++x) {
+            vec2 tapUv = (base + vec2(offsetsX[x], offsetsY[y]) + 0.5) / vec2(mapSize);
+            float tap = DirectionalVisibilityBilinearPcfTap(shadowMap, tapUv, depth, mapSize);
+            visibility += tap * weightsX[x] * weightsY[y];
+        }
+    }
+    return visibility / 81.0;
+    #else
+    ivec2 mapSize = textureSize(shadowMap, 0);
+    vec2 p = uv * vec2(mapSize) - 0.5;
+    ivec2 base = ivec2(floor(p));
+    vec2 phase = fract(p);
+    float visibility = 0.0;
+    for (int y = -2; y <= 3; ++y) {
+        float weightY = y == -2 ? 1.0 - phase.y
+                : (y == -1 ? 2.0 - phase.y
+                : (y == 0 ? 3.0 - phase.y
+                : (y == 1 ? 2.0 + phase.y
+                : (y == 2 ? 1.0 + phase.y : phase.y))));
+        for (int x = -2; x <= 3; ++x) {
+            float weightX = x == -2 ? 1.0 - phase.x
+                    : (x == -1 ? 2.0 - phase.x
+                    : (x == 0 ? 3.0 - phase.x
+                    : (x == 1 ? 2.0 + phase.x
+                    : (x == 2 ? 1.0 + phase.x : phase.x))));
+            float weight = weightX * weightY;
+            visibility += DirectionalVisibilityRawPcfTap(shadowMap, base + ivec2(x, y), mapSize, depth) * weight;
+        }
+    }
+    return visibility / 81.0;
+    #endif
+}
+
 float DirectionalVisibilitySample(
         #ifdef DIRECTIONAL_HARDWARE_SHADOWS
         sampler2DShadow shadowMap,
@@ -71,6 +169,9 @@ float DirectionalVisibilitySample(
     // Bias is subtracted from normalized depth; its world-space equivalent depends
     // on the projection depth range.
     depth -= m_DirectionalShadowBias;
+    if (m_DirectionalShadowFilterMode == 1) {
+        return DirectionalVisibilitySamplePcf5x5(shadowMap, uv, depth);
+    }
     vec2 texel = vec2(1.0 / max(m_DirectionalShadowMapSize, 1.0));
     float visibility = 0.0;
     visibility += DirectionalVisibilityTap(shadowMap, uv + texel * vec2(-0.5, -0.5), depth);
@@ -108,6 +209,22 @@ float DirectionalVisibilityForPosition(vec3 worldPosition, float positiveViewDep
     if (count > 3 && positiveViewDepth > m_DirectionalShadowSplits.z) cascade = 3;
 
     float visibility = DirectionalVisibilityForCascade(cascade, worldPosition);
+    if (m_DirectionalCascadeBlendFraction > 0.0 && cascade < count - 1) {
+        float split = m_DirectionalShadowSplits.x;
+        float blendStart = m_DirectionalCascadeBlendStarts.x;
+        if (cascade == 1) {
+            split = m_DirectionalShadowSplits.y;
+            blendStart = m_DirectionalCascadeBlendStarts.y;
+        } else if (cascade == 2) {
+            split = m_DirectionalShadowSplits.z;
+            blendStart = m_DirectionalCascadeBlendStarts.z;
+        }
+        if (positiveViewDepth > blendStart) {
+            float nextVisibility = DirectionalVisibilityForCascade(cascade + 1, worldPosition);
+            float blend = smoothstep(blendStart, split, positiveViewDepth);
+            visibility = mix(visibility, nextVisibility, blend);
+        }
+    }
     // Fade optional shadowing to fully lit starting at x over a 1/inverseRange
     // distance. The caller may set inverseRange to zero to disable the fade.
     if (m_DirectionalShadowFade.y > 0.0) {
