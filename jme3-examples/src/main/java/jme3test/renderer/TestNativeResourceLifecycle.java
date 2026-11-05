@@ -36,6 +36,7 @@ import com.jme3.math.ColorRGBA;
 import com.jme3.renderer.Caps;
 import com.jme3.renderer.Renderer;
 import com.jme3.renderer.RenderContext;
+import com.jme3.renderer.lwjgl.LwjglGLES;
 import com.jme3.renderer.opengl.GL4;
 import com.jme3.renderer.opengl.GLFence;
 import com.jme3.renderer.opengl.GLRenderer;
@@ -65,7 +66,9 @@ import javax.imageio.ImageIO;
  * Asset-free pixel probe for explicit resource deletion, recreation, stale
  * deferred disposal and shutdown cleanup. UBO drawing is required on GL/GLES;
  * the same buffer is also read through an independent SSBO binding on desktop
- * GL4. GLES storage-block/fence wrappers are not claimed by this example.
+ * GL4. Invalid binding and unsupported managed storage blocks must reject
+ * before allocation. GLES fences use existing raw GLExt creation and managed
+ * deletion; this example does not introduce a portable fence creation API.
  * Arguments: renderer name, output directory. Run with Java assertions enabled.
  */
 public final class TestNativeResourceLifecycle extends SimpleApplication {
@@ -185,10 +188,11 @@ public final class TestNativeResourceLifecycle extends SimpleApplication {
             last = draw(renderer, framebuffer, shader, mesh);
         }
 
-        GL4 gl4 = ((GLRenderer) renderer).getGl4();
-        if (gl4 != null && renderer.getCaps().contains(Caps.OpenGL32)) {
+        boolean fences = renderer.getCaps().contains(Caps.OpenGL32)
+                || renderer.getCaps().contains(Caps.OpenGLES30);
+        if (fences) {
             for (int i = 0; i < 4; i++) {
-                GLFence fence = gl4.glFenceSync(GL4.GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+                GLFence fence = newFence(renderer);
                 renderer.registerNativeObject(fence);
                 fence.dispose();
                 renderer.deleteFence(fence);
@@ -196,14 +200,22 @@ public final class TestNativeResourceLifecycle extends SimpleApplication {
                 require(fence.getId() == NativeObject.INVALID_ID, "fence retired");
             }
             // Leave a live replacement for manager-owned shutdown cleanup.
-            renderer.registerNativeObject(gl4.glFenceSync(GL4.GL_SYNC_GPU_COMMANDS_COMPLETE, 0));
+            renderer.registerNativeObject(newFence(renderer));
         }
         writePixels(last);
         renderer.setFrameBuffer(null);
         System.out.println("NATIVE_LIFECYCLE_DRAW_PASS storage=" + storage
-                + " fence=" + (gl4 != null) + " checks=" + checks);
+                + " fence=" + fences + " checks=" + checks);
         // Shader, VBs, BO, FBO and optional fence remain registered. Assertion-
         // enabled app.stop(true) checks ordinary manager-owned teardown too.
+    }
+
+    private GLFence newFence(Renderer renderer) {
+        if (renderer.getCaps().contains(Caps.OpenGLES30)) {
+            Object sync = new LwjglGLES().glFenceSync(GL4.GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+            return new GLFence(((Long) sync).longValue(), null);
+        }
+        return ((GLRenderer) renderer).getGl4().glFenceSync(GL4.GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
     }
 
     private void verifyRejectedBindings(Renderer renderer) {
