@@ -45,7 +45,6 @@ import com.jme3.renderer.Camera;
 import com.jme3.scene.VertexBuffer.Type;
 import com.jme3.scene.mesh.MorphTarget;
 import com.jme3.scene.threadwarden.SceneGraphThreadWarden;
-import com.jme3.util.TempVars;
 import com.jme3.util.clone.Cloner;
 import com.jme3.util.clone.IdentityCloneFunction;
 import java.io.IOException;
@@ -438,12 +437,7 @@ public class Geometry extends Spatial {
         cachedWorldMat.setRotationQuaternion(worldTransform.getRotation());
         cachedWorldMat.setTranslation(worldTransform.getTranslation());
 
-        TempVars vars = TempVars.get();
-        Matrix4f scaleMat = vars.tempMat4;
-        scaleMat.loadIdentity();
-        scaleMat.scale(worldTransform.getScale());
-        cachedWorldMat.multLocal(scaleMat);
-        vars.release();
+        cachedWorldMat.scale(worldTransform.getScale());
     }
 
     /**
