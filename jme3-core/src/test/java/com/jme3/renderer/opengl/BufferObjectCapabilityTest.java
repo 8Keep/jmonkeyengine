@@ -341,6 +341,71 @@ class BufferObjectCapabilityTest {
         assertEquals(1, gl.primaryBufferBaseCalls);
     }
 
+    @Test
+    void desktop31ArbSyncUsesExtensionAndPreservesOpaqueNativeHandles() throws Exception {
+        RecordingGl gl = new RecordingGl();
+        gl.version = "3.1 test";
+        gl.glslVersion = "1.40 test";
+        gl.extensions = "GL_ARB_sync";
+        GLRenderer renderer = gl.renderer(true);
+        invokePrivate(renderer, "loadCapabilities");
+
+        GLFence longHandleFence = new GLFence(0x23456789L, null);
+        renderer.registerNativeObject(longHandleFence);
+        renderer.deleteFence(longHandleFence);
+        assertEquals(Long.valueOf(0x23456789L), gl.deletedSyncHandles.get(0));
+
+        Object nativeSync = new Object();
+        GLFence nativeHandleFence = new GLFence(0x3456789AL, nativeSync);
+        renderer.registerNativeObject(nativeHandleFence);
+        renderer.deleteFence(nativeHandleFence);
+        assertEquals(nativeSync, gl.deletedSyncHandles.get(1));
+
+        int deleteCalls = gl.extensionDeleteSyncCalls;
+        manager(renderer).deleteAllObjects(renderer);
+        assertEquals(deleteCalls, gl.extensionDeleteSyncCalls);
+        assertEquals(2, gl.extensionDeleteSyncCalls);
+        assertEquals(0, gl.primaryDeleteSyncCalls);
+    }
+
+    @Test
+    void esFenceDeleteUsesLongHandleAndResets() {
+        RecordingGl gl = new RecordingGl();
+        GLRenderer renderer = gl.glesRenderer();
+        renderer.getCaps().add(Caps.OpenGLES30);
+        GLFence fence = new GLFence(0x123456789L, null);
+        renderer.registerNativeObject(fence);
+
+        renderer.deleteFence(fence);
+
+        assertEquals(1, gl.deletedFenceIds.size());
+        assertEquals(Long.valueOf(0x123456789L), gl.deletedFenceIds.get(0));
+        assertEquals(-1, fence.getId());
+        manager(renderer).deleteAllObjects(renderer);
+        assertEquals(1, gl.deletedFenceIds.size());
+    }
+
+    @Test
+    void unsupportedFenceDeleteRejectsBeforeMutationButInvalidDeleteIsHarmless() throws Exception {
+        RecordingGl gl = new RecordingGl();
+        GLRenderer renderer = gl.renderer(false);
+        GLFence fence = new GLFence(123L, null);
+
+        assertThrows(UnsupportedOperationException.class,
+                () -> renderer.registerNativeObject(fence));
+        assertTrue(fence.getId() >= 0);
+        manager(renderer).deleteAllObjects(renderer);
+        assertEquals(0, gl.deletedFenceIds.size());
+        assertThrows(UnsupportedOperationException.class, () -> renderer.deleteFence(fence));
+        assertTrue(fence.getId() >= 0);
+        assertEquals(0, gl.deletedFenceIds.size());
+
+        GLFence invalid = new GLFence(124L, null);
+        invalid.resetObject();
+        renderer.deleteFence(invalid);
+        assertEquals(0, gl.deletedFenceIds.size());
+    }
+
     private static BufferObject cleanBuffer(int id) {
         BufferObject buffer = new BufferObject();
         buffer.setId(id);
