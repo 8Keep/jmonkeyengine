@@ -261,19 +261,19 @@ public abstract class LwjglContext implements JmeContext {
 
                 if (settings.isGraphicsDebug()) {
                     gles = (GL) GLDebug.createProxy(gles, gles, GL.class, GL2.class, GLES_30.class,
-                            GLCompute.class, GLFbo.class, GLExt.class);
+                            GLCompute.class, GLIndirect.class, GLFbo.class, GLExt.class);
 
                 }
 
                 if (settings.isGraphicsTiming()) {
                     GLTimingState timingState = new GLTimingState();
                     gles = (GL) GLTiming.createGLTiming(gles, timingState, GL.class, GL2.class,
-                            GLES_30.class, GLCompute.class, GLFbo.class, GLExt.class);
+                            GLES_30.class, GLCompute.class, GLIndirect.class, GLFbo.class, GLExt.class);
                 }
 
                 if (settings.isGraphicsTrace()) {
                     gles = (GL) GLTracer.createGlesTracer(gles, GL.class, GL2.class, GLES_30.class,
-                            GLCompute.class, GLFbo.class, GLExt.class);
+                            GLCompute.class, GLIndirect.class, GLFbo.class, GLExt.class);
                 }
 
                 gl = gles;
