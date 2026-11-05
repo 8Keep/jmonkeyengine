@@ -185,7 +185,8 @@ public class DirectionalLightShadowRenderer extends AbstractShadowRenderer {
     protected GeometryList getOccludersToRender(int shadowMapIndex, GeometryList shadowMapOccluders) {
 
         // update frustum points based on current camera and split
-        ShadowUtil.updateFrustumPoints(viewPort.getCamera(), splitsArray[shadowMapIndex], splitsArray[shadowMapIndex + 1], 1.0f, points);
+        float nearDepth = getCascadeNearDepth(shadowMapIndex, splitsArray[shadowMapIndex]);
+        ShadowUtil.updateFrustumPoints(viewPort.getCamera(), nearDepth, splitsArray[shadowMapIndex + 1], 1.0f, points);
 
         //Updating shadow cam with current split frusta
         if (lightReceivers.size()==0) {
@@ -196,6 +197,19 @@ public class DirectionalLightShadowRenderer extends AbstractShadowRenderer {
         ShadowUtil.updateShadowCamera(viewPort, lightReceivers, shadowCam, points, shadowMapOccluders, stabilize?shadowMapSize:0);
 
         return shadowMapOccluders;
+    }
+
+    /**
+     * Returns the near depth used to build a cascade's shadow-camera frustum.
+     * Subclasses can extend a cascade toward the viewer when adjacent cascades
+     * share a blend band. The default preserves the original split exactly.
+     *
+     * @param shadowMapIndex the cascade index
+     * @param splitNear the unmodified cascade near split
+     * @return the near depth for the cascade frustum
+     */
+    protected float getCascadeNearDepth(int shadowMapIndex, float splitNear) {
+        return splitNear;
     }
 
     @Override
