@@ -140,8 +140,7 @@ public final class Technique {
         TechniqueDefLogic logic = def.getLogic();
         AssetManager assetManager = owner.getMaterialDef().getAssetManager();
 
-        dynamicDefines.clear();
-        dynamicDefines.setAll(paramDefines);
+        dynamicDefines.copyFrom(paramDefines);
 
         if (worldOverrides != null) {
             applyOverrides(dynamicDefines, worldOverrides);

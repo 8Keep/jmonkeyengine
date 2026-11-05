@@ -257,6 +257,80 @@ public class DefineListTest {
     }
 
     @Test
+    public void testCopyFromReplacesAllDefines() {
+        DefineList source = new DefineList(NUM_DEFINES);
+        source.set(BOOL_VAR, true);
+        source.set(INT_VAR, 123);
+
+        DefineList target = new DefineList(NUM_DEFINES);
+        target.set(FLOAT_VAR, 4f);
+        target.copyFrom(source);
+
+        assertEquals(source, target);
+        assertFalse(target.isSet(FLOAT_VAR));
+
+        source.unset(BOOL_VAR);
+        target.copyFrom(source);
+
+        assertEquals(source, target);
+        assertFalse(target.isSet(BOOL_VAR));
+        target.copyFrom(target);
+        assertEquals(source, target);
+
+        assertThrows(IllegalArgumentException.class,
+                () -> target.copyFrom(new DefineList(NUM_DEFINES + 1)));
+    }
+
+    @Test
+    public void testCopyFromAcrossWordBoundariesAndIndependentStorage() {
+        for (int size : new int[]{0, 1, 8, 63, 64, 65, 128, 256}) {
+            DefineList source = new DefineList(size);
+            DefineList target = new DefineList(size);
+            java.util.ArrayList<String> names = new java.util.ArrayList<>();
+            for (int i = 0; i < size; i++) {
+                names.add("D" + i);
+                target.set(i, -i - 1);
+                if (i % 3 == 0) {
+                    source.set(i, i % 2 == 0 ? 0 : Integer.MIN_VALUE + i);
+                }
+            }
+            DefineList expected = new DefineList(size);
+            expected.clear();
+            expected.setAll(source);
+            target.copyFrom(source);
+            assertEquals(expected, target);
+            assertEquals(expected.hashCode(), target.hashCode());
+            assertEquals(expected.generateSource(names, null), target.generateSource(names, null));
+            for (int i = 0; i < size; i++) {
+                assertEquals(source.isSet(i), target.isSet(i));
+                assertEquals(source.getInt(i), target.getInt(i));
+            }
+            target.copyFrom(target);
+            assertEquals(expected, target);
+            if (size > 0) {
+                target.set(0, 42);
+                assertEquals(expected, source, "Destination must not alias source storage");
+                DefineList snapshot = target.deepClone();
+                source.clear();
+                assertEquals(snapshot, target, "Source changes must not alter the copy");
+            }
+        }
+    }
+
+    @Test
+    public void testInvalidCopyDoesNotModifyDestination() {
+        DefineList target = new DefineList(3);
+        target.set(2, 7);
+        DefineList before = target.deepClone();
+        assertThrows(IllegalArgumentException.class, () -> target.copyFrom(new DefineList(2)));
+        assertEquals(before, target);
+        assertThrows(IllegalArgumentException.class, () -> target.copyFrom(new DefineList(4)));
+        assertEquals(before, target);
+        assertThrows(NullPointerException.class, () -> target.copyFrom(null));
+        assertEquals(before, target);
+    }
+
+    @Test
     public void testDeepClone() {
         DefineList dl1 = new DefineList(NUM_DEFINES);
         DefineList dl2 = dl1.deepClone();
