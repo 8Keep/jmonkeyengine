@@ -46,11 +46,14 @@ public class ParticlePointMesh extends ParticleMesh {
 
     private int imagesX = 1;
     private int imagesY = 1;
+    private boolean texCoordsDirty = true;
+    private boolean texCoordsAreDefault;
 
     @Override
     public void setImagesXY(int imagesX, int imagesY) {
         this.imagesX = imagesX;
         this.imagesY = imagesY;
+        texCoordsDirty = true;
     }
 
     @Override
@@ -58,6 +61,8 @@ public class ParticlePointMesh extends ParticleMesh {
         setMode(Mode.Points);
 
         this.emitter = emitter;
+        texCoordsDirty = true;
+        texCoordsAreDefault = false;
 
         // set positions
         FloatBuffer pb = BufferUtils.createVector3Buffer(numParticles);
@@ -127,6 +132,10 @@ public class ParticlePointMesh extends ParticleMesh {
         FloatBuffer texcoords = (FloatBuffer) tvb.getData();
 
         float sizeScale = emitter.getWorldScale().x;
+        boolean singleImage = imagesX == 1 && imagesY == 1;
+        boolean updateTexCoords = texCoordsDirty || !singleImage || !texCoordsAreDefault
+                || tvb.isUpdateNeeded() || texcoords.limit() != particles.length * 4;
+        int imageIndexBits = 0;
 
         // update data in vertex buffers
         positions.rewind();
@@ -144,26 +153,46 @@ public class ParticlePointMesh extends ParticleMesh {
             sizes.put(p.size * sizeScale);
             colors.putInt(p.color.asIntABGR());
 
-            int imgX = p.imageIndex % imagesX;
-            int imgY = p.imageIndex / imagesX;
-
-            float startX = ((float) imgX) / imagesX;
-            float startY = ((float) imgY) / imagesY;
-            float endX = startX + (1f / imagesX);
-            float endY = startY + (1f / imagesY);
-
-            texcoords.put(startX).put(startY).put(endX).put(endY);
+            int imageIndex = p.imageIndex;
+            imageIndexBits |= imageIndex;
+            if (updateTexCoords) {
+                putTexCoords(texcoords, imageIndex, imagesX, imagesY);
+            }
         }
         
+        boolean defaultImageIndices = singleImage && imageIndexBits == 0;
+        if (!updateTexCoords && !defaultImageIndices) {
+            // A non-default image invalidated the cached full-image rectangles.
+            // Fill the whole buffer, including particles preceding that image.
+            for (Particle particle : particles) {
+                putTexCoords(texcoords, particle.imageIndex, imagesX, imagesY);
+            }
+            updateTexCoords = true;
+        }
+
         positions.flip();
         colors.flip();
         sizes.flip();
-        texcoords.flip();
+        if (updateTexCoords) {
+            texcoords.flip();
+        }
 
         // force renderer to re-send data to GPU
         pvb.updateData(positions);
         cvb.updateData(colors);
         svb.updateData(sizes);
-        tvb.updateData(texcoords);
+        if (updateTexCoords) {
+            tvb.updateData(texcoords);
+            texCoordsDirty = false;
+            texCoordsAreDefault = defaultImageIndices;
+        }
+    }
+
+    private static void putTexCoords(FloatBuffer texcoords, int imageIndex, int imagesX, int imagesY) {
+        int imgX = imageIndex % imagesX;
+        int imgY = imageIndex / imagesX;
+        float startX = ((float) imgX) / imagesX;
+        float startY = ((float) imgY) / imagesY;
+        texcoords.put(startX).put(startY).put(startX + (1f / imagesX)).put(startY + (1f / imagesY));
     }
 }
