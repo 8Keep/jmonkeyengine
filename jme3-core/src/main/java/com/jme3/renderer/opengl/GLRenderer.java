@@ -2618,9 +2618,6 @@ public final class GLRenderer implements Renderer {
 
     @Override
     public FrameBuffer getCurrentFrameBuffer() {
-        if(mainFbOverride!=null){
-            return mainFbOverride;
-        }
         return context.boundFB;
     }
 
