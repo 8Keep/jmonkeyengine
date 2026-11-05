@@ -1051,13 +1051,13 @@ public final class Vector3f implements Savable, Cloneable, java.io.Serializable 
         if (Float.compare(x, comp.x) != 0) {
             return false;
         }
-        if (Float.compare(y, comp.y) != 0) {
-            return false;
-        }
-        if (Float.compare(z, comp.z) != 0) {
-            return false;
-        }
-        return true;
+        return sameComponent(y, comp.y) && sameComponent(z, comp.z);
+    }
+
+
+    private static boolean sameComponent(float first, float second) {
+        return Float.floatToRawIntBits(first) == Float.floatToRawIntBits(second)
+                || (Float.isNaN(first) && Float.isNaN(second));
     }
 
     /**
