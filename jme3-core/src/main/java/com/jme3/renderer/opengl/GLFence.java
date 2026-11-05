@@ -53,6 +53,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class GLFence extends NativeObject {
     private final static AtomicInteger nextUniqueId = new AtomicInteger(1);
     private Object nativeSync;
+    private Object ownerToken;
 
 
     /**
@@ -80,6 +81,7 @@ public class GLFence extends NativeObject {
         this.fenceId = source.fenceId;
         this.nativeSync = source.nativeSync;
         this.id = source.id;
+        this.ownerToken = source.ownerToken;
     }
 
     /**
@@ -93,6 +95,19 @@ public class GLFence extends NativeObject {
     public Object getNativeSync() {
         return nativeSync;
     }
+
+    void claimOwner(Object token) {
+        if (ownerToken != null && ownerToken != token) {
+            throw new IllegalArgumentException("Fence is registered with a different renderer");
+        }
+        ownerToken = token;
+    }
+
+    void validateOwner(Object token) {
+        if (ownerToken != null && ownerToken != token) {
+            throw new IllegalArgumentException("Fence is registered with a different renderer");
+        }
+    }
     public long getFenceId() {
         return fenceId;
     }
@@ -100,6 +115,7 @@ public class GLFence extends NativeObject {
     @Override
     public void resetObject() {
         this.nativeSync = null;
+        this.ownerToken = null;
         this.id = INVALID_ID;
         setUpdateNeeded();
     }
