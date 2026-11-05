@@ -64,10 +64,17 @@ public final class DefaultLightFilter implements LightFilter {
 
     @Override
     public void filterLights(Geometry geometry, LightList filteredLightList) {
+        LightList worldLights = geometry.getWorldLightList();
+        if (worldLights.size() == 0) {
+            probeBlendStrategy.populateProbes(geometry, filteredLightList);
+            return;
+        }
+        filterNonEmpty(geometry, filteredLightList, worldLights);
+    }
+
+    private void filterNonEmpty(Geometry geometry, LightList filteredLightList, LightList worldLights) {
         TempVars vars = TempVars.get();
         try {
-            LightList worldLights = geometry.getWorldLightList();
-
             for (int i = 0; i < worldLights.size(); i++) {
                 Light light = worldLights.get(i);
 

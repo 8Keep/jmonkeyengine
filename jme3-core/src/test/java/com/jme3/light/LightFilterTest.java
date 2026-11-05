@@ -38,8 +38,11 @@ import com.jme3.renderer.Camera;
 import com.jme3.scene.Geometry;
 import com.jme3.scene.shape.Box;
 import com.jme3.util.TempVars;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 
 /**
  * Test light filtering for various light types.
@@ -96,6 +99,34 @@ public class LightFilterTest {
         // Test for bounding Sphere
         geom.setModelBound(new BoundingSphere(0.5f, Vector3f.ZERO));
         checkFilteredLights(1); // Directional lights must never be filtered
+    }
+
+    @Test
+    public void testNoLightsStillPopulatesProbeStrategy() {
+        AtomicInteger populateCount = new AtomicInteger();
+        DirectionalLight existing = new DirectionalLight();
+        LightProbe appended = new LightProbe();
+        list.add(existing);
+        filter.setLightProbeBlendingStrategy(new LightProbeBlendingStrategy() {
+            @Override
+            public void registerProbe(LightProbe probe) {
+            }
+
+            @Override
+            public void populateProbes(Geometry g, LightList lightList) {
+                assertSame(geom, g);
+                assertSame(list, lightList);
+                populateCount.incrementAndGet();
+                lightList.add(appended);
+            }
+        });
+
+        filter.filterLights(geom, list);
+
+        assertEquals(1, populateCount.get());
+        assertEquals(2, list.size());
+        assertSame(existing, list.get(0));
+        assertSame(appended, list.get(1));
     }
     
     @Test
