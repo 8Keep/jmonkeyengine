@@ -45,6 +45,7 @@ import com.jme3.renderer.Camera;
 import com.jme3.renderer.Caps;
 import com.jme3.renderer.RenderManager;
 import com.jme3.scene.Geometry;
+import com.jme3.shadow.DirectionalLightVisibilityRenderer;
 import com.jme3.scene.Mesh;
 import com.jme3.scene.VertexBuffer;
 import com.jme3.scene.shape.Quad;
@@ -120,6 +121,34 @@ public class SinglePassAndImageBasedLightingLogicTest {
                 Arrays.asList(1, 1, 1, 0, 1));
     }
 
+    @Test
+    public void shadowIdentityDistinguishesCollinearLightsAcrossBatchesAndRemoval() {
+        Fixture fixture = new Fixture(1);
+        DirectionalLight first = new DirectionalLight(new Vector3f(0, 0, -1), ColorRGBA.White);
+        DirectionalLight sun = new DirectionalLight(new Vector3f(0, 0, -1), ColorRGBA.White);
+        DirectionalLightVisibilityRenderer shadows = new DirectionalLightVisibilityRenderer(
+                fixture.material.getMaterialDef().getAssetManager(), 64, 1);
+        shadows.setLight(sun);
+        shadows.addReceiver(fixture.material);
+        try {
+            fixture.material.setBoolean("UseDirectionalVisibility", true);
+            LightList lights = new LightList(fixture.geometry);
+            lights.add(first);
+            lights.add(sun);
+            fixture.material.render(fixture.geometry, lights, fixture.manager);
+            assertEquals(Arrays.asList(0f, 1f), fixture.renderer.shadowMarkers);
+
+            shadows.removeReceiver(fixture.material);
+            // A manually enabled material without a registration must not
+            // inherit the previous draw's light identity.
+            fixture.material.setBoolean("UseDirectionalVisibility", true);
+            fixture.material.render(fixture.geometry, lights, fixture.manager);
+            assertEquals(Arrays.asList(0f, 1f, 0f, 0f), fixture.renderer.shadowMarkers);
+        } finally {
+            shadows.cleanup();
+        }
+    }
+
     private static class Fixture {
         final RecordingRenderer renderer = new RecordingRenderer();
         final RenderManager manager = new RenderManager(renderer);
@@ -170,6 +199,7 @@ public class SinglePassAndImageBasedLightingLogicTest {
     private static class RecordingRenderer extends NullRenderer {
         final List<Boolean> firstPasses = new ArrayList<>();
         final List<Integer> lightCounts = new ArrayList<>();
+        final List<Float> shadowMarkers = new ArrayList<>();
         Shader currentShader;
 
         @Override
@@ -184,6 +214,7 @@ public class SinglePassAndImageBasedLightingLogicTest {
 
         @Override
         public void renderMesh(Mesh mesh, int lod, int count, VertexBuffer[] instanceData) {
+            shadowMarkers.add(currentShader.getUniform("g_LightData").getMultiData().get(8));
             firstPasses.add((Boolean) currentShader.getUniform("g_IsFirstLightPass").getValue());
             lightCounts.add((Integer) currentShader.getUniform("g_LightCount").getValue());
         }

@@ -1,0 +1,23 @@
+MaterialDef Directional Visibility Kernel Probe {
+    MaterialParameters {
+        Boolean ProbeEnabled : true
+        Boolean HardwareShadows : false
+        Float DirectionalShadowMapSize : 8.0
+        Vector2 ProbeOutputSize : 256.0 64.0
+        Texture2D DirectionalShadowMap0
+    }
+
+    Technique {
+        VertexShader GLSL300 GLSL150: Common/MatDefs/Misc/Unshaded.vert
+        FragmentShader GLSL300 GLSL150: Common/MatDefs/DirectionalVisibilityKernel.frag
+
+        WorldParameters {
+            WorldViewProjectionMatrix
+        }
+
+        Defines {
+            DIRECTIONAL_VISIBILITY : ProbeEnabled
+            DIRECTIONAL_HARDWARE_SHADOWS : HardwareShadows
+        }
+    }
+}
