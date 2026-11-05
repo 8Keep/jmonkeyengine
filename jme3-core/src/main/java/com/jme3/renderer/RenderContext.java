@@ -240,6 +240,9 @@ public class RenderContext {
      */
     public int boundElementArrayVBO;
 
+    /** Currently bound indirect command buffer. */
+    public int boundDrawIndirectBuffer;
+
     /**
      * ID of the bound vertex array.
      *
@@ -426,6 +429,7 @@ public class RenderContext {
         boundRB = 0;
 
         boundElementArrayVBO = 0;
+        boundDrawIndirectBuffer = 0;
         boundVertexArray = 0;
         boundArrayVBO = 0;
         boundPixelPackPBO = 0;

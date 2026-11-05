@@ -5,6 +5,7 @@ import com.jme3.renderer.RendererException;
 import com.jme3.renderer.opengl.GL;
 import com.jme3.renderer.opengl.GL2;
 import com.jme3.renderer.opengl.GLCompute;
+import com.jme3.renderer.opengl.GLIndirect;
 import com.jme3.renderer.opengl.GLES_30;
 import com.jme3.renderer.opengl.GLExt;
 import com.jme3.renderer.opengl.GLFbo;
@@ -28,7 +29,7 @@ import org.lwjgl.system.MemoryUtil;
  * 
  * @author Riccardo Balbo
  */
-public class LwjglGLES extends LwjglRender implements GL, GL2, GLES_30, GLCompute, GLExt, GLFbo {
+public class LwjglGLES extends LwjglRender implements GL, GL2, GLES_30, GLCompute, GLIndirect, GLExt, GLFbo {
 
     private final IntBuffer tmpBuff = BufferUtils.createIntBuffer(1);
     private final IntBuffer tmpBuff16 = BufferUtils.createIntBuffer(16);
@@ -113,6 +114,14 @@ public class LwjglGLES extends LwjglRender implements GL, GL2, GLES_30, GLComput
     @Override
     public void glMemoryBarrier(int barriers) {
         org.lwjgl.opengles.GLES31.glMemoryBarrier(barriers);
+    }
+
+    @Override
+    public boolean supportsIndexedIndirectDraw() { return true; }
+
+    @Override
+    public void glDrawElementsIndirect(int mode, int indexType, long byteOffset) {
+        org.lwjgl.opengles.GLES31.glDrawElementsIndirect(mode, indexType, byteOffset);
     }
 
     @Override
