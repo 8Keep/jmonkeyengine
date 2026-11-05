@@ -143,11 +143,22 @@ public enum Limits {
      */
     ShaderStorageBufferObjectMaxTessEvaluationBlocks,
     /**
-     * Not implemented yet.
+     * Maximum number of storage blocks accessed by a compute shader.
      */
     ShaderStorageBufferObjectMaxComputeBlocks,
     /**
      * Maximum number shader storage blocks across all active programs.
      */
     ShaderStorageBufferObjectMaxCombineBlocks,
+
+    /** Maximum dispatch group counts (inclusive) in each axis. */
+    ComputeWorkGroupCountX, ComputeWorkGroupCountY, ComputeWorkGroupCountZ,
+    /** Maximum compile-time local work group size in each axis. */
+    ComputeWorkGroupSizeX, ComputeWorkGroupSizeY, ComputeWorkGroupSizeZ,
+    /** Maximum product of the local work group dimensions. */
+    ComputeWorkGroupInvocations,
+    /** Native storage binding count; renderer binding indices also have a finite limit. */
+    ComputeStorageBufferBindings,
+    /** Maximum storage block bytes addressable by this renderer's integer-sized buffers. */
+    ComputeStorageBufferBlockSize,
 }

@@ -100,6 +100,11 @@ public class LwjglGL extends LwjglRender implements GL, GL2, GL3, GL4 {
     }
 
     @Override
+    public void glGetIntegerIndexed(final int pname, final int index, final IntBuffer params) {
+        GL30.glGetIntegeri_v(pname, index, params);
+    }
+
+    @Override
     public GLFence glFenceSync(final int condition, final int flags) {
         return new GLFence(GL32.glFenceSync(condition, flags), null);
     }
