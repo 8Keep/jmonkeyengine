@@ -75,6 +75,8 @@ public interface GL4 extends GL3, GLCompute, GLIndirect {
      * Accepted by the {@code target} parameters of BindBuffer, BufferData, BufferSubData, MapBuffer, UnmapBuffer, GetBufferSubData, and GetBufferPointerv.
      */
     public static final int GL_SHADER_STORAGE_BUFFER = 0x90D2;
+    /** Returned by GetIntegerv for the generic shader storage buffer binding. */
+    public static final int GL_SHADER_STORAGE_BUFFER_BINDING = 0x90D3;
     public static final int GL_SHADER_STORAGE_BLOCK = 0x92E6;
 
     /**
