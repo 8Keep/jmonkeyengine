@@ -41,8 +41,11 @@ import com.jme3.util.TempVars;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Test light filtering for various light types.
@@ -99,6 +102,48 @@ public class LightFilterTest {
         // Test for bounding Sphere
         geom.setModelBound(new BoundingSphere(0.5f, Vector3f.ZERO));
         checkFilteredLights(1); // Directional lights must never be filtered
+    }
+
+    @Test
+    public void testManuallyRecheckedLightIsRearmedForNextCamera() {
+        DirectionalLight light = new DirectionalLight(Vector3f.UNIT_Y);
+        geom.addLight(light);
+        geom.updateGeometricState();
+        filter.setCamera(cam);
+        filter.filterLights(geom, list);
+        assertFalse(light.isFrustumCheckNeeded());
+
+        light.setFrustumCheckNeeded(true);
+        list.clear();
+        filter.filterLights(geom, list);
+        assertFalse(light.isFrustumCheckNeeded());
+
+        filter.setCamera(cam);
+        assertTrue(light.isFrustumCheckNeeded());
+    }
+
+    @Test
+    public void testEqualLightInstancesAreRecheckedForNewCamera() {
+        Light first = new EqualPointLight(new Vector3f(0, 0, 10));
+        Light second = new EqualPointLight(new Vector3f(0, 0, 20));
+        Geometry other = new Geometry("other", new Box(1, 1, 1));
+        other.setLocalTranslation(0, 0, 20);
+        for (Geometry geometry : new Geometry[]{geom, other}) {
+            geometry.addLight(first);
+            geometry.addLight(second);
+            geometry.updateGeometricState();
+        }
+        filter.filterLights(geom, list);
+        LightList otherList = new LightList(other);
+        filter.filterLights(other, otherList);
+        assertEquals(1, otherList.size());
+        assertSame(second, otherList.get(0));
+
+        cam.lookAtDirection(new Vector3f(0, 0, -1), Vector3f.UNIT_Y);
+        filter.setCamera(cam);
+        otherList.clear();
+        filter.filterLights(other, otherList);
+        assertEquals(0, otherList.size(), "Both light instances must be retested for the new camera");
     }
 
     @Test
@@ -299,5 +344,23 @@ public class LightFilterTest {
         // now, the spot will touch the sphere.
         geom.setModelBound(new BoundingSphere(5f, Vector3f.ZERO));
         checkFilteredLights(1);
+    }
+
+    private static class EqualPointLight extends PointLight {
+
+        EqualPointLight(Vector3f position) {
+            super(position);
+            setRadius(0.5f);
+        }
+
+        @Override
+        public boolean equals(Object object) {
+            return object instanceof EqualPointLight;
+        }
+
+        @Override
+        public int hashCode() {
+            return 1;
+        }
     }
 }

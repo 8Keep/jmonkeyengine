@@ -37,12 +37,14 @@ import com.jme3.bounding.BoundingVolume;
 import com.jme3.renderer.Camera;
 import com.jme3.scene.Geometry;
 import com.jme3.util.TempVars;
-import java.util.HashSet;
+import java.util.IdentityHashMap;
 
 public final class DefaultLightFilter implements LightFilter {
 
     private Camera camera;
-    private final HashSet<Light> processedLights = new HashSet<>();
+    // Frustum state belongs to each Light instance, not to its value equality.
+    private final IdentityHashMap<Light, Boolean> processedLights
+            = new IdentityHashMap<>(0);
     private LightProbeBlendingStrategy probeBlendStrategy;
 
     public DefaultLightFilter() {
@@ -56,7 +58,10 @@ public final class DefaultLightFilter implements LightFilter {
     @Override
     public void setCamera(Camera camera) {
         this.camera = camera;
-        for (Light light : processedLights) {
+        if (processedLights.isEmpty()) {
+            return;
+        }
+        for (Light light : processedLights.keySet()) {
             light.frustumCheckNeeded = true;
         }
         processedLights.clear();
@@ -84,7 +89,7 @@ public final class DefaultLightFilter implements LightFilter {
                 }
 
                 if (light.frustumCheckNeeded) {
-                    processedLights.add(light);
+                    processedLights.put(light, Boolean.TRUE);
                     light.frustumCheckNeeded = false;
                     light.intersectsFrustum = light.intersectsFrustum(camera, vars);
                 }
