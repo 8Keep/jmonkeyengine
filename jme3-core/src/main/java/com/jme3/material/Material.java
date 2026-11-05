@@ -866,14 +866,15 @@ public class Material implements CloneableSmartAsset, Cloneable, Savable {
             Uniform uniform = shader.getUniform(override.getPrefixedName());
 
             if (override.getValue() != null) {
-                updateShaderMaterialParameter(renderer, type, shader, override, bindUnits, true);
+                updateShaderMaterialParameter(renderer, type, shader, override, bindUnits, true, uniform);
             } else {
                 uniform.clearValue();
             }
         }
     }
 
-    private void updateShaderMaterialParameter(Renderer renderer, VarType type, Shader shader, MatParam param, BindUnits unit, boolean override) {
+    private void updateShaderMaterialParameter(Renderer renderer, VarType type, Shader shader, MatParam param, BindUnits unit,
+            boolean override, Uniform uniform) {
         if (type == VarType.UniformBufferObject || type == VarType.ShaderStorageBufferObject) {
             ShaderBufferBlock bufferBlock = shader.getBufferBlock(param.getPrefixedName());
             BufferObject bufferObject = (BufferObject) param.getValue();
@@ -890,7 +891,9 @@ public class Material implements CloneableSmartAsset, Cloneable, Savable {
             }
             unit.bufferUnit++;
         } else {
-            Uniform uniform = shader.getUniform(param.getPrefixedName());
+            if (uniform == null) {
+                uniform = shader.getUniform(param.getPrefixedName());
+            }
             if (!override && uniform.isSetByCurrentMaterial())
                 return;
 
@@ -930,7 +933,7 @@ public class Material implements CloneableSmartAsset, Cloneable, Savable {
         for (int i = 0; i < paramValues.size(); i++) {
             MatParam param = paramValues.getValue(i);
             VarType type = param.getVarType();
-            updateShaderMaterialParameter(renderer, type, shader, param, bindUnits, false);
+            updateShaderMaterialParameter(renderer, type, shader, param, bindUnits, false, null);
         }
 
         // TODO: HACKY HACK remove this when texture unit is handled by the uniform.
