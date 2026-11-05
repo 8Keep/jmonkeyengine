@@ -311,6 +311,123 @@ public class UniformTest {
         verifyFloatBufferContent(uniform.getMultiData(), expectedData2);
     }
 
+    @Test
+    public void testSetValue_Vector4CopiesAcrossValueTypes() {
+        Uniform uniform = new Uniform();
+
+        uniform.setValue(VarType.Vector4, new ColorRGBA(1f, 2f, 3f, 4f));
+        assertVector4Uniform(uniform, ColorRGBA.class, 1f, 2f, 3f, 4f);
+        uniform.setValue(VarType.Vector4, new Vector4f(5f, 6f, 7f, 8f));
+        assertVector4Uniform(uniform, ColorRGBA.class, 5f, 6f, 7f, 8f);
+        uniform.setValue(VarType.Vector4, new Quaternion(9f, 10f, 11f, 12f));
+        assertVector4Uniform(uniform, ColorRGBA.class, 9f, 10f, 11f, 12f);
+
+        uniform = new Uniform();
+        uniform.setValue(VarType.Vector4, new Vector4f(13f, 14f, 15f, 16f));
+        assertVector4Uniform(uniform, Vector4f.class, 13f, 14f, 15f, 16f);
+        uniform.setValue(VarType.Vector4, new ColorRGBA(17f, 18f, 19f, 20f));
+        assertVector4Uniform(uniform, Vector4f.class, 17f, 18f, 19f, 20f);
+        uniform.setValue(VarType.Vector4, new Quaternion(21f, 22f, 23f, 24f));
+        assertVector4Uniform(uniform, Vector4f.class, 21f, 22f, 23f, 24f);
+
+        uniform = new Uniform();
+        uniform.setValue(VarType.Vector4, new Quaternion(25f, 26f, 27f, 28f));
+        assertVector4Uniform(uniform, Quaternion.class, 25f, 26f, 27f, 28f);
+        uniform.setValue(VarType.Vector4, new ColorRGBA(29f, 30f, 31f, 32f));
+        assertVector4Uniform(uniform, Quaternion.class, 29f, 30f, 31f, 32f);
+        uniform.setValue(VarType.Vector4, new Vector4f(33f, 34f, 35f, 36f));
+        assertVector4Uniform(uniform, Quaternion.class, 33f, 34f, 35f, 36f);
+    }
+
+    @Test
+    public void testVector4CopyIdentityBitsAndUpdateFlag() {
+        String[] types = {"color", "vector", "quaternion"};
+        float nan = Float.intBitsToFloat(0x7fc00123);
+        for (String destination : types) {
+            Uniform uniform = new Uniform();
+            Object initial = vector4Input(destination, 1, 2, 3, 4);
+            uniform.setValue(VarType.Vector4, initial);
+            Object storage = uniform.getValue();
+            assertNotSame(initial, storage);
+            uniform.clearUpdateNeeded();
+            uniform.setValue(VarType.Vector4, initial);
+            assertFalse(uniform.isUpdateNeeded());
+            for (int source = 0; source < types.length; source++) {
+                Object input = vector4Input(types[source], 17 + source, nan, -0f, Float.NEGATIVE_INFINITY);
+                uniform.clearUpdateNeeded();
+                uniform.setValue(VarType.Vector4, input);
+                assertTrue(uniform.isUpdateNeeded());
+                assertSame(storage, uniform.getValue());
+                float[] actual = vector4Components(storage);
+                float[] expected = {17 + source, nan, -0f, Float.NEGATIVE_INFINITY};
+                for (int component = 0; component < 4; component++) {
+                    assertEquals(Float.floatToRawIntBits(expected[component]), Float.floatToRawIntBits(actual[component]));
+                }
+                // Caller mutations must not change the retained uniform value.
+                if (input instanceof ColorRGBA) {
+                    ((ColorRGBA) input).r = -91;
+                } else if (input instanceof Vector4f) {
+                    ((Vector4f) input).x = -91;
+                } else {
+                    ((Quaternion) input).set(-91, 0, 0, 0);
+                }
+                assertEquals(17 + source, vector4Components(storage)[0]);
+            }
+            uniform.clearUpdateNeeded();
+            uniform.setValue(VarType.Vector4, vector4Input(destination, 19, nan, -0f, Float.NEGATIVE_INFINITY));
+            assertFalse(uniform.isUpdateNeeded());
+            uniform.setValue(VarType.Vector4, vector4Input(destination, 19, nan, +0f, Float.NEGATIVE_INFINITY));
+            assertTrue(uniform.isUpdateNeeded());
+            assertEquals(Float.floatToRawIntBits(+0f), Float.floatToRawIntBits(vector4Components(storage)[2]));
+        }
+    }
+
+    private Object vector4Input(String type, float x, float y, float z, float w) {
+        switch (type) {
+            case "color": return new ColorRGBA(x, y, z, w);
+            case "vector": return new Vector4f(x, y, z, w);
+            default: return new Quaternion(x, y, z, w);
+        }
+    }
+
+    private float[] vector4Components(Object value) {
+        if (value instanceof ColorRGBA) {
+            ColorRGBA c = (ColorRGBA) value;
+            return new float[]{c.r, c.g, c.b, c.a};
+        }
+        if (value instanceof Vector4f) {
+            Vector4f v = (Vector4f) value;
+            return new float[]{v.x, v.y, v.z, v.w};
+        }
+        Quaternion q = (Quaternion) value;
+        return new float[]{q.getX(), q.getY(), q.getZ(), q.getW()};
+    }
+
+    private void assertVector4Uniform(Uniform uniform, Class<?> expectedType,
+            float x, float y, float z, float w) {
+        Object value = uniform.getValue();
+        assertEquals(expectedType, value.getClass());
+        if (value instanceof ColorRGBA) {
+            ColorRGBA color = (ColorRGBA) value;
+            assertEquals(x, color.r, 0f);
+            assertEquals(y, color.g, 0f);
+            assertEquals(z, color.b, 0f);
+            assertEquals(w, color.a, 0f);
+        } else if (value instanceof Vector4f) {
+            Vector4f vector = (Vector4f) value;
+            assertEquals(x, vector.x, 0f);
+            assertEquals(y, vector.y, 0f);
+            assertEquals(z, vector.z, 0f);
+            assertEquals(w, vector.w, 0f);
+        } else {
+            Quaternion quaternion = (Quaternion) value;
+            assertEquals(x, quaternion.getX(), 0f);
+            assertEquals(y, quaternion.getY(), 0f);
+            assertEquals(z, quaternion.getZ(), 0f);
+            assertEquals(w, quaternion.getW(), 0f);
+        }
+    }
+
     private void verifyFloatBufferContent(FloatBuffer floatBuffer, float[] floatArray) {
         assertEquals(0, floatBuffer.position());
         assertEquals(floatArray.length, floatBuffer.capacity());
