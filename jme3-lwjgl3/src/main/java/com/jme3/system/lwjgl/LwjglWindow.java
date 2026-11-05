@@ -511,9 +511,12 @@ public abstract class LwjglWindow extends LwjglContext implements Runnable {
         RENDER_CONFIGS.getOrDefault(renderer, RENDER_CONFIGS.get(AppSettings.LWJGL_OPENGL32)).run();
 
         if (org.lwjgl.system.Platform.get() == org.lwjgl.system.Platform.LINUX) {
-            if (settings.isX11PlatformPreferred()) {
+            // SDL_VIDEODRIVER can override the session hint. Match the backend
+            // SDL actually initialized, including XWayland inside a Wayland session.
+            String videoDriver = SDL_GetCurrentVideoDriver();
+            if ("x11".equals(videoDriver)) {
                 SDL_GL_SetAttribute(SDL_GL_EGL_PLATFORM, EGL_PLATFORM_X11_EXT);
-            } else if (JmeSystem.isWaylandSession()) {
+            } else if ("wayland".equals(videoDriver)) {
                 SDL_GL_SetAttribute(SDL_GL_EGL_PLATFORM, EGL_PLATFORM_WAYLAND_EXT);
             }
         }
