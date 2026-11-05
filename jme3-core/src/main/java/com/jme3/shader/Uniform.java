@@ -34,7 +34,6 @@ package com.jme3.shader;
 import com.jme3.material.Material.BindUnits;
 import com.jme3.math.*;
 import com.jme3.util.BufferUtils;
-import com.jme3.util.TempVars;
 import java.lang.reflect.InvocationTargetException;
 import java.nio.*;
 
@@ -352,8 +351,6 @@ public class Uniform extends ShaderVariable {
                     return;
                 }
 
-                TempVars vars = TempVars.get();
-                Vector4f vec4 = vars.vect4f1;
                 //handle the null case
                 if (this.value == null) {
                     try {
@@ -364,26 +361,34 @@ public class Uniform extends ShaderVariable {
                         throw new IllegalArgumentException("Cannot instantiate param of class " + value.getClass().getCanonicalName(), e);
                     }
                 }
-                //feed the pivot vec 4 with the correct value
-                if (value instanceof ColorRGBA) {
-                    ColorRGBA c = (ColorRGBA) value;
-                    vec4.set(c.r, c.g, c.b, c.a);
-                } else if (value instanceof Vector4f) {
-                    vec4.set((Vector4f) value);
-                } else {
-                    Quaternion q = (Quaternion) value;
-                    vec4.set(q.getX(), q.getY(), q.getZ(), q.getW());
-                }
 
-                //feed this.value with the collected values.
-                if (this.value instanceof ColorRGBA) {
-                    ((ColorRGBA) this.value).set(vec4.x, vec4.y, vec4.z, vec4.w);
-                } else if (this.value instanceof Vector4f) {
-                    ((Vector4f) this.value).set(vec4);
+                float x, y, z, w;
+                if (value instanceof ColorRGBA) {
+                    ColorRGBA color = (ColorRGBA) value;
+                    x = color.r;
+                    y = color.g;
+                    z = color.b;
+                    w = color.a;
+                } else if (value instanceof Vector4f) {
+                    Vector4f vector = (Vector4f) value;
+                    x = vector.x;
+                    y = vector.y;
+                    z = vector.z;
+                    w = vector.w;
                 } else {
-                    ((Quaternion) this.value).set(vec4.x, vec4.y, vec4.z, vec4.w);
+                    Quaternion quaternion = (Quaternion) value;
+                    x = quaternion.getX();
+                    y = quaternion.getY();
+                    z = quaternion.getZ();
+                    w = quaternion.getW();
                 }
-                vars.release();
+                if (this.value instanceof ColorRGBA) {
+                    ((ColorRGBA) this.value).set(x, y, z, w);
+                } else if (this.value instanceof Vector4f) {
+                    ((Vector4f) this.value).set(x, y, z, w);
+                } else {
+                    ((Quaternion) this.value).set(x, y, z, w);
+                }
                 break;
                 // Only use check if equals optimization for primitive values
             case Int:
