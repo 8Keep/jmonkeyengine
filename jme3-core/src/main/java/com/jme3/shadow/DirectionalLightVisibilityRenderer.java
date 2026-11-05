@@ -65,7 +65,10 @@ import java.util.Map;
  * Renders stabilized directional-light cascades and makes their visibility
  * maps available to explicitly registered materials. The receiver shader
  * applies visibility to direct illumination; this processor does not render
- * the inherited colour-modulation pass.
+ * the inherited colour-modulation pass. Applications may specialize the inherited
+ * shadow-pass hooks to select caster representations for each shadow camera.
+ * Such extensions must preserve this processor's receiver activation and cleanup
+ * lifecycle by delegating to its implementation.
  * <p>
  * A material may be registered with only one active visibility renderer. Its
  * previous values for the parameters owned here are restored when it is
@@ -86,7 +89,7 @@ import java.util.Map;
  * definitions without the optional filter and blend parameters remain valid
  * and use legacy filtering with no shader blend. Camera overlap is renderer-wide.
  */
-public final class DirectionalLightVisibilityRenderer extends DirectionalLightShadowRenderer {
+public class DirectionalLightVisibilityRenderer extends DirectionalLightShadowRenderer {
 
     /** Selects the receiver's shadow comparison kernel. */
     public enum ShadowFilterMode {
