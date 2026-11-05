@@ -79,6 +79,14 @@ public final class LwjglGL implements GL, GL2, GL3, GL4 {
     }
 
     @Override
+    public boolean supportsIndexedIndirectDraw() { return true; }
+
+    @Override
+    public void glDrawElementsIndirect(int mode, int indexType, long byteOffset) {
+        GL40.glDrawElementsIndirect(mode, indexType, byteOffset);
+    }
+
+    @Override
     public void glGetIntegerIndexed(final int pname, final int index, final IntBuffer params) {
         GL30.glGetInteger(pname, index, params);
     }
