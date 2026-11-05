@@ -4,6 +4,7 @@ package com.jme3.renderer.lwjgl;
 import com.jme3.renderer.RendererException;
 import com.jme3.renderer.opengl.GL;
 import com.jme3.renderer.opengl.GL2;
+import com.jme3.renderer.opengl.GLCompute;
 import com.jme3.renderer.opengl.GLES_30;
 import com.jme3.renderer.opengl.GLExt;
 import com.jme3.renderer.opengl.GLFbo;
@@ -27,7 +28,7 @@ import org.lwjgl.system.MemoryUtil;
  * 
  * @author Riccardo Balbo
  */
-public class LwjglGLES extends LwjglRender implements GL, GL2, GLES_30, GLExt, GLFbo {
+public class LwjglGLES extends LwjglRender implements GL, GL2, GLES_30, GLCompute, GLExt, GLFbo {
 
     private final IntBuffer tmpBuff = BufferUtils.createIntBuffer(1);
     private final IntBuffer tmpBuff16 = BufferUtils.createIntBuffer(16);
@@ -102,6 +103,24 @@ public class LwjglGLES extends LwjglRender implements GL, GL2, GLES_30, GLExt, G
                 throw new RendererException("Mapped buffer data became corrupted while reading");
             }
         }
+    }
+
+    @Override
+    public void glDispatchCompute(int numGroupsX, int numGroupsY, int numGroupsZ) {
+        org.lwjgl.opengles.GLES31.glDispatchCompute(numGroupsX, numGroupsY, numGroupsZ);
+    }
+
+    @Override
+    public void glMemoryBarrier(int barriers) {
+        org.lwjgl.opengles.GLES31.glMemoryBarrier(barriers);
+    }
+
+    @Override
+    public void glGetIntegerIndexed(int pname, int index, IntBuffer params) {
+        if (params == null || params.remaining() < 1) {
+            throw new RendererException("Indexed integer query requires space for one value");
+        }
+        org.lwjgl.opengles.GLES30.glGetIntegeri_v(pname, index, params);
     }
 
     @Override

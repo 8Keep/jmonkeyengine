@@ -490,6 +490,13 @@ public enum Caps {
     ShaderStorageBufferObject,
 
     /**
+     * Renderer-managed compute dispatch, memory barriers and fixed-layout storage
+     * buffer bindings. Requires an implemented backend and OpenGL 4.3 or ES 3.1.
+     * This does not imply support for desktop storage-block reflection on GLES.
+     */
+    ComputeShader,
+
+    /**
      * Supports OpenGL ES 3.0.
      */
     OpenGLES30,

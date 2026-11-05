@@ -1,0 +1,10 @@
+MaterialDef ManagedCompute {
+    MaterialParameters {
+        UniformBufferObject Control
+        UniformBufferObject Payload
+    }
+    Technique {
+        VertexShader GLSL300 GLSL150 : Shaders/ManagedCompute/ManagedCompute.vert
+        FragmentShader GLSL300 GLSL150 : Shaders/ManagedCompute/ManagedCompute.frag
+    }
+}

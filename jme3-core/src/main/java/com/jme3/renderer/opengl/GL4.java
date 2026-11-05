@@ -36,7 +36,7 @@ package com.jme3.renderer.opengl;
  * 
  * @author Kirill Vainer
  */
-public interface GL4 extends GL3 {
+public interface GL4 extends GL3, GLCompute {
 
     public static final int GL_TESS_CONTROL_SHADER = 0x8E88;
     public static final int GL_TESS_EVALUATION_SHADER = 0x8E87;
