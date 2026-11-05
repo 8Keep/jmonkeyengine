@@ -39,6 +39,7 @@ import com.jme3.material.RenderState.BlendMode;
 import com.jme3.math.*;
 import com.jme3.renderer.*;
 import com.jme3.scene.Geometry;
+import com.jme3.shadow.DirectionalLightVisibilityRenderer;
 import com.jme3.shader.*;
 import com.jme3.texture.TextureCubeMap;
 import com.jme3.util.TempVars;
@@ -167,6 +168,9 @@ public final class SinglePassAndImageBasedLightingLogic extends DefaultTechnique
             lightProbeData.setValue(VarType.Matrix4, LightProbe.FALLBACK_MATRIX);
         }
 
+        MatParam visibility = g.getMaterial().getParam("UseDirectionalVisibility");
+        DirectionalLight shadowLight = visibility != null && Boolean.TRUE.equals(visibility.getValue())
+                ? DirectionalLightVisibilityRenderer.getLightForReceiver(g.getMaterial()) : null;
         int lightDataIndex = 0;
         TempVars vars = TempVars.get();
         Vector4f tmpVec = vars.vect4f1;
@@ -198,8 +202,9 @@ public final class SinglePassAndImageBasedLightingLogic extends DefaultTechnique
                     tmpVec.set(dir.getX(), dir.getY(), dir.getZ(), 0.0f);
                     lightData.setVector4InArray(tmpVec.getX(), tmpVec.getY(), tmpVec.getZ(), -1, lightDataIndex);
                     lightDataIndex++;
-                    //PADDING
-                    lightData.setVector4InArray(0,0,0,0, lightDataIndex);
+                    // Directional lights have no cone data. Reserve x for the
+                    // receiver's exact shadow-light identity, independently per batch.
+                    lightData.setVector4InArray(l == shadowLight ? 1f : 0f, 0, 0, 0, lightDataIndex);
                     lightDataIndex++;
                     break;
                 case Point:
