@@ -2272,56 +2272,27 @@ public final class Matrix4f implements Savable, Cloneable, java.io.Serializable 
         if (Float.compare(m00, comp.m00) != 0) {
             return false;
         }
-        if (Float.compare(m01, comp.m01) != 0) {
-            return false;
-        }
-        if (Float.compare(m02, comp.m02) != 0) {
-            return false;
-        }
-        if (Float.compare(m03, comp.m03) != 0) {
-            return false;
-        }
+        return sameComponent(m01, comp.m01)
+                && sameComponent(m02, comp.m02)
+                && sameComponent(m03, comp.m03)
+                && sameComponent(m10, comp.m10)
+                && sameComponent(m11, comp.m11)
+                && sameComponent(m12, comp.m12)
+                && sameComponent(m13, comp.m13)
+                && sameComponent(m20, comp.m20)
+                && sameComponent(m21, comp.m21)
+                && sameComponent(m22, comp.m22)
+                && sameComponent(m23, comp.m23)
+                && sameComponent(m30, comp.m30)
+                && sameComponent(m31, comp.m31)
+                && sameComponent(m32, comp.m32)
+                && sameComponent(m33, comp.m33);
+    }
 
-        if (Float.compare(m10, comp.m10) != 0) {
-            return false;
-        }
-        if (Float.compare(m11, comp.m11) != 0) {
-            return false;
-        }
-        if (Float.compare(m12, comp.m12) != 0) {
-            return false;
-        }
-        if (Float.compare(m13, comp.m13) != 0) {
-            return false;
-        }
 
-        if (Float.compare(m20, comp.m20) != 0) {
-            return false;
-        }
-        if (Float.compare(m21, comp.m21) != 0) {
-            return false;
-        }
-        if (Float.compare(m22, comp.m22) != 0) {
-            return false;
-        }
-        if (Float.compare(m23, comp.m23) != 0) {
-            return false;
-        }
-
-        if (Float.compare(m30, comp.m30) != 0) {
-            return false;
-        }
-        if (Float.compare(m31, comp.m31) != 0) {
-            return false;
-        }
-        if (Float.compare(m32, comp.m32) != 0) {
-            return false;
-        }
-        if (Float.compare(m33, comp.m33) != 0) {
-            return false;
-        }
-
-        return true;
+    private static boolean sameComponent(float first, float second) {
+        return Float.floatToRawIntBits(first) == Float.floatToRawIntBits(second)
+                || (Float.isNaN(first) && Float.isNaN(second));
     }
 
     /**
