@@ -38,6 +38,23 @@ import static org.junit.jupiter.api.Assertions.*;
 public class Vector3fTest {
 
     @Test
+    public void testExactEquality() {
+        Vector3f vector = new Vector3f(1f, 2f, 3f);
+        assertEquals(vector, new Vector3f(1f, 2f, 3f));
+        assertNotEquals(vector, new Vector3f(1f, 2f, 4f));
+        assertNotEquals(vector, null);
+        assertNotEquals(vector, new Vector2f(1f, 2f));
+
+        Vector3f firstNaN = new Vector3f(1f,
+                Float.intBitsToFloat(0x7fc00001), 3f);
+        Vector3f secondNaN = new Vector3f(1f,
+                Float.intBitsToFloat(0x7fc00002), 3f);
+        assertEquals(firstNaN, secondNaN);
+        assertNotEquals(new Vector3f(1f, 2f, -0.0f),
+                new Vector3f(1f, 2f, 0.0f));
+    }
+
+    @Test
     public void testAdd() {
         final Vector3f target = new Vector3f(1.0f, Float.NaN, 5.36f);
         final Vector3f vec = new Vector3f(-1.0f, 2.93f, -5.36f);
@@ -1104,4 +1121,26 @@ public class Vector3fTest {
         assertEquals(0.0f, retval.y, 0.0f);
         assertEquals(0.0f, retval.z, 0.0f);
     }
+
+    private static Vector3f withComponent(int component,float value) {
+        return new Vector3f(component==0?value:1,component==1?value:.5f,component==2?value:.25f);
+    }
+    @Test public void testExactEqualityAllFloatComponents() {
+        int[] bits={0,0x80000000,0x3f800000,0xbf800000,1,0x80000001,0x7f800000,0xff800000,0x7fc00001,0x7fc00002,0xffc00003};
+        for(int component=0;component<3;component++)for(int a:bits)for(int b:bits) {
+            float x=Float.intBitsToFloat(a),y=Float.intBitsToFloat(b);
+            Vector3f first=withComponent(component,x),second=withComponent(component,y);
+            boolean expected=Float.compare(x,y)==0;
+            assertEquals(expected,first.equals(second));assertEquals(expected,second.equals(first));
+            assertEquals(first,first.clone());
+            if(expected){assertEquals(first.hashCode(),second.hashCode());java.util.Map<Vector3f,Integer> map=new java.util.HashMap<>();map.put(first,7);assertEquals(Integer.valueOf(7),map.get(second));}
+        }
+        java.util.Random random=new java.util.Random(29031);
+        for(int i=0;i<2000;i++) {
+            float x=Float.intBitsToFloat(random.nextInt()),y=Float.intBitsToFloat(random.nextInt());
+            assertEquals(Float.compare(x,y)==0,withComponent(i%3,x).equals(withComponent(i%3,y)));
+        }
+        assertFalse(new Vector3f().equals(null));assertFalse(new Vector3f().equals(new Vector2f()));
+    }
+
 }
