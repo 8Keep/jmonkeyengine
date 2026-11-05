@@ -1,0 +1,12 @@
+layout(local_size_x=4) in;
+layout(std430,binding=0) buffer ManagedBlock { vec4 records[16]; };
+uniform int m_Phase;
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i < 16u) {
+        vec4 v = records[i];
+        if (m_Phase == 1) v = vec4(float(i) * 0.0625, 0.25, 0.5, 1.0);
+        else if (m_Phase == 2) v = vec4(0.75, float(i) * 0.03125, 0.125, 1.0);
+        records[i] = v;
+    }
+}
