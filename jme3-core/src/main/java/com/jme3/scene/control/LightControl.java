@@ -197,6 +197,11 @@ public class LightControl extends AbstractControl {
      * @param light The light whose properties will be set.
      */
     private void spatialToLight(Light light) {
+        if (light instanceof PointLight) {
+            ((PointLight) light).setPosition(spatial.getWorldTranslation());
+            return;
+        }
+
         TempVars vars = TempVars.get();
 
         final Vector3f worldPosition = vars.vect1;
@@ -208,10 +213,7 @@ public class LightControl extends AbstractControl {
             lightDirection.negateLocal();
         }
 
-        if (light instanceof PointLight) {
-            ((PointLight) light).setPosition(worldPosition);
-
-        } else if (light instanceof DirectionalLight) {
+        if (light instanceof DirectionalLight) {
             ((DirectionalLight) light).setDirection(lightDirection);
 
         } else if (light instanceof SpotLight) {
