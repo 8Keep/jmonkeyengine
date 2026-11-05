@@ -33,14 +33,14 @@ package com.jme3.shader;
 
 import com.jme3.renderer.Renderer;
 import com.jme3.scene.VertexBuffer;
-import com.jme3.util.IntMap;
-import com.jme3.util.IntMap.Entry;
 import com.jme3.util.ListMap;
 import com.jme3.util.NativeObject;
 import java.util.ArrayList;
 import java.util.Collection;
 
 public final class Shader extends NativeObject {
+
+    private static final int ATTRIBUTE_COUNT = VertexBuffer.Type.values().length;
 
     /**
      * A list of all shader sources currently attached.
@@ -65,9 +65,12 @@ public final class Shader extends NativeObject {
     private final ArrayList<Uniform> boundUniforms;
 
     /**
-     * Maps attribute name to the location of the attribute in the shader.
+     * Attributes indexed by vertex-buffer ordinal, allocated on the first lookup.
      */
-    private final IntMap<Attribute> attribs;
+    private Attribute[] attribs;
+
+    /** Upper bound of populated attribute slots, for location resets. */
+    private int attributeLimit;
 
     /**
      * Type of shader. The shader will control the pipeline of its type.
@@ -233,7 +236,6 @@ public final class Shader extends NativeObject {
         shaderSourceList = new ArrayList<>();
         uniforms = new ListMap<>();
         bufferBlocks = new ListMap<>();
-        attribs = new IntMap<>();
         boundUniforms = new ArrayList<>();
     }
 
@@ -339,11 +341,17 @@ public final class Shader extends NativeObject {
 
     public Attribute getAttribute(VertexBuffer.Type attribType){
         int ordinal = attribType.ordinal();
-        Attribute attrib = attribs.get(ordinal);
+        Attribute[] cached = attribs;
+        if (cached == null) {
+            cached = new Attribute[ATTRIBUTE_COUNT];
+            attribs = cached;
+        }
+        Attribute attrib = cached[ordinal];
         if (attrib == null){
             attrib = new Attribute();
             attrib.name = attribType.name();
-            attribs.put(ordinal, attrib);
+            cached[ordinal] = attrib;
+            attributeLimit = Math.max(attributeLimit, ordinal + 1);
         }
         return attrib;
     }
@@ -427,8 +435,11 @@ public final class Shader extends NativeObject {
             }
         }
         if (attribs != null) {
-            for (Entry<Attribute> entry : attribs) {
-                entry.getValue().location = ShaderVariable.LOC_UNKNOWN;
+            for (int i = 0; i < attributeLimit; i++) {
+                Attribute attrib = attribs[i];
+                if (attrib != null) {
+                    attrib.location = ShaderVariable.LOC_UNKNOWN;
+                }
             }
         }
     }
