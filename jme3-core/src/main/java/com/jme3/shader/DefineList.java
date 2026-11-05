@@ -123,6 +123,36 @@ public final class DefineList {
         }
     }
 
+    /**
+     * Replaces all defines in this list with the defines in the specified
+     * list. The lists must have the same number of values.
+     *
+     * @param other the non-null list to copy
+     * @throws IllegalArgumentException if the lists have different sizes
+     * @throws NullPointerException if other is null
+     */
+    public void copyFrom(DefineList other) {
+        if (values.length != other.values.length) {
+            throw new IllegalArgumentException("Define lists must have the same size");
+        }
+        if (other == this) {
+            return;
+        }
+        isSet.clear();
+        if (values.length == 0) {
+            return;
+        }
+        if (values.length == 1) {
+            values[0] = other.values[0];
+            if (other.isSet.get(0)) {
+                isSet.set(0);
+            }
+            return;
+        }
+        isSet.or(other.isSet);
+        System.arraycopy(other.values, 0, values, 0, values.length);
+    }
+
     public void clear() {
         isSet.clear();
         Arrays.fill(values, 0);
