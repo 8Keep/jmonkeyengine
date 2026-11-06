@@ -77,8 +77,8 @@ MaterialDef Point Sprite {
 
     Technique SoftParticles{
 
-        VertexShader   GLSL300 GLSL150 GLSL100: Common/MatDefs/Misc/SoftParticle.vert
-        FragmentShader GLSL300 GLSL150 GLSL100: Common/MatDefs/Misc/SoftParticle.frag
+        VertexShader   GLSL310 GLSL300 GLSL150 GLSL100: Common/MatDefs/Misc/SoftParticle.vert
+        FragmentShader GLSL310 GLSL300 GLSL150 GLSL100: Common/MatDefs/Misc/SoftParticle.frag
 
         WorldParameters {
             WorldViewProjectionMatrix

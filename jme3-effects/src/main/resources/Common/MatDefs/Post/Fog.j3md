@@ -12,8 +12,8 @@ MaterialDef Fade {
     }
 
     Technique {
-        VertexShader   GLSL300 GLSL150 GLSL100 :   Common/MatDefs/Post/Post.vert
-        FragmentShader GLSL300 GLSL150 GLSL100 :   Common/MatDefs/Post/Fog.frag
+        VertexShader   GLSL310 GLSL300 GLSL150 GLSL100 :   Common/MatDefs/Post/Post.vert
+        FragmentShader GLSL310 GLSL300 GLSL150 GLSL100 :   Common/MatDefs/Post/Fog.frag
 
         WorldParameters {
         }

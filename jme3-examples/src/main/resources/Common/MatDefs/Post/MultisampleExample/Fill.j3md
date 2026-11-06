@@ -1,0 +1,19 @@
+MaterialDef Multisample Example Fill {
+    MaterialParameters {
+        Color Color
+        Float Depth
+        Boolean Pattern
+    }
+    Technique {
+        VertexShader GLSL310 GLSL300 GLSL150 : Common/MatDefs/Post/Post.vert
+        FragmentShader GLSL310 GLSL300 GLSL150 : Common/MatDefs/Post/MultisampleExample/Fill.frag
+        WorldParameters { }
+        RenderState {
+            FaceCull Off
+            DepthTest On
+            DepthWrite On
+            DepthFunc Always
+            Blend Off
+        }
+    }
+}
