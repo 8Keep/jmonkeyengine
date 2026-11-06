@@ -100,6 +100,40 @@ public class LwjglGLExt extends LwjglRender implements GLExt {
     }
 
     @Override
+    public boolean supportsTextureMultisampleStorage() {
+        GLCapabilities capabilities = GL.getCapabilities();
+        return (capabilities.OpenGL43 || capabilities.GL_ARB_texture_storage_multisample)
+                && (capabilities.OpenGL42 || capabilities.GL_ARB_internalformat_query);
+    }
+
+    @Override
+    public void glTexStorage2DMultisample(int target, int samples, int internalFormat,
+            int width, int height, boolean fixedSampleLocations) {
+        if (GL.getCapabilities().OpenGL43) {
+            GL43.glTexStorage2DMultisample(target, samples, internalFormat, width, height, fixedSampleLocations);
+        } else {
+            ARBTextureStorageMultisample.glTexStorage2DMultisample(
+                    target, samples, internalFormat, width, height, fixedSampleLocations);
+        }
+    }
+
+    @Override
+    public void glGetInternalformativ(int target, int internalFormat, int pname, IntBuffer values) {
+        checkLimit(values);
+        if (GL.getCapabilities().OpenGL42) {
+            GL42.glGetInternalformativ(target, internalFormat, pname, values);
+        } else {
+            ARBInternalformatQuery.glGetInternalformativ(target, internalFormat, pname, values);
+        }
+    }
+
+    @Override
+    public void glGetTexLevelParameteriv(int target, int level, int pname, IntBuffer values) {
+        checkLimit(values);
+        GL11.glGetTexLevelParameteriv(target, level, pname, values);
+    }
+
+    @Override
     public void glTexImage2DMultisample(final int target, final int samples, final int internalFormat, final int width,
                                         final int height, final boolean fixedSampleLocations) {
         // glTexImage2DMultisample is core since OpenGL 3.2

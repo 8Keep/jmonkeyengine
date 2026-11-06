@@ -75,9 +75,9 @@ public enum Caps {
     /**
      * Supports texture multi-sampling.
      *
-     * <p>Requires OpenGL 3.2 or the GL_ARB_texture_multisample extension.
-     * Currently unavailable on GLES backends, which do not implement multisample
-     * texture allocation.
+     * <p>Requires OpenGL 3.2 or the GL_ARB_texture_multisample extension,
+     * or an OpenGL ES 3.1 backend with immutable 2D multisample storage and
+     * query support. Multisample texture arrays remain unsupported on GLES.
      */
     TextureMultisample,
 
