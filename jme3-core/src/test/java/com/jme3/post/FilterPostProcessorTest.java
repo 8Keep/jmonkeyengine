@@ -214,6 +214,50 @@ class FilterPostProcessorTest {
         assertEquals(600, renderer.viewPortHeight);
     }
 
+    @Test
+    void initializationUsesFilterFlagsChangedAfterAdding() throws ReflectiveOperationException {
+        RenderManager manager = new RenderManager(new NullRenderer());
+        ViewPort view = manager.createMainView("main", new Camera(320, 240));
+        FilterPostProcessor processor = new FilterPostProcessor(null);
+        RecordingFilter first = new RecordingFilter();
+        first.setEnabled(false);
+        RecordingFilter trailing = new RecordingFilter();
+        processor.addFilter(first);
+        processor.addFilter(trailing);
+        // Neither filter has its processor reference until initialization.
+        first.setEnabled(true);
+        trailing.setEnabled(false);
+        processor.initialize(manager, view);
+
+        java.lang.reflect.Field last = FilterPostProcessor.class.getDeclaredField("lastFilterIndex");
+        last.setAccessible(true);
+        assertEquals(0, last.getInt(processor), "the enabled filter must render to the final target");
+
+        // Cleanup clears Filter.processor; flag changes before reuse must work too.
+        processor.cleanup();
+        first.setEnabled(false);
+        trailing.setEnabled(true);
+        processor.initialize(manager, view);
+        assertEquals(1, last.getInt(processor));
+        processor.cleanup();
+    }
+
+    @Test
+    void allFiltersDisabledBeforeInitializationKeepOriginalOutput() {
+        RenderManager manager = new RenderManager(new NullRenderer());
+        ViewPort view = manager.createMainView("main", new Camera(320, 240));
+        com.jme3.texture.FrameBuffer output = new com.jme3.texture.FrameBuffer(320, 240, 1);
+        view.setOutputFrameBuffer(output);
+        FilterPostProcessor processor = new FilterPostProcessor(null);
+        RecordingFilter filter = new RecordingFilter();
+        processor.addFilter(filter);
+        filter.setEnabled(false);
+        processor.initialize(manager, view);
+
+        assertSame(output, view.getOutputFrameBuffer());
+        processor.cleanup();
+    }
+
     private static class RecordingRenderer extends NullRenderer {
         private int viewPortX;
         private int viewPortY;
