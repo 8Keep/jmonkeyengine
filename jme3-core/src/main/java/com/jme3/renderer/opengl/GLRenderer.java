@@ -218,6 +218,21 @@ public final class GLRenderer implements Renderer {
     // Image equality/hash code compare mutable contents. Its cached weak reference
     // supplies stable identity keys without keeping images alive.
     private final Map<WeakReference<Image>, ImageStorageState> imageStorage = new WeakHashMap<>();
+    private final Map<WeakReference<Image>, MultisampleStorageState> multisampleStorage = new WeakHashMap<>();
+
+    /** GLES multisample textures are immutable and cannot be redefined in place. */
+    private static final class MultisampleStorageState {
+        final int id, width, height, internalFormat, requestedSamples, actualSamples;
+
+        MultisampleStorageState(Image image, int internalFormat, int requestedSamples, int actualSamples) {
+            id = image.getId();
+            width = image.getWidth();
+            height = image.getHeight();
+            this.internalFormat = internalFormat;
+            this.requestedSamples = requestedSamples;
+            this.actualSamples = actualSamples;
+        }
+    }
 
     private static final class ImageBindingState {
         final WeakReference<Image> image;
@@ -757,10 +772,9 @@ public final class GLRenderer implements Renderer {
             }
 
 
-            // Current GLES backends do not implement multisample texture allocation,
-            // even when the context reports OpenGL ES 3.1 or later.
-            if (!caps.contains(Caps.OpenGLES20)
-                    && (hasExtension("GL_ARB_texture_multisample") || caps.contains(Caps.OpenGL32))) {
+            if ((caps.contains(Caps.OpenGLES31) && glext.supportsTextureMultisampleStorage())
+                    || (!caps.contains(Caps.OpenGLES20)
+                    && (hasExtension("GL_ARB_texture_multisample") || caps.contains(Caps.OpenGL32)))) {
                 caps.add(Caps.TextureMultisample);
                 limits.put(Limits.ColorTextureSamples, getInteger(GLExt.GL_MAX_COLOR_TEXTURE_SAMPLES));
                 limits.put(Limits.DepthTextureSamples, getInteger(GLExt.GL_MAX_DEPTH_TEXTURE_SAMPLES));
@@ -2896,6 +2910,59 @@ public final class GLRenderer implements Renderer {
         return slot >= 0 && slot < fb.getNumColorTargets() && fb.getColorTarget(slot) == rb;
     }
 
+    @Override
+    public int getPreferredFrameBufferSamples(Image.Format color, Image.Format depth, int requested) {
+        // Validate arguments consistently, while retaining older backends' global-limit path.
+        int fallback = Renderer.super.getPreferredFrameBufferSamples(color, depth, requested);
+        if (requested == 1 || !caps.contains(Caps.OpenGLES31)
+                || !caps.contains(Caps.TextureMultisample) || !glext.supportsTextureMultisampleStorage()) {
+            return fallback;
+        }
+        int maximum = Math.min(requested, limits.getOrDefault(Limits.FrameBufferSamples, 1));
+        if (color != null) maximum = Math.min(maximum, limits.getOrDefault(Limits.ColorTextureSamples, 1));
+        if (depth != null) maximum = Math.min(maximum, limits.getOrDefault(Limits.DepthTextureSamples, 1));
+        if (maximum <= 1) return 1;
+        int[] colorCounts = color == null ? null : textureSampleCounts(color);
+        int[] depthCounts = depth == null ? null : textureSampleCounts(depth);
+        int best = 1;
+        for (int count : colorCounts == null ? depthCounts : colorCounts) {
+            if (count <= best || count > maximum) continue;
+            if (colorCounts == null || depthCounts == null || containsSampleCount(depthCounts, count)) best = count;
+        }
+        return best;
+    }
+
+    private int[] textureSampleCounts(Image.Format imageFormat) {
+        GLImageFormat format = texUtil.getImageFormatWithError(imageFormat, false);
+        if (imageFormat.isDepthFormat() ? !format.depthRenderable : !format.colorRenderable) return new int[0];
+        return textureSampleCounts(format);
+    }
+
+    private int[] textureSampleCounts(GLImageFormat format) {
+        intBuf1.clear();
+        intBuf1.put(0, 0);
+        glext.glGetInternalformativ(GLExt.GL_TEXTURE_2D_MULTISAMPLE, format.internalFormat,
+                GLExt.GL_NUM_SAMPLE_COUNTS, intBuf1);
+        int count = intBuf1.get(0);
+        if (count < 0) throw new RendererException("Driver returned an invalid texture sample-count list size");
+        if (count == 0) return new int[0];
+        IntBuffer supported = BufferUtils.createIntBuffer(count);
+        try {
+            glext.glGetInternalformativ(GLExt.GL_TEXTURE_2D_MULTISAMPLE, format.internalFormat,
+                    GLExt.GL_SAMPLES_ARB, supported);
+            int[] result = new int[count];
+            supported.get(result);
+            return result;
+        } finally {
+            BufferUtils.destroyDirectBuffer(supported);
+        }
+    }
+
+    private static boolean containsSampleCount(int[] counts, int desired) {
+        for (int count : counts) if (count == desired) return true;
+        return false;
+    }
+
     public Vector2f[] getFrameBufferSamplePositions(FrameBuffer fb) {
         if (fb.getSamples() <= 1) {
             throw new IllegalArgumentException("Framebuffer must be multisampled");
@@ -2906,7 +2973,12 @@ public final class GLRenderer implements Renderer {
 
         setFrameBuffer(fb);
 
-        Vector2f[] samplePositions = new Vector2f[fb.getSamples()];
+        // Storage may round a minimum request up to a supported sample count.
+        int samples = getInteger(GLExt.GL_SAMPLES_ARB);
+        if (samples <= 1) {
+            throw new RendererException("Framebuffer does not have multisample storage");
+        }
+        Vector2f[] samplePositions = new Vector2f[samples];
         FloatBuffer samplePos = BufferUtils.createFloatBuffer(2);
         for (int i = 0; i < samplePositions.length; i++) {
             glext.glGetMultisample(GLExt.GL_SAMPLE_POSITION, i, samplePos);
@@ -3223,6 +3295,9 @@ public final class GLRenderer implements Renderer {
                             + " by the video hardware.");
                 }
                 if (samples > 1) {
+                    if (caps.contains(Caps.OpenGLES20)) {
+                        throw new RendererException("OpenGL ES multisample texture arrays are not supported");
+                    }
                     return GLExt.GL_TEXTURE_2D_MULTISAMPLE_ARRAY;
                 } else {
                     return GLExt.GL_TEXTURE_2D_ARRAY_EXT;
@@ -3515,6 +3590,10 @@ public final class GLRenderer implements Renderer {
 
     private void updateTexImageData(Image img, Texture.Type type, int unit, boolean scaleToPot,
                                     boolean allowCpuMipmapFallback) {
+        MultisampleStorageState multisample = multisampleStorage.get(img.getWeakRef());
+        if (multisample != null || caps.contains(Caps.OpenGLES20) && img.getMultiSamples() > 1) {
+            if (updateMultisampleStorage(img, type, unit, multisample)) return;
+        }
         ImageStorageState storage = imageStorage.get(img.getWeakRef());
         if (storage != null) {
             updateImageStorage(img, type, unit, storage);
@@ -3699,6 +3778,106 @@ public final class GLRenderer implements Renderer {
         }
 
         img.clearUpdateNeeded();
+    }
+
+    /** Returns false after retiring multisample storage for a single-sample upload. */
+    private boolean updateMultisampleStorage(Image image, Texture.Type type, int unit,
+            MultisampleStorageState storage) {
+        if (storage != null && image.getId() != -1 && image.getId() != storage.id) {
+            throw new RendererException("Multisample texture native storage was replaced outside the renderer");
+        }
+        if (image.getMultiSamples() <= 1) {
+            deleteImage(image);
+            multisampleStorage.remove(image.getWeakRef());
+            return false;
+        }
+        if (!caps.contains(Caps.OpenGLES31) || !caps.contains(Caps.TextureMultisample)
+                || !glext.supportsTextureMultisampleStorage()) {
+            throw new RendererException("OpenGL ES multisample textures require a supported ES 3.1 backend");
+        }
+        if (type != Texture.Type.TwoDimensional || image.getDepth() > 1
+                || (image.getData() != null && image.getData().size() > 1)) {
+            throw new RendererException("OpenGL ES multisample textures currently require two-dimensional storage");
+        }
+        if (image.hasMipmaps() || image.isGeneratedMipmapsRequired()
+                || image.getData() != null && image.getData(0) != null) {
+            throw new RendererException("Multisample textures cannot contain CPU pixels or mipmaps");
+        }
+        int maxSize = limits.get(Limits.TextureSize);
+        if (image.getWidth() < 1 || image.getHeight() < 1
+                || image.getWidth() > maxSize || image.getHeight() > maxSize) {
+            throw new RendererException("Multisample texture dimensions exceed the supported texture size");
+        }
+        boolean depth = image.getFormat().isDepthFormat();
+        if (depth && !caps.contains(Caps.DepthTexture)) {
+            throw new RendererException("Depth textures are not supported by the video hardware");
+        }
+        GLImageFormat format = texUtil.getImageFormatWithError(image.getFormat(), linearizeSrgbImages
+                && image.getColorSpace() == ColorSpace.sRGB);
+        if (depth ? !format.depthRenderable : !format.colorRenderable) {
+            throw new RendererException("Multisample textures require a renderable internal format");
+        }
+        int maxSamples = limits.get(depth ? Limits.DepthTextureSamples : Limits.ColorTextureSamples);
+        int requestedSamples = Math.min(image.getMultiSamples(), maxSamples);
+        if (requestedSamples <= 1) {
+            throw new RendererException("Texture format does not support multiple samples");
+        }
+        if (storage != null && image.getId() == storage.id
+                && image.getWidth() == storage.width && image.getHeight() == storage.height
+                && format.internalFormat == storage.internalFormat
+                && (requestedSamples == storage.requestedSamples || requestedSamples == storage.actualSamples)) {
+            // An update flag can reflect sampler state alone. Never discard rendered pixels.
+            bindTextureAndUnit(GLExt.GL_TEXTURE_2D_MULTISAMPLE, image, unit);
+            setAllocatedSamples(image, storage.actualSamples);
+            image.clearUpdateNeeded();
+            return true;
+        }
+
+        // Per-format support can be lower than the global color/depth limit.
+        int formatMaximum = 1;
+        for (int samples : textureSampleCounts(format)) formatMaximum = Math.max(formatMaximum, samples);
+        maxSamples = Math.min(maxSamples, formatMaximum);
+        requestedSamples = Math.min(requestedSamples, maxSamples);
+        if (requestedSamples <= 1) {
+            throw new RendererException("Texture format does not support multiple samples");
+        }
+
+        // Immutable storage, and texture targets themselves, need a fresh native name.
+        // This also invalidates cached framebuffer attachment names before reuse.
+        if (image.getId() != -1) deleteImage(image);
+        gl.glGenTextures(intBuf1);
+        image.setId(intBuf1.get(0));
+        objManager.registerObject(image);
+        statistics.onNewTexture();
+        try {
+            bindTextureAndUnit(GLExt.GL_TEXTURE_2D_MULTISAMPLE, image, unit);
+            glext.glTexStorage2DMultisample(GLExt.GL_TEXTURE_2D_MULTISAMPLE, requestedSamples,
+                    format.internalFormat, image.getWidth(), image.getHeight(), true);
+            intBuf1.clear();
+            intBuf1.put(0, 0);
+            glext.glGetTexLevelParameteriv(GLExt.GL_TEXTURE_2D_MULTISAMPLE, 0,
+                    GLExt.GL_TEXTURE_SAMPLES, intBuf1);
+            int actualSamples = intBuf1.get(0);
+            if (actualSamples < requestedSamples || actualSamples > maxSamples) {
+                throw new RendererException("Driver returned an invalid multisample texture sample count: " + actualSamples);
+            }
+            setAllocatedSamples(image, actualSamples);
+            multisampleStorage.put(image.getWeakRef(),
+                    new MultisampleStorageState(image, format.internalFormat, requestedSamples, actualSamples));
+            image.clearUpdateNeeded();
+        } catch (RuntimeException | Error failure) {
+            try { deleteImage(image); }
+            catch (RuntimeException | Error cleanup) { failure.addSuppressed(cleanup); }
+            multisampleStorage.remove(image.getWeakRef());
+            throw failure;
+        }
+        return true;
+    }
+
+    private static void setAllocatedSamples(Image image, int samples) {
+        if (image.getMultiSamples() == samples) return;
+        if (image.getData() == null) image.setData(new ArrayList<ByteBuffer>());
+        image.setMultiSamples(samples);
     }
 
     private boolean isMipmapGenerationSupported(Image.Format format, ColorSpace colorSpace) {
@@ -4133,6 +4312,7 @@ public final class GLRenderer implements Renderer {
                 }
             }
             imageStorage.remove(image.getWeakRef());
+            multisampleStorage.remove(image.getWeakRef());
             objManager.unregisterObject(image);
             image.resetObject();
 
