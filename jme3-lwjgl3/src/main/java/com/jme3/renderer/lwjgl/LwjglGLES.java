@@ -107,6 +107,17 @@ public class LwjglGLES extends LwjglRender implements GL, GL2, GLES_30, GLComput
     }
 
     @Override
+    public void glBindImageTexture(int unit, int texture, int level, boolean layered,
+            int layer, int access, int format) {
+        org.lwjgl.opengles.GLES31.glBindImageTexture(unit, texture, level, layered, layer, access, format);
+    }
+
+    @Override
+    public void glTexStorage2D(int target, int levels, int internalFormat, int width, int height) {
+        GLES30.glTexStorage2D(target, levels, internalFormat, width, height);
+    }
+
+    @Override
     public void glDispatchCompute(int numGroupsX, int numGroupsY, int numGroupsZ) {
         org.lwjgl.opengles.GLES31.glDispatchCompute(numGroupsX, numGroupsY, numGroupsZ);
     }

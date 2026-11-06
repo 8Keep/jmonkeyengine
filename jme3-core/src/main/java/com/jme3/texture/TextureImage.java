@@ -33,12 +33,21 @@ package com.jme3.texture;
 
 import com.jme3.renderer.opengl.GL2;
 import com.jme3.renderer.opengl.GL4;
+import com.jme3.renderer.opengl.GLCompute;
 import com.jme3.renderer.opengl.TextureUtil;
 import java.util.Objects;
 
 /**
  * Wraps a texture so that only a single level of the underlying image is bound
  * instead of the entire image.
+ * <p>
+ * On OpenGL ES, bind a single-sample two-dimensional image through
+ * {@link com.jme3.renderer.Renderer#setTextureImage(int, TextureImage)} before
+ * its first sampler or framebuffer upload. The renderer then allocates the
+ * immutable storage required by ES image load/store. Already-uploaded mutable
+ * textures and other ES texture types are rejected rather than reallocating
+ * storage and losing GPU contents. Desktop OpenGL retains its existing texture
+ * types and allocation behavior.
  * 
  * @author codex
  */
@@ -125,7 +134,7 @@ public class TextureImage {
         this.texture = Objects.requireNonNull(texture, "Underlying texture cannot be null");
         this.level = level;
         this.layer = layer;
-        this.access = access;
+        this.access = Objects.requireNonNull(access, "Image access cannot be null");
         if (this.level < 0) {
             throw new IllegalArgumentException("Level cannot be less than zero.");
         }
@@ -134,18 +143,29 @@ public class TextureImage {
     /**
      * Binds this texture image to the texture unit.
      * <p>
-     * Calling this is not completely sufficient for totally binding an image
-     * to an image unit. Additionally, the image must be bound beforehand using
-     * {@link GL2#glBindTexture(int, int)}.
+     * The caller must allocate compatible texture storage first. Prefer the
+     * renderer's setTextureImage method, which validates and uploads the image.
      * 
      * @param gl4 GL4 implementation (not null)
      * @param texUtil utility used to convert JME's image format to the corresponding GL enum (not null)
      * @param unit texture unit to bind to
      */
     public void bindImage(GL4 gl4, TextureUtil texUtil, int unit) {
+        bindImage((GLCompute) gl4, texUtil, unit);
+    }
+
+    /**
+     * Binds an already allocated image through the desktop or ES image API.
+     * The caller must ensure compatible storage and a valid image-unit index.
+     *
+     * @param glCompute image binding implementation (not null)
+     * @param texUtil image-format conversion utility (not null)
+     * @param unit image unit, independent of sampler units
+     */
+    public void bindImage(GLCompute glCompute, TextureUtil texUtil, int unit) {
         Image img = texture.getImage();
-        gl4.glBindImageTexture(unit, img.getId(), level, isLayered(), Math.max(layer, 0),
-                access.getGlEnum(), texUtil.getImageFormat(img.getFormat(), false).internalFormat);
+        glCompute.glBindImageTexture(unit, img.getId(), level, isLayered(), Math.max(layer, 0),
+                access.getGlEnum(), texUtil.getImageFormatWithError(img.getFormat(), false).internalFormat);
     }
     
     /**
@@ -224,6 +244,7 @@ public class TextureImage {
      * @param access 
      */
     public void setAccess(Access access) {
+        Objects.requireNonNull(access, "Image access cannot be null");
         if (this.access != access) {
             this.access = access;
             updateFlag = true;
