@@ -36,6 +36,7 @@ import java.nio.IntBuffer;
  */
 public interface GLCompute {
 
+    int GL_MAX_IMAGE_UNITS = 0x8F38;
     int GL_COMPUTE_SHADER = 0x91B9;
     int GL_MAX_COMPUTE_WORK_GROUP_COUNT = 0x91BE;
     int GL_MAX_COMPUTE_WORK_GROUP_SIZE = 0x91BF;
@@ -47,10 +48,22 @@ public interface GLCompute {
 
     int GL_UNIFORM_BARRIER_BIT = 0x00000004;
     int GL_TEXTURE_FETCH_BARRIER_BIT = 0x00000008;
+    int GL_SHADER_IMAGE_ACCESS_BARRIER_BIT = 0x00000020;
     int GL_SHADER_STORAGE_BARRIER_BIT = 0x00002000;
     int GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT = 0x00000001;
     int GL_COMMAND_BARRIER_BIT = 0x00000040;
     int GL_BUFFER_UPDATE_BARRIER_BIT = 0x00000200;
+
+    /** Binds a texture level to an image unit, independently of sampler bindings. */
+    default void glBindImageTexture(int unit, int texture, int level, boolean layered,
+            int layer, int access, int format) {
+        throw new UnsupportedOperationException("Shader image binding is not supported");
+    }
+
+    /** Allocates immutable two-dimensional texture storage. */
+    default void glTexStorage2D(int target, int levels, int internalFormat, int width, int height) {
+        throw new UnsupportedOperationException("Immutable texture storage is not supported");
+    }
 
     /** Launches one or more compute work groups. */
     void glDispatchCompute(int numGroupsX, int numGroupsY, int numGroupsZ);
