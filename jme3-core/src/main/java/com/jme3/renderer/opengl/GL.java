@@ -45,6 +45,13 @@ import java.nio.ShortBuffer;
  */
 public interface GL {
 
+    int GL_TEXTURE_BINDING_2D = 0x8069;
+    int GL_TEXTURE_BINDING_3D = 0x806A;
+    int GL_TEXTURE_BINDING_CUBE_MAP = 0x8514;
+    int GL_TEXTURE_BINDING_2D_ARRAY = 0x8C1D;
+    int GL_TEXTURE_BINDING_2D_MULTISAMPLE = 0x9104;
+    int GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY = 0x9105;
+
     public static final int GL_ALIASED_LINE_WIDTH_RANGE = 0x846E;
     public static final int GL_ALPHA = 0x1906;
     public static final int GL_ALWAYS = 0x207;

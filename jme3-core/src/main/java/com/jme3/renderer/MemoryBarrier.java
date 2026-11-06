@@ -46,5 +46,7 @@ public enum MemoryBarrier {
     /** Buffer upload, copy, mapping and readback operations. */
     BufferUpdate,
     /** Subsequent shader storage reads, writes and atomics. */
-    ShaderStorage
+    ShaderStorage,
+    /** Subsequent image loads, stores and atomics through shader image units. */
+    ShaderImageAccess
 }

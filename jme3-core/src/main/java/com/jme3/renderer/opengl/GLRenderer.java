@@ -213,6 +213,50 @@ public final class GLRenderer implements Renderer {
     private final GLExt glext;
     private final GLFbo glfbo;
     private final TextureUtil texUtil;
+    // Image units are a separate OpenGL namespace from sampler texture units.
+    private ImageBindingState[] imageBindings;
+    // Image equality/hash code compare mutable contents. Its cached weak reference
+    // supplies stable identity keys without keeping images alive.
+    private final Map<WeakReference<Image>, ImageStorageState> imageStorage = new WeakHashMap<>();
+
+    private static final class ImageBindingState {
+        final WeakReference<Image> image;
+        final int id, level, layer, format;
+        final boolean layered;
+        final TextureImage.Access access;
+
+        ImageBindingState(TextureImage view, int format) {
+            image = view.getImage().getWeakRef();
+            id = view.getImageId();
+            level = view.getLevel();
+            layer = Math.max(view.getLayer(), 0);
+            layered = view.isLayered();
+            access = view.getAccess();
+            this.format = format;
+        }
+
+        boolean matches(TextureImage view, int internalFormat) {
+            return image.get() == view.getImage() && id == view.getImageId()
+                    && level == view.getLevel() && layer == Math.max(view.getLayer(), 0)
+                    && layered == view.isLayered() && access == view.getAccess()
+                    && format == internalFormat;
+        }
+    }
+
+    /** Storage metadata survives sampler-state invalidation, but does not own Images. */
+    private static final class ImageStorageState {
+        final int width, height, levels;
+        final Image.Format format;
+        int id = -1;
+
+        ImageStorageState(Image image) {
+            width = image.getWidth();
+            height = image.getHeight();
+            levels = generatedMipMaxLevel(width, height, 1) + 1;
+            format = image.getFormat();
+        }
+    }
+
     private boolean debug = false;
     private int debugGroupId = 0;
 
@@ -1086,6 +1130,7 @@ public final class GLRenderer implements Renderer {
         }
 
         context.reset();
+        imageBindings = null;
         context.boundFBO = defaultFBO;
         context.srgbWriteEnabled = mainFrameBufferSrgb;
         Arrays.fill(vertexAttribDivisorsInvalid, true);
@@ -2254,6 +2299,9 @@ public final class GLRenderer implements Renderer {
                     break;
                 case TextureFetch:
                     bits |= GLCompute.GL_TEXTURE_FETCH_BARRIER_BIT;
+                    break;
+                case ShaderImageAccess:
+                    bits |= GLCompute.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT;
                     break;
                 case Command:
                     bits |= GLCompute.GL_COMMAND_BARRIER_BIT;
@@ -3467,6 +3515,11 @@ public final class GLRenderer implements Renderer {
 
     private void updateTexImageData(Image img, Texture.Type type, int unit, boolean scaleToPot,
                                     boolean allowCpuMipmapFallback) {
+        ImageStorageState storage = imageStorage.get(img.getWeakRef());
+        if (storage != null) {
+            updateImageStorage(img, type, unit, storage);
+            return;
+        }
         int texId = img.getId();
         boolean textureWasUnuploaded = texId == -1;
         if (texId == -1) {
@@ -3705,7 +3758,7 @@ public final class GLRenderer implements Renderer {
         // GPU-only images are generated when leaving their framebuffer, not by
         // re-uploading empty image data when the texture is sampled. Keep the
         // upload path's validation for invalid mipmapped multisample textures.
-        if (image.getMultiSamples() <= 1 && image.getData(0) == null) {
+        if (image.getMultiSamples() <= 1 && (image.getData() == null || image.getData(0) == null)) {
             return false;
         }
 
@@ -3757,17 +3810,187 @@ public final class GLRenderer implements Renderer {
     
     @Override
     public void setTextureImage(int unit, TextureImage tex) throws TextureUnitException {
-        if (unit < 0 || unit >= RenderContext.maxTextureUnits) {
-            throw new TextureUnitException();
+        Objects.requireNonNull(tex, "Texture image cannot be null");
+        if (glCompute == null || !(caps.contains(Caps.OpenGL42) || caps.contains(Caps.OpenGLES31)
+                || (extensions != null && extensions.contains("GL_ARB_shader_image_load_store")))) {
+            throw new RendererException("Shader image binding requires OpenGL 4.2 or OpenGL ES 3.1");
         }
-        WeakReference<Image> ref = context.boundTextures[unit];
-        boolean bindRequired = tex.clearUpdateNeeded() || ref == null || ref.get() != tex.getImage().getWeakRef().get();
-        setTexture(unit, tex.getTexture());
-        if (gl4 != null && bindRequired) {
-            tex.bindImage(gl4, texUtil, unit);
+        if (imageBindings == null) {
+            int count = getInteger(GLCompute.GL_MAX_IMAGE_UNITS);
+            if (count <= 0) throw new RendererException("No shader image units are available");
+            imageBindings = new ImageBindingState[count];
+        }
+        if (unit < 0 || unit >= imageBindings.length) throw new TextureUnitException();
+        Image image = Objects.requireNonNull(tex.getImage(), "Texture image has no Image");
+        if (caps.contains(Caps.OpenGLES31)) {
+            validateGlesImage(tex);
+            if (!imageStorage.containsKey(image.getWeakRef())) {
+                if (image.getId() != -1) {
+                    throw new RendererException("OpenGL ES images require immutable storage; bind TextureImage before its first texture upload");
+                }
+                imageStorage.put(image.getWeakRef(), new ImageStorageState(image));
+            }
+        }
+        try {
+            if (image.isUpdateNeeded() || needsGeneratedMipmaps(image)) {
+                uploadImageForBinding(tex.getTexture());
+            }
+        } catch (RuntimeException exception) {
+            // Validation can fail before native allocation. Allow a corrected
+            // Image to retry without retaining the failed storage dimensions.
+            if (image.getId() == -1) imageStorage.remove(image.getWeakRef());
+            throw exception;
+        }
+        int format = texUtil.getImageFormatWithError(image.getFormat(), false).internalFormat;
+        ImageBindingState previous = imageBindings[unit];
+        if (tex.isUpdateNeeded() || previous == null || !previous.matches(tex, format)) {
+            if (gl4 != null) {
+                // Preserve dispatch to existing TextureImage subclass overrides.
+                tex.bindImage(gl4, texUtil, unit);
+            } else {
+                tex.bindImage(glCompute, texUtil, unit);
+            }
+            imageBindings[unit] = new ImageBindingState(tex, format);
+            tex.clearUpdateNeeded();
         }
     }
-    
+
+    /** Uploads through a scratch sampler unit without changing dispatch inputs. */
+    private void uploadImageForBinding(Texture texture) {
+        Image image = texture.getImage();
+        int target = convertTextureType(texture.getType(), image.getMultiSamples(), -1);
+        int bindingQuery;
+        switch (target) {
+            case GL.GL_TEXTURE_2D: bindingQuery = GL.GL_TEXTURE_BINDING_2D; break;
+            case GL2.GL_TEXTURE_3D: bindingQuery = GL.GL_TEXTURE_BINDING_3D; break;
+            case GL.GL_TEXTURE_CUBE_MAP: bindingQuery = GL.GL_TEXTURE_BINDING_CUBE_MAP; break;
+            case GLExt.GL_TEXTURE_2D_ARRAY_EXT: bindingQuery = GL.GL_TEXTURE_BINDING_2D_ARRAY; break;
+            case GLExt.GL_TEXTURE_2D_MULTISAMPLE: bindingQuery = GL.GL_TEXTURE_BINDING_2D_MULTISAMPLE; break;
+            case GLExt.GL_TEXTURE_2D_MULTISAMPLE_ARRAY: bindingQuery = GL.GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY; break;
+            default: throw new RendererException("Unsupported shader image texture target: " + target);
+        }
+        int previousUnit = context.boundTextureUnit;
+        WeakReference<Image> previousImage = context.boundTextures[0];
+        // Establish the scratch unit even when native state differs from the cache.
+        gl.glActiveTexture(GL.GL_TEXTURE0);
+        context.boundTextureUnit = 0;
+        int previousBinding = getInteger(bindingQuery);
+        try {
+            updateTexImageData(image, texture.getType(), 0, false);
+        } finally {
+            // Restore this target even when another texture type occupied the cached unit.
+            gl.glBindTexture(target, previousBinding);
+            context.boundTextures[0] = previousImage;
+            if (previousUnit != 0) {
+                gl.glActiveTexture(GL.GL_TEXTURE0 + previousUnit);
+                context.boundTextureUnit = previousUnit;
+            }
+        }
+    }
+
+    private void validateGlesImage(TextureImage view) {
+        Image image = view.getImage();
+        if (view.getTexture().getType() != Texture.Type.TwoDimensional || image.getMultiSamples() > 1
+                || image.getDepth() > 1 || (image.getData() != null && image.getData().size() > 1)) {
+            throw new RendererException("OpenGL ES shader images currently require single-sample 2D textures");
+        }
+        if (view.getLayer() > 0 || view.getLevel() > generatedMipMaxLevel(image.getWidth(), image.getHeight(), 1)) {
+            throw new IllegalArgumentException("Texture image level or layer is outside its storage");
+        }
+        if (linearizeSrgbImages && image.getColorSpace() == ColorSpace.sRGB) {
+            throw new RendererException("OpenGL ES shader images require a linear image format");
+        }
+        switch (image.getFormat()) {
+            case RGBA32F: case RGBA16F: case R32F:
+            case RGBA32I: case RGBA16I: case RGBA8I: case R32I:
+            case RGBA32UI: case RGBA16UI: case RGBA8UI: case R32UI: case RGBA8:
+                break;
+            default:
+                throw new RendererException("Unsupported OpenGL ES shader image format: " + image.getFormat());
+        }
+    }
+
+    private void updateImageStorage(Image image, Texture.Type type, int unit, ImageStorageState storage) {
+        if (type != Texture.Type.TwoDimensional || image.getMultiSamples() > 1
+                || image.getDepth() > 1 || (image.getData() != null && image.getData().size() > 1)
+                || image.getWidth() != storage.width || image.getHeight() != storage.height
+                || image.getFormat() != storage.format
+                || (linearizeSrgbImages && image.getColorSpace() == ColorSpace.sRGB)) {
+            throw new RendererException("Immutable shader image storage changed; delete the image before reallocating it");
+        }
+        int maxSize = limits.get(Limits.TextureSize);
+        if (storage.width < 1 || storage.height < 1 || storage.width > maxSize || storage.height > maxSize) {
+            throw new RendererException("Shader image dimensions exceed the supported texture size");
+        }
+        int[] mipSizes = image.getMipMapSizes();
+        if (mipSizes != null && mipSizes.length > storage.levels) {
+            throw new RendererException("Shader image mip count exceeds its immutable storage");
+        }
+        GLImageFormat format = texUtil.getImageFormatWithError(storage.format, false);
+        ByteBuffer source = image.getData() == null ? null : image.getData(0);
+        if (source != null) {
+            int requiredBytes = 0;
+            int count = mipSizes == null ? 1 : mipSizes.length;
+            for (int level = 0; level < count; level++) {
+                int bytes = Math.multiplyExact(Math.multiplyExact(Math.max(1, storage.width >> level),
+                        Math.max(1, storage.height >> level)), storage.format.getBitsPerPixel() / 8);
+                if (mipSizes != null && mipSizes[level] != bytes) {
+                    throw new RendererException("Shader image mip data size does not match its dimensions");
+                }
+                requiredBytes = Math.addExact(requiredBytes, bytes);
+            }
+            if (source.capacity() < requiredBytes) {
+                throw new RendererException("Shader image CPU buffer is smaller than its mip data");
+            }
+        }
+        boolean generateMipmaps = source != null && image.isGeneratedMipmapsRequired() && !image.hasMipmaps();
+        if (generateMipmaps && !isMipmapGenerationSupported(storage.format, ColorSpace.Linear)) {
+            throw new RendererException("Shader image format requires explicit CPU mipmaps or a non-mipmapped sampler");
+        }
+        boolean allocate = image.getId() == -1;
+        if (allocate) {
+            gl.glGenTextures(intBuf1);
+            image.setId(intBuf1.get(0));
+            objManager.registerObject(image);
+            statistics.onNewTexture();
+        } else if (image.getId() != storage.id) {
+            throw new RendererException("Shader image native storage was replaced outside the renderer");
+        }
+        bindTextureAndUnit(GL.GL_TEXTURE_2D, image, unit);
+        if (allocate) {
+            try {
+                glCompute.glTexStorage2D(GL.GL_TEXTURE_2D, storage.levels, format.internalFormat,
+                        storage.width, storage.height);
+                storage.id = image.getId();
+            } catch (RuntimeException exception) {
+                deleteImage(image);
+                throw exception;
+            }
+        }
+        if (source != null) {
+            ByteBuffer data = source.duplicate();
+            data.clear();
+            int position = 0;
+            int count = mipSizes == null ? 1 : mipSizes.length;
+            for (int level = 0; level < count; level++) {
+                int width = Math.max(1, storage.width >> level);
+                int height = Math.max(1, storage.height >> level);
+                int bytes = mipSizes == null ? Math.multiplyExact(Math.multiplyExact(width, height),
+                        storage.format.getBitsPerPixel() / 8) : mipSizes[level];
+                data.limit(position + bytes).position(position);
+                gl.glTexSubImage2D(GL.GL_TEXTURE_2D, level, 0, 0, width, height,
+                        format.format, format.dataType, data);
+                position += bytes;
+            }
+        }
+        gl.glTexParameteri(GL.GL_TEXTURE_2D, GL2.GL_TEXTURE_MAX_LEVEL, storage.levels - 1);
+        if (generateMipmaps) {
+            glfbo.glGenerateMipmapEXT(GL.GL_TEXTURE_2D);
+            image.setMipmapsGenerated(true);
+        }
+        image.clearUpdateNeeded();
+    }
+
     @Override
     public void setUniformBufferObject(int bindingPoint, BufferObject bufferObject) {
         validateBufferBinding(bindingPoint, bufferObject, Caps.UniformBufferObject);
@@ -3904,6 +4127,12 @@ public final class GLRenderer implements Renderer {
                     context.boundTextures[unit] = null;
                 }
             }
+            if (imageBindings != null) {
+                for (int unit = 0; unit < imageBindings.length; unit++) {
+                    if (imageBindings[unit] != null && imageBindings[unit].id == texId) imageBindings[unit] = null;
+                }
+            }
+            imageStorage.remove(image.getWeakRef());
             objManager.unregisterObject(image);
             image.resetObject();
 
