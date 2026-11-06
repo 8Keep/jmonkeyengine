@@ -81,6 +81,30 @@ public interface Renderer {
     public EnumMap<Limits, Integer> getLimits();
 
     /**
+     * Selects a framebuffer sample count no greater than the request. A backend
+     * may query exact per-format support; the default conservatively uses global
+     * limits and power-of-two counts. One denotes single-sample storage.
+     *
+     * @param color color attachment format, or null when absent
+     * @param depth depth attachment format, or null when absent
+     * @param requested positive requested sample count
+     * @return a preferred count in [1, requested]; older backends use a global-limit estimate
+     */
+    default int getPreferredFrameBufferSamples(Format color, Format depth, int requested) {
+        if (requested < 1 || color == null && depth == null
+                || color != null && color.isDepthFormat() || depth != null && !depth.isDepthFormat()) {
+            throw new IllegalArgumentException("positive sample count and color/depth attachment formats required");
+        }
+        if (requested == 1 || !getCaps().contains(Caps.FrameBufferMultisample)) return 1;
+        int samples = Math.min(requested, getLimits().getOrDefault(Limits.FrameBufferSamples, 1));
+        if (getCaps().contains(Caps.TextureMultisample)) {
+            if (color != null) samples = Math.min(samples, getLimits().getOrDefault(Limits.ColorTextureSamples, 1));
+            if (depth != null) samples = Math.min(samples, getLimits().getOrDefault(Limits.DepthTextureSamples, 1));
+        }
+        return Integer.highestOneBit(Math.max(1, samples));
+    }
+
+    /**
      * Copies the render statistics.
      *
      * <p>The statistics allow tracking of how data
