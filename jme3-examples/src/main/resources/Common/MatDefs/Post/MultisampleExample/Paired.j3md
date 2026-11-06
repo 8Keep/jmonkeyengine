@@ -1,0 +1,23 @@
+MaterialDef Multisample Example Paired {
+    MaterialParameters {
+        Int NumSamples
+        Int NumSamplesDepth
+        Texture2D Texture
+        Texture2D DepthTexture
+    }
+    Technique {
+        VertexShader GLSL310 GLSL300 GLSL150 : Common/MatDefs/Post/Post.vert
+        FragmentShader GLSL310 GLSL300 GLSL150 : Common/MatDefs/Post/MultisampleExample/Paired.frag
+        WorldParameters { }
+        Defines {
+            RESOLVE_MS : NumSamples
+            RESOLVE_DEPTH_MS : NumSamplesDepth
+        }
+        RenderState {
+            FaceCull Off
+            DepthTest Off
+            DepthWrite Off
+            Blend Off
+        }
+    }
+}

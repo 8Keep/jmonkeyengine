@@ -9,8 +9,8 @@ MaterialDef Upsample {
     }
 
     Technique {
-        VertexShader   GLSL300 GLSL150 GLSL100: Common/MatDefs/Post/Post.vert
-        FragmentShader GLSL300 GLSL150 GLSL100: Common/MatDefs/Post/Upsample.frag
+        VertexShader   GLSL310 GLSL300 GLSL150 GLSL100: Common/MatDefs/Post/Post.vert
+        FragmentShader GLSL310 GLSL300 GLSL150 GLSL100: Common/MatDefs/Post/Upsample.frag
 
         WorldParameters {
         }
