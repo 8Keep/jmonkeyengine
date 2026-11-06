@@ -20,6 +20,7 @@ import org.lwjgl.opengles.GLES;
 import org.lwjgl.opengles.GLESCapabilities;
 import org.lwjgl.opengles.GLES20;
 import org.lwjgl.opengles.GLES30;
+import org.lwjgl.opengles.GLES31;
 import org.lwjgl.opengles.EXTDisjointTimerQuery;
 import org.lwjgl.system.MemoryUtil;
 
@@ -821,14 +822,43 @@ public class LwjglGLES extends LwjglRender implements GL, GL2, GLES_30, GLComput
 
 
     @Override
+    public boolean supportsTextureMultisampleStorage() {
+        GLESCapabilities capabilities = GLES.getCapabilities();
+        return capabilities.GLES31
+                && capabilities.glTexStorage2DMultisample != MemoryUtil.NULL
+                && capabilities.glGetInternalformativ != MemoryUtil.NULL
+                && capabilities.glGetTexLevelParameteriv != MemoryUtil.NULL
+                && capabilities.glGetMultisamplefv != MemoryUtil.NULL;
+    }
+
+    @Override
+    public void glTexStorage2DMultisample(int target, int samples, int internalFormat,
+            int width, int height, boolean fixedSampleLocations) {
+        GLES31.glTexStorage2DMultisample(target, samples, internalFormat, width, height, fixedSampleLocations);
+    }
+
+    @Override
+    public void glGetInternalformativ(int target, int internalFormat, int pname, IntBuffer values) {
+        checkLimit(values);
+        GLES30.glGetInternalformativ(target, internalFormat, pname, values);
+    }
+
+    @Override
+    public void glGetTexLevelParameteriv(int target, int level, int pname, IntBuffer values) {
+        checkLimit(values);
+        GLES31.glGetTexLevelParameteriv(target, level, pname, values);
+    }
+
+    @Override
     public void glGetMultisample(int pname, int index, FloatBuffer val) {
-        throw new UnsupportedOperationException("Multisample textures require OpenGL ES 3.1");
+        checkLimit(val);
+        GLES31.glGetMultisamplefv(pname, index, val);
     }
 
     @Override
     public void glTexImage2DMultisample(int target, int samples, int internalformat, int width, int height,
             boolean fixedSampleLocations) {
-        throw new UnsupportedOperationException("Multisample textures require OpenGL ES 3.1");
+        throw new UnsupportedOperationException("OpenGL ES multisample textures require immutable storage");
     }
 
 

@@ -74,6 +74,7 @@ public interface GLExt {
     public static final int GL_MAX_DEPTH_TEXTURE_SAMPLES = 0x910F;
     public static final int GL_MAX_DRAW_BUFFERS_ARB = 0x8824;
     public static final int GL_MAX_SAMPLES_EXT = 0x8D57;
+    public static final int GL_NUM_SAMPLE_COUNTS = 0x9380;
     public static final int GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT = 0x84FF;
     public static final int GL_MULTISAMPLE_ARB = 0x809D;
     public static final int GL_NUM_PROGRAM_BINARY_FORMATS = 0x87FE;
@@ -99,6 +100,7 @@ public interface GLExt {
     public static final int GL_TEXTURE_2D_ARRAY_EXT = 0x8C1A;
     public static final int GL_TEXTURE_2D_MULTISAMPLE = 0x9100;
     public static final int GL_TEXTURE_2D_MULTISAMPLE_ARRAY = 0x9102;
+    public static final int GL_TEXTURE_SAMPLES = 0x9106;
     public static final int GL_TEXTURE_CUBE_MAP_SEAMLESS = 0x884F;
     public static final int GL_TEXTURE_MAX_ANISOTROPY_EXT = 0x84FE;
     public static final int GL_TIMEOUT_EXPIRED = 0x911B;
@@ -225,6 +227,56 @@ public interface GLExt {
      * @return          a new instance
      */
     public Object glFenceSync(int condition, int flags);
+
+    /**
+     * Whether this backend implements immutable multisample texture allocation,
+     * format/sample-count queries, texture-level queries and sample-position queries. The context version must
+     * also support the operations before they are used.
+     *
+     * @return true when the backend provides all required operations
+     */
+    default boolean supportsTextureMultisampleStorage() {
+        return false;
+    }
+
+    /**
+     * Allocates immutable two-dimensional multisample texture storage.
+     *
+     * @param target texture target
+     * @param samples requested minimum number of samples
+     * @param internalFormat sized renderable internal format
+     * @param width texture width
+     * @param height texture height
+     * @param fixedSampleLocations whether sample positions are fixed across texels
+     */
+    default void glTexStorage2DMultisample(int target, int samples, int internalFormat,
+            int width, int height, boolean fixedSampleLocations) {
+        throw new UnsupportedOperationException("Immutable multisample texture storage is not implemented");
+    }
+
+    /**
+     * Queries supported internal-format properties, including sample counts.
+     *
+     * @param target texture or renderbuffer target
+     * @param internalFormat sized internal format
+     * @param pname property to query
+     * @param values result storage
+     */
+    default void glGetInternalformativ(int target, int internalFormat, int pname, IntBuffer values) {
+        throw new UnsupportedOperationException("Internal-format queries are not implemented");
+    }
+
+    /**
+     * Queries an integer property of the bound texture's image level.
+     *
+     * @param target texture target
+     * @param level image level
+     * @param pname property to query
+     * @param values result storage
+     */
+    default void glGetTexLevelParameteriv(int target, int level, int pname, IntBuffer values) {
+        throw new UnsupportedOperationException("Texture-level queries are not implemented");
+    }
 
     /**
      * Retrieves the location of a sample.
