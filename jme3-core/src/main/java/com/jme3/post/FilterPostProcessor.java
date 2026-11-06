@@ -84,6 +84,20 @@ public class FilterPostProcessor implements SceneProcessor, Savable {
     private Renderer renderer;
     private ViewPort viewPort;
     private FrameBuffer renderFrameBufferMS;
+    /** How scene samples are supplied to post-processing materials. */
+    public enum MultisampleMode {
+        /** Preserve the existing desktop sampled / GLES resolved behavior. */
+        Automatic,
+        /** Preserve individual samples where supported; filters must accept MS textures. */
+        Sampled,
+        /** Resolve color and depth before running filters. */
+        Resolved
+    }
+
+    private MultisampleMode multisampleMode = MultisampleMode.Automatic;
+    private boolean sampleableMultisampling;
+    private FrameBuffer bilinearResolveBuffer;
+    private Texture2D bilinearResolveTexture;
     private int numSamples = 1;
     private FrameBuffer renderFrameBuffer;
     private Texture2D filterTexture;
@@ -349,6 +363,12 @@ public class FilterPostProcessor implements SceneProcessor, Savable {
             }
 
             if (filter.isEnabled()) {
+                if (tex.getImage().getMultiSamples() > 1 && filter.isRequiresBilinear()) {
+                    // Multisample textures have no hardware bilinear filtering.
+                    // Resolve once, rather than silently changing filters such as
+                    // FXAA to nearest sampling or binding sampler2D to an MS image.
+                    tex = resolveBilinearInput(r, buff, tex);
+                }
                 // Handle additional passes a filter might have (e.g., blur passes)
                 if (filter.getPostRenderPasses() != null) {
                     for (Filter.Pass pass : filter.getPostRenderPasses()) {
@@ -386,8 +406,12 @@ public class FilterPostProcessor implements SceneProcessor, Savable {
                 filter.postFrame(renderManager, viewPort, buff, sceneFb);
 
                 Material mat = filter.getMaterial();
-                if (msDepth && filter.isRequiresDepthTexture()) {
-                    mat.setInt("NumSamplesDepth", depthTexture.getImage().getMultiSamples());
+                if (filter.isRequiresDepthTexture()) {
+                    if (msDepth) {
+                        mat.setInt("NumSamplesDepth", depthTexture.getImage().getMultiSamples());
+                    } else {
+                        mat.clearParam("NumSamplesDepth");
+                    }
                 }
                 
                 if (filter.isRequiresSceneTexture()) {
@@ -436,7 +460,7 @@ public class FilterPostProcessor implements SceneProcessor, Savable {
     public void postFrame(FrameBuffer out) {
         try {
             FrameBuffer sceneBuffer = renderFrameBuffer;
-            if (renderFrameBufferMS != null && !renderer.getCaps().contains(Caps.OpenGL32)) {
+            if (renderFrameBufferMS != null && !sampleableMultisampling) {
                 renderer.copyFrameBuffer(renderFrameBufferMS, renderFrameBuffer, true, true);
             } else if (renderFrameBufferMS != null) {
                 sceneBuffer = renderFrameBufferMS;
@@ -605,28 +629,31 @@ public class FilterPostProcessor implements SceneProcessor, Savable {
 
         Collection<Caps> caps = renderer.getCaps();
 
-        // antialiasing on filters only supported in opengl 3 due to depth read problem
-        if (numSamples > 1 && caps.contains(Caps.FrameBufferMultisample)) {
-            renderFrameBufferMS = new FrameBuffer(width, height, numSamples);
-
-            // If OpenGL 3.2+ is supported, multisampled textures can be attached directly
-            if (caps.contains(Caps.OpenGL32)) {
-                Texture2D msColor = new Texture2D(width, height, numSamples, fbFormat);
-                Texture2D msDepth = new Texture2D(width, height, numSamples, depthFormat);
+        sampleableMultisampling = caps.contains(Caps.TextureMultisample)
+                && (multisampleMode == MultisampleMode.Sampled
+                || multisampleMode == MultisampleMode.Automatic && caps.contains(Caps.OpenGL32));
+        int sceneSamples = numSamples;
+        if (sampleableMultisampling && numSamples > 1) {
+            // A maximum alone does not establish matching support for both
+            // internal formats. In particular, ES may round storage requests up.
+            sceneSamples = renderer.getPreferredFrameBufferSamples(fbFormat, depthFormat, numSamples);
+        }
+        if (sceneSamples > 1 && caps.contains(Caps.FrameBufferMultisample)) {
+            renderFrameBufferMS = new FrameBuffer(width, height, sceneSamples);
+            if (sampleableMultisampling) {
+                Texture2D msColor = new Texture2D(width, height, sceneSamples, fbFormat);
+                Texture2D msDepth = new Texture2D(width, height, sceneSamples, depthFormat);
                 renderFrameBufferMS.setDepthTarget(FrameBufferTarget.newTarget(msDepth));
                 renderFrameBufferMS.addColorTarget(FrameBufferTarget.newTarget(msColor));
                 filterTexture = msColor;
                 depthTexture = msDepth;
             } else {
-                // Otherwise, multisampled framebuffer must use internal texture, which cannot be directly read
                 renderFrameBufferMS.setDepthTarget(FrameBufferTarget.newTarget(depthFormat));
                 renderFrameBufferMS.addColorTarget(FrameBufferTarget.newTarget(fbFormat));
             }
         }
 
-        // Setup single-sampled framebuffer if no multisampling, or if OpenGL 3.2+ is not supported
-        // (because for non-GL32, a single-sampled buffer is still needed to copy MS content into).
-        if (numSamples <= 1 || !caps.contains(Caps.OpenGL32) || !caps.contains(Caps.FrameBufferMultisample)) {
+        if (renderFrameBufferMS == null || !sampleableMultisampling) {
             renderFrameBuffer = new FrameBuffer(width, height, 1);
             renderFrameBuffer.setDepthTarget(FrameBufferTarget.newTarget(depthFormat));
             filterTexture = new Texture2D(width, height, fbFormat);
@@ -687,6 +714,13 @@ public class FilterPostProcessor implements SceneProcessor, Savable {
     }
 
     private void cleanupFrameBuffers() {
+        if (bilinearResolveBuffer != null) {
+            bilinearResolveBuffer.dispose();
+            bilinearResolveTexture.getImage().dispose();
+            bilinearResolveBuffer = null;
+            bilinearResolveTexture = null;
+        }
+        sampleableMultisampling = false;
         if (renderFrameBuffer != null) {
             renderFrameBuffer.dispose();
             renderFrameBuffer = null;
@@ -703,6 +737,39 @@ public class FilterPostProcessor implements SceneProcessor, Savable {
             depthTexture.getImage().dispose();
         }
         depthTexture = null;
+    }
+
+    private Texture2D resolveBilinearInput(Renderer r, FrameBuffer source, Texture2D texture) {
+        if (bilinearResolveBuffer == null) {
+            bilinearResolveTexture = new Texture2D(width, height, texture.getImage().getFormat());
+            bilinearResolveBuffer = new FrameBuffer(width, height, 1);
+            bilinearResolveBuffer.setName("FilterPostProcessor bilinear input");
+            bilinearResolveBuffer.setSrgb(source.isSrgb());
+            bilinearResolveBuffer.addColorTarget(FrameBufferTarget.newTarget(bilinearResolveTexture));
+        }
+        r.copyFrameBuffer(source, bilinearResolveBuffer, true, false);
+        return bilinearResolveTexture;
+    }
+
+    /**
+     * Selects how multisampled scene inputs reach filters. Configure this before
+     * initialization, or reshape the processor after changing it. Automatic
+     * preserves the historical desktop-texture/GLES-resolve policy. Sampled
+     * opts into individual GLES3.1 samples when the backend supports them;
+     * custom filters must provide compatible multisample shaders (GLSL310 on ES).
+     * Unsupported backends retain resolved inputs. Filters requesting bilinear
+     * color always receive a resolved texture; original scene depth is retained.
+     *
+     * @param mode non-null input policy
+     */
+    public void setMultisampleMode(MultisampleMode mode) {
+        if (mode == null) throw new IllegalArgumentException("multisample mode is required");
+        multisampleMode = mode;
+    }
+
+    /** @return configured input policy, not a guarantee of hardware support */
+    public MultisampleMode getMultisampleMode() {
+        return multisampleMode;
     }
 
     /**
@@ -784,6 +851,7 @@ public class FilterPostProcessor implements SceneProcessor, Savable {
         OutputCapsule oc = ex.getCapsule(this);
         oc.write(numSamples, "numSamples", 0);
         oc.write(useFullscreenTriangle, "useFullscreenTriangle", false);
+        oc.write(multisampleMode, "multisampleMode", MultisampleMode.Automatic);
         oc.writeSavableArrayList(new ArrayList(filters), "filters", null);
     }
 
@@ -793,6 +861,7 @@ public class FilterPostProcessor implements SceneProcessor, Savable {
         InputCapsule ic = im.getCapsule(this);
         numSamples = ic.readInt("numSamples", 0);
         useFullscreenTriangle = ic.readBoolean("useFullscreenTriangle", false);
+        multisampleMode = ic.readEnum("multisampleMode", MultisampleMode.class, MultisampleMode.Automatic);
         filters = new SafeArrayList<>(Filter.class, ic.readSavableArrayList("filters", null));
         for (Filter filter : filters.getArray()) {
             filter.setProcessor(this);

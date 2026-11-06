@@ -280,6 +280,70 @@ class FilterPostProcessorTest {
         processor.cleanup();
     }
 
+    @Test
+    void sampledEsInputsUseNegotiatedCountWhileAutomaticRetainsResolvedInputs() {
+        NullRenderer renderer = new NullRenderer() {
+            @Override public int getPreferredFrameBufferSamples(com.jme3.texture.Image.Format color,
+                    com.jme3.texture.Image.Format depth, int requested) {
+                assertEquals(3, requested);
+                assertEquals(com.jme3.texture.Image.Format.RGBA8, color);
+                assertEquals(com.jme3.texture.Image.Format.Depth24, depth);
+                return 2;
+            }
+        };
+        renderer.getCaps().clear();
+        renderer.getCaps().addAll(java.util.EnumSet.of(com.jme3.renderer.Caps.OpenGLES31,
+                com.jme3.renderer.Caps.FrameBufferMultisample, com.jme3.renderer.Caps.TextureMultisample));
+        RenderManager manager = new RenderManager(renderer);
+        ViewPort view = manager.createMainView("samples", new Camera(32, 32));
+        FilterPostProcessor processor = new FilterPostProcessor(null);
+        processor.setFrameBufferFormat(com.jme3.texture.Image.Format.RGBA8);
+        processor.setFrameBufferDepthFormat(com.jme3.texture.Image.Format.Depth24);
+        processor.setNumSamples(3);
+        processor.addFilter(new RecordingFilter());
+        processor.initialize(manager, view);
+        assertEquals(1, processor.getFilterTexture().getImage().getMultiSamples(),
+                "existing ES300 filters must keep resolved input unless explicitly opted in");
+        processor.cleanup();
+
+        processor.setMultisampleMode(FilterPostProcessor.MultisampleMode.Sampled);
+        processor.initialize(manager, view);
+        assertEquals(2, view.getOutputFrameBuffer().getSamples());
+        assertEquals(2, processor.getFilterTexture().getImage().getMultiSamples());
+        assertEquals(2, processor.getDepthTexture().getImage().getMultiSamples());
+        processor.cleanup();
+
+        processor.setMultisampleMode(FilterPostProcessor.MultisampleMode.Resolved);
+        processor.initialize(manager, view);
+        assertEquals(1, processor.getFilterTexture().getImage().getMultiSamples());
+        processor.cleanup();
+    }
+
+    @Test
+    void sampledRequestFallsBackWithoutTextureCapabilityAndCanReturnAfterSingleSampleReuse() {
+        NullRenderer renderer = new NullRenderer();
+        renderer.initialize();
+        renderer.getCaps().clear();
+        renderer.getCaps().add(com.jme3.renderer.Caps.FrameBufferMultisample);
+        RenderManager manager = new RenderManager(renderer);
+        ViewPort view = manager.createMainView("fallback", new Camera(32, 32));
+        FilterPostProcessor processor = new FilterPostProcessor(null);
+        processor.addFilter(new RecordingFilter());
+        processor.setMultisampleMode(FilterPostProcessor.MultisampleMode.Sampled);
+        processor.setNumSamples(4);
+        processor.initialize(manager, view);
+        assertEquals(1, processor.getFilterTexture().getImage().getMultiSamples());
+        processor.cleanup();
+
+        renderer.getCaps().add(com.jme3.renderer.Caps.TextureMultisample);
+        for (int samples : new int[]{4, 1, 4}) {
+            processor.setNumSamples(samples);
+            processor.initialize(manager, view);
+            assertEquals(samples, processor.getFilterTexture().getImage().getMultiSamples());
+            processor.cleanup();
+        }
+    }
+
     private static RenderManager outputRenderManager() {
         return new RenderManager(new NullRenderer()) {
             @Override
