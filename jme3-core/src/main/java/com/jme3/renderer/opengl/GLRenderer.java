@@ -866,24 +866,7 @@ public final class GLRenderer implements Renderer {
                 || (hasExtension("GL_ARB_shader_storage_buffer_object")
                 && hasExtension("GL_ARB_program_interface_query")))) {
             caps.add(Caps.ShaderStorageBufferObject);
-            limits.put(Limits.ShaderStorageBufferObjectMaxBlockSize,
-                    getInteger(GL4.GL_MAX_SHADER_STORAGE_BLOCK_SIZE));
-            if (caps.contains(Caps.GeometryShader)) {
-                limits.put(Limits.ShaderStorageBufferObjectMaxGeometryBlocks,
-                        getInteger(GL4.GL_MAX_GEOMETRY_SHADER_STORAGE_BLOCKS));
-            }
-            limits.put(Limits.ShaderStorageBufferObjectMaxFragmentBlocks,
-                    getInteger(GL4.GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS));
-            limits.put(Limits.ShaderStorageBufferObjectMaxVertexBlocks,
-                    getInteger(GL4.GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS));
-            if (caps.contains(Caps.TesselationShader)) {
-                limits.put(Limits.ShaderStorageBufferObjectMaxTessControlBlocks,
-                        getInteger(GL4.GL_MAX_TESS_CONTROL_SHADER_STORAGE_BLOCKS));
-                limits.put(Limits.ShaderStorageBufferObjectMaxTessEvaluationBlocks,
-                        getInteger(GL4.GL_MAX_TESS_EVALUATION_SHADER_STORAGE_BLOCKS));
-            }
-            limits.put(Limits.ShaderStorageBufferObjectMaxCombineBlocks,
-                    getInteger(GL4.GL_MAX_COMBINED_SHADER_STORAGE_BLOCKS));
+            loadShaderStorageLimits();
         }
 
         if (hasExtension("GL_ARB_uniform_buffer_object") || caps.contains(Caps.OpenGL31)
@@ -977,6 +960,28 @@ public final class GLRenderer implements Renderer {
         return nameBuf.get(0) != (byte)0;
     }
 
+    /** Storage limits are shared by fixed-layout blocks and reflected blocks. */
+    private void loadShaderStorageLimits() {
+        limits.put(Limits.ShaderStorageBufferObjectMaxBlockSize,
+                getInteger(GL4.GL_MAX_SHADER_STORAGE_BLOCK_SIZE));
+        if (caps.contains(Caps.GeometryShader)) {
+            limits.put(Limits.ShaderStorageBufferObjectMaxGeometryBlocks,
+                    getInteger(GL4.GL_MAX_GEOMETRY_SHADER_STORAGE_BLOCKS));
+        }
+        limits.put(Limits.ShaderStorageBufferObjectMaxFragmentBlocks,
+                getInteger(GL4.GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS));
+        limits.put(Limits.ShaderStorageBufferObjectMaxVertexBlocks,
+                getInteger(GL4.GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS));
+        if (caps.contains(Caps.TesselationShader)) {
+            limits.put(Limits.ShaderStorageBufferObjectMaxTessControlBlocks,
+                    getInteger(GL4.GL_MAX_TESS_CONTROL_SHADER_STORAGE_BLOCKS));
+            limits.put(Limits.ShaderStorageBufferObjectMaxTessEvaluationBlocks,
+                    getInteger(GL4.GL_MAX_TESS_EVALUATION_SHADER_STORAGE_BLOCKS));
+        }
+        limits.put(Limits.ShaderStorageBufferObjectMaxCombineBlocks,
+                getInteger(GL4.GL_MAX_COMBINED_SHADER_STORAGE_BLOCKS));
+    }
+
     private void loadComputeCapabilities() {
         if (glCompute == null || !(caps.contains(Caps.OpenGL43) || caps.contains(Caps.OpenGLES31))) {
             return;
@@ -1015,6 +1020,14 @@ public final class GLRenderer implements Renderer {
         }
         limits.putAll(computeLimits);
         caps.add(Caps.ComputeShader);
+        // Fixed binding is usable by graphics as well as compute, even when
+        // desktop reflection/rebinding is unavailable (notably on GLES).
+        // Stage block counts may legitimately be zero; publish the driver values
+        // instead of treating compute support as vertex-stage storage support.
+        if (!caps.contains(Caps.ShaderStorageBufferObject)) {
+            loadShaderStorageLimits();
+        }
+        caps.add(Caps.FixedShaderStorageBufferObject);
     }
 
     private int getUniformBlockIndex(int program, String uniformBlockName) {
@@ -2276,7 +2289,7 @@ public final class GLRenderer implements Renderer {
     @Override
     public void setFixedShaderStorageBufferObject(int bindingPoint, BufferObject buffer) {
         requireComputeCapability();
-        validateBufferBinding(bindingPoint, buffer, Caps.ComputeShader);
+        validateBufferBinding(bindingPoint, buffer, Caps.FixedShaderStorageBufferObject);
         if (bindingPoint >= limits.get(Limits.ComputeStorageBufferBindings)) {
             throw new IllegalArgumentException("Storage binding exceeds the native limit: " + bindingPoint);
         }
