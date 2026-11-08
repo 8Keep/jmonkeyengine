@@ -240,10 +240,17 @@ public interface Renderer {
      * Uploads if dirty and binds a storage buffer to the binding declared by
      * {@code layout(binding=...)} in the shader. Does not reflect or rebind shader
      * blocks, and leaves the buffer's ordinary block-binding metadata unchanged.
-     * Requires {@link Caps#ComputeShader}; indices must fit both the native limit
-     * and {@link RenderContext#maxBufferObjectUnits}. The buffer must have a GPU
+     * Requires {@link Caps#FixedShaderStorageBufferObject}; this path supports
+     * explicit bindings in compute and graphics shaders without implying
+     * {@link Caps#ShaderStorageBufferObject} reflection/rebinding support. The
+     * current managed backend also requires {@link Caps#ComputeShader}.
+     * Indices must fit both {@link Limits#ComputeStorageBufferBindings} and
+     * {@link RenderContext#maxBufferObjectUnits}. The buffer must have a GPU
      * access hint, nonempty data and fit {@link Limits#ComputeStorageBufferBlockSize}.
-     * The caller ensures that the shader's declared layout fits this allocation.
+     * The caller ensures that the shader's declared layout fits this allocation,
+     * and checks the relevant graphics-stage storage-block counts and
+     * {@link Limits#ShaderStorageBufferObjectMaxBlockSize} before graphics use;
+     * fixed-binding support does not guarantee nonzero vertex-stage blocks.
      *
      * @param bindingPoint shader-declared binding index
      * @param bufferObject non-null renderer-local buffer

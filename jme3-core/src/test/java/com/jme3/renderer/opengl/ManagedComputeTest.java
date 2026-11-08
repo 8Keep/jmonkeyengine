@@ -81,6 +81,7 @@ class ManagedComputeTest {
             renderer.getCaps().add(es ? Caps.OpenGLES31 : Caps.OpenGL43);
             discover(renderer);
             assertTrue(renderer.getCaps().contains(Caps.ComputeShader));
+            assertTrue(renderer.getCaps().contains(Caps.FixedShaderStorageBufferObject));
             assertEquals(8, renderer.getLimits().get(Limits.ComputeWorkGroupCountZ));
             assertEquals(2, renderer.getLimits().get(Limits.ComputeStorageBufferBindings));
             // This separate path must not claim desktop reflection on GLES.
@@ -90,6 +91,7 @@ class ManagedComputeTest {
             legacyAdapter.getCaps().add(Caps.OpenGL43);
             discover(legacyAdapter);
             assertFalse(legacyAdapter.getCaps().contains(Caps.ComputeShader));
+            assertFalse(legacyAdapter.getCaps().contains(Caps.FixedShaderStorageBufferObject));
             assertFalse(legacyAdapter.getLimits().containsKey(Limits.ComputeWorkGroupCountX));
             backend.missingQuery = false;
             backend.zeroLimit = true;
@@ -97,8 +99,56 @@ class ManagedComputeTest {
             invalidLimits.getCaps().add(Caps.OpenGL43);
             discover(invalidLimits);
             assertFalse(invalidLimits.getCaps().contains(Caps.ComputeShader));
+            assertFalse(invalidLimits.getCaps().contains(Caps.FixedShaderStorageBufferObject));
             assertFalse(invalidLimits.getLimits().containsKey(Limits.ComputeStorageBufferBindings));
         }
+    }
+
+    @Test
+    void esFixedBindingsExposeActualStageLimitsWithoutAdvertisingReflection() throws Exception {
+        Backend backend = new Backend();
+        backend.vertexBlocks = 0; // ES permits devices without vertex-stage SSBOs.
+        GLRenderer renderer = backend.renderer();
+        renderer.getCaps().add(Caps.OpenGLES31);
+        discover(renderer);
+        assertTrue(renderer.getCaps().contains(Caps.FixedShaderStorageBufferObject));
+        assertFalse(renderer.getCaps().contains(Caps.ShaderStorageBufferObject));
+        assertEquals(64, renderer.getLimits().get(Limits.ShaderStorageBufferObjectMaxBlockSize));
+        assertEquals(0, renderer.getLimits().get(Limits.ShaderStorageBufferObjectMaxVertexBlocks));
+        assertEquals(2, renderer.getLimits().get(Limits.ShaderStorageBufferObjectMaxFragmentBlocks));
+        assertEquals(2, renderer.getLimits().get(Limits.ShaderStorageBufferObjectMaxCombineBlocks));
+        assertFalse(backend.queries.contains(GL4.GL_MAX_GEOMETRY_SHADER_STORAGE_BLOCKS));
+        assertFalse(backend.queries.contains(GL4.GL_MAX_TESS_CONTROL_SHADER_STORAGE_BLOCKS));
+        assertFalse(backend.queries.contains(GL4.GL_MAX_TESS_EVALUATION_SHADER_STORAGE_BLOCKS));
+
+        BufferObject buffer = new BufferObject(); buffer.initializeEmpty(16);
+        buffer.setId(7); buffer.clearUpdateNeeded();
+        renderer.setFixedShaderStorageBufferObject(1, buffer);
+        assertEquals(-1, buffer.getBinding(), "fixed binding must not change reflected-block metadata");
+        assertThrows(UnsupportedOperationException.class, () -> renderer.setShaderStorageBufferObject(1, buffer));
+        assertEquals(0, backend.reflectionCalls);
+        buffer.setData(null);
+    }
+
+    @Test
+    void fixedStageQueriesRespectSupportedStagesAndRejectOlderContexts() throws Exception {
+        Backend backend = new Backend();
+        backend.vertexBlocks = 3;
+        GLRenderer renderer = backend.renderer();
+        renderer.getCaps().add(Caps.OpenGL43);
+        renderer.getCaps().add(Caps.GeometryShader);
+        renderer.getCaps().add(Caps.TesselationShader);
+        discover(renderer);
+        assertEquals(3, renderer.getLimits().get(Limits.ShaderStorageBufferObjectMaxVertexBlocks));
+        assertEquals(2, renderer.getLimits().get(Limits.ShaderStorageBufferObjectMaxGeometryBlocks));
+        assertEquals(2, renderer.getLimits().get(Limits.ShaderStorageBufferObjectMaxTessControlBlocks));
+        assertEquals(2, renderer.getLimits().get(Limits.ShaderStorageBufferObjectMaxTessEvaluationBlocks));
+        backend.queries.clear();
+        GLRenderer older = backend.renderer(); older.getCaps().add(Caps.OpenGLES30);
+        discover(older);
+        assertFalse(older.getCaps().contains(Caps.FixedShaderStorageBufferObject));
+        assertFalse(older.getLimits().containsKey(Limits.ShaderStorageBufferObjectMaxVertexBlocks));
+        assertTrue(backend.queries.isEmpty());
     }
 
     private static Shader compute(String language) {
@@ -117,6 +167,8 @@ class ManagedComputeTest {
         int calls;
         boolean missingQuery;
         boolean zeroLimit;
+        int vertexBlocks = 2, reflectionCalls;
+        final java.util.List<Integer> queries = new java.util.ArrayList<>();
 
         GLRenderer renderer() {
             Object gl = Proxy.newProxyInstance(getClass().getClassLoader(),
@@ -127,12 +179,15 @@ class ManagedComputeTest {
                     return "compute backend";
                 }
                 calls++;
+                if (method.getName().equals("glGetProgramResourceIndex") || method.getName().equals("glShaderStorageBlockBinding")) reflectionCalls++;
                 if (method.getName().equals("glGetIntegerIndexed")) {
                     if (missingQuery) throw new UnsupportedOperationException("old adapter");
                     ((IntBuffer) args[2]).put(0, 8);
                 } else if (method.getName().equals("glGetInteger")) {
                     int pname = (Integer) args[0];
-                    int value = pname == GLCompute.GL_MAX_SHADER_STORAGE_BLOCK_SIZE ? 64 : 2;
+                    queries.add(pname);
+                    int value = pname == GLCompute.GL_MAX_SHADER_STORAGE_BLOCK_SIZE ? 64
+                            : pname == GL4.GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS ? vertexBlocks : 2;
                     ((IntBuffer) args[1]).put(0, zeroLimit ? 0 : value);
                 }
                 if (method.getReturnType() == int.class) return 0;

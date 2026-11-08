@@ -490,6 +490,17 @@ public enum Caps {
     ShaderStorageBufferObject,
 
     /**
+     * Supports explicit shader-storage buffer binding points through
+     * {@link Renderer#setFixedShaderStorageBufferObject}. This managed path is
+     * available with an implemented OpenGL 4.3 or ES 3.1 compute backend, and
+     * does not require program-interface reflection or block rebinding.
+     * Query the per-stage storage-block limits before using graphics stages:
+     * in particular, ES may report zero vertex-stage storage blocks.
+     * This does not imply {@link #ShaderStorageBufferObject}.
+     */
+    FixedShaderStorageBufferObject,
+
+    /**
      * Renderer-managed compute dispatch, memory barriers and fixed-layout storage
      * buffer bindings. Requires an implemented backend and OpenGL 4.3 or ES 3.1.
      * This does not imply support for desktop storage-block reflection on GLES.
