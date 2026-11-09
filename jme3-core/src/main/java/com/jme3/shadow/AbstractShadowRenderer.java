@@ -47,6 +47,7 @@ import com.jme3.math.Vector2f;
 import com.jme3.math.Vector3f;
 import com.jme3.post.SceneProcessor;
 import com.jme3.profile.AppProfiler;
+import com.jme3.profile.SpStep;
 import com.jme3.renderer.Camera;
 import com.jme3.renderer.Caps;
 import com.jme3.renderer.RenderManager;
@@ -452,6 +453,9 @@ public abstract class AbstractShadowRenderer implements SceneProcessor, Savable,
             return;
         }
 
+        if (prof != null) {
+            prof.spStep(SpStep.ProcPostQueue, getClass().getSimpleName(), "Shadow cameras");
+        }
         updateShadowCams(viewPort.getCamera());
 
         Renderer r = renderManager.getRenderer();
@@ -470,6 +474,9 @@ public abstract class AbstractShadowRenderer implements SceneProcessor, Savable,
             getSceneForDebug().updateGeometricState();
         }
 
+        if (prof != null) {
+            prof.spStep(SpStep.ProcPostQueue, getClass().getSimpleName(), "Restore main camera");
+        }
         //restore setting for future rendering
         r.setFrameBuffer(viewPort.getOutputFrameBuffer());
         renderManager.setForcedMaterial(null);
@@ -478,6 +485,10 @@ public abstract class AbstractShadowRenderer implements SceneProcessor, Savable,
     }
 
     protected void renderShadowMap(int shadowMapIndex) {
+        if (prof != null) {
+            prof.spStep(SpStep.ProcPostQueue, getClass().getSimpleName(),
+                    "Shadow map " + shadowMapIndex, "Cull casters");
+        }
         shadowMapOccluders = getOccludersToRender(shadowMapIndex, shadowMapOccluders);
         Camera shadowCam = getShadowCam(shadowMapIndex);
 
@@ -492,6 +503,10 @@ public abstract class AbstractShadowRenderer implements SceneProcessor, Savable,
         // render shadow casters to shadow map and disables the light filter
         LightFilter tmpLightFilter = renderManager.getLightFilter();
         renderManager.setLightFilter(NULL_LIGHT_FILTER);
+        if (prof != null) {
+            prof.spStep(SpStep.ProcPostQueue, getClass().getSimpleName(),
+                    "Shadow map " + shadowMapIndex, "Draw casters");
+        }
         viewPort.getQueue().renderShadowQueue(shadowMapOccluders, renderManager, shadowCam, true);
         renderManager.setLightFilter(tmpLightFilter);
         renderManager.setForcedRenderState(null);
