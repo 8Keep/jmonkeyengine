@@ -5108,8 +5108,28 @@ public final class GLRenderer implements Renderer {
             throw new RendererException("GPU timer queries are not supported by the current renderer");
         }
         IntBuffer ids = BufferUtils.createIntBuffer(numTasks);
-        gl.glGenQueries(numTasks, ids);
-        return BufferUtils.getIntArray(ids);
+        try {
+            gl.glGenQueries(numTasks, ids);
+            return BufferUtils.getIntArray(ids);
+        } finally {
+            BufferUtils.destroyDirectBuffer(ids);
+        }
+    }
+
+    @Override
+    public void deleteProfilingTasks(int... taskIds) {
+        java.util.Objects.requireNonNull(taskIds, "taskIds");
+        if (taskIds.length == 0) return;
+        if (!caps.contains(Caps.GpuTimerQuery)) {
+            throw new RendererException("GPU timer queries are not supported by the current renderer");
+        }
+        IntBuffer ids = BufferUtils.createIntBuffer(taskIds.length);
+        try {
+            ids.put(taskIds).flip();
+            gl.glDeleteQueries(ids);
+        } finally {
+            BufferUtils.destroyDirectBuffer(ids);
+        }
     }
 
     @Override

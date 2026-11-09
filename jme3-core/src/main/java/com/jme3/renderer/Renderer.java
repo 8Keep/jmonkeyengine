@@ -646,6 +646,22 @@ public interface Renderer {
     public int[] generateProfilingTasks(int numTasks);
 
     /**
+     * Deletes profiling queries owned by the caller. Call on the render thread
+     * while the creating context is current, after stopping any active query.
+     * Pending results may be discarded without waiting for the GPU. The IDs must
+     * not be read or reused afterwards. An empty array is a no-op.
+     *
+     * @param taskIds query IDs returned by generateProfilingTasks
+     * @throws UnsupportedOperationException if this renderer cannot delete queries
+     */
+    public default void deleteProfilingTasks(int... taskIds) {
+        java.util.Objects.requireNonNull(taskIds, "taskIds");
+        if (taskIds.length > 0) {
+            throw new UnsupportedOperationException("Profiling query deletion is unavailable");
+        }
+    }
+
+    /**
      * Starts a time profiling task on the GPU.
      * This will profile all operations called between startProfiling and stopProfiling
      *

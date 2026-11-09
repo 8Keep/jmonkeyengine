@@ -83,6 +83,25 @@ class GLRendererGpuTimerStateTest {
         assertEquals(0, binding.checks);
     }
 
+    @Test
+    void deletesOnlyOwnedQueryNamesAndRequiresTimerSupport() {
+        java.util.List<Integer> deleted = new java.util.ArrayList<>();
+        GL gl = (GL) Proxy.newProxyInstance(GL.class.getClassLoader(), new Class<?>[]{GL.class},
+                (proxy, method, args) -> {
+                    if (!method.getName().equals("glDeleteQueries")) throw new AssertionError(method.getName());
+                    java.nio.IntBuffer ids = (java.nio.IntBuffer) args[0];
+                    for (int i = ids.position(); i < ids.limit(); i++) deleted.add(ids.get(i));
+                    return null;
+                });
+        GLRenderer renderer = new GLRenderer(gl, null, null);
+        renderer.deleteProfilingTasks();
+        assertThrows(RendererException.class, () -> renderer.deleteProfilingTasks(7));
+        assertTrue(deleted.isEmpty());
+        renderer.getCaps().add(Caps.GpuTimerQuery);
+        renderer.deleteProfilingTasks(7, 9);
+        assertEquals(java.util.Arrays.asList(7, 9), deleted);
+    }
+
     private static final class TimerState {
         boolean disjoint;
         boolean unavailable;

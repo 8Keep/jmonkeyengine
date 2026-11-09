@@ -801,6 +801,16 @@ public interface GL {
     public void glGenQueries(int number, IntBuffer ids);
 
     /**
+     * Deletes query names in the buffer's remaining range. The caller must stop
+     * active queries first. Unknown and zero names are ignored by OpenGL.
+     *
+     * @param ids query names to delete; position and limit are preserved
+     */
+    public default void glDeleteQueries(IntBuffer ids) {
+        throw new UnsupportedOperationException("Query deletion is unavailable");
+    }
+
+    /**
      * <p><a target="_blank" href="http://docs.gl/gl4/glGetAttribLocation">Reference Page</a></p>
      *
      * Returns the location of an attribute variable.

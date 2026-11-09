@@ -317,6 +317,12 @@ public final class LwjglGL implements GL, GL2, GL3, GL4 {
     }
 
     @Override
+    public void glDeleteQueries(IntBuffer ids) {
+        checkLimit(ids);
+        GL15.glDeleteQueries(ids);
+    }
+
+    @Override
     public void glGenQueries(int num, IntBuffer ids) {
         GL15.glGenQueries(ids);
     }

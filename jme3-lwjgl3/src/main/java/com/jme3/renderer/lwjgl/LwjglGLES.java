@@ -44,6 +44,7 @@ public class LwjglGLES extends LwjglRender implements GL, GL2, GLES_30, GLComput
         GLESCapabilities capabilities = GLES.getCapabilities();
         return capabilities.GL_EXT_disjoint_timer_query
                 && hasQueryFunction(capabilities.glGenQueries, capabilities.glGenQueriesEXT)
+                && hasQueryFunction(capabilities.glDeleteQueries, capabilities.glDeleteQueriesEXT)
                 && hasQueryFunction(capabilities.glBeginQuery, capabilities.glBeginQueryEXT)
                 && hasQueryFunction(capabilities.glEndQuery, capabilities.glEndQueryEXT)
                 && hasQueryFunction(capabilities.glGetQueryObjectuiv, capabilities.glGetQueryObjectuivEXT)
@@ -638,6 +639,19 @@ public class LwjglGLES extends LwjglRender implements GL, GL2, GLES_30, GLComput
             EXTDisjointTimerQuery.glEndQueryEXT(target);
         } else {
             throw new UnsupportedOperationException("Query end is not available");
+        }
+    }
+
+    @Override
+    public void glDeleteQueries(IntBuffer ids) {
+        checkLimit(ids);
+        GLESCapabilities capabilities = GLES.getCapabilities();
+        if (capabilities.glDeleteQueries != MemoryUtil.NULL) {
+            GLES30.glDeleteQueries(ids);
+        } else if (capabilities.glDeleteQueriesEXT != MemoryUtil.NULL) {
+            EXTDisjointTimerQuery.glDeleteQueriesEXT(ids);
+        } else {
+            throw new UnsupportedOperationException("Query deletion is not available");
         }
     }
 
