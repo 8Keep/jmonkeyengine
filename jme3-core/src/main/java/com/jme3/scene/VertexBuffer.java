@@ -334,6 +334,8 @@ public class VertexBuffer extends NativeObject implements Savable, Cloneable {
     protected int instanceSpan = 0;
     protected transient boolean dataSizeChanged = false;
     protected String name;
+    private transient String defaultName;
+    private transient Type defaultNameType;
 
     /**
      * Creates an empty, uninitialized buffer.
@@ -1203,10 +1205,17 @@ public class VertexBuffer extends NativeObject implements Savable, Cloneable {
      * @return The name of the `VertexBuffer`.
      */
     public String getName() {
-        if (name == null) {
-            return String.format("%s(%s)", getClass().getSimpleName(), getBufferType().name());
+        if (name != null) {
+            return name;
         }
-        return name;
+        Type type = getBufferType();
+        // Debug renderers request this for every attribute binding. Keep the
+        // generated label separate from the caller's serialized custom name.
+        if (defaultName == null || defaultNameType != type) {
+            defaultName = getClass().getSimpleName() + "(" + type.name() + ")";
+            defaultNameType = type;
+        }
+        return defaultName;
     }
 
     /**
