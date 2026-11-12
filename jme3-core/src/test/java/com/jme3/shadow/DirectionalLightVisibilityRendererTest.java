@@ -37,6 +37,7 @@ import com.jme3.light.DirectionalLight;
 import com.jme3.material.Material;
 import com.jme3.material.MaterialDef;
 import com.jme3.math.ColorRGBA;
+import com.jme3.math.Matrix4f;
 import com.jme3.math.Vector3f;
 import com.jme3.math.Vector4f;
 import com.jme3.renderer.queue.RenderQueue;
@@ -74,6 +75,110 @@ class DirectionalLightVisibilityRendererTest {
         assertThrows(IllegalArgumentException.class, () -> renderer.setDepthBias(-0.1f));
         assertThrows(IllegalArgumentException.class, () -> renderer.setDepthBias(Float.NaN));
         assertThrows(IllegalArgumentException.class, () -> renderer.setDepthBias(Float.POSITIVE_INFINITY));
+    }
+
+    @Test
+    void worldDepthBiasIsOptionalAdditiveAndChecksReceiverSupportTransactionally() {
+        DirectionalLightVisibilityRenderer renderer = newRenderer();
+        assertEquals(0f, renderer.getWorldDepthBias());
+        assertEquals(0.0005f, renderer.getDepthBias());
+        Material oldReceiver = receiverMaterial(false);
+        renderer.addReceiver(oldReceiver);
+        assertThrows(IllegalArgumentException.class, () -> renderer.setWorldDepthBias(0.5f));
+        assertEquals(0f, renderer.getWorldDepthBias());
+        renderer.setWorldDepthBias(0f);
+        renderer.removeReceiver(oldReceiver);
+
+        renderer.setWorldDepthBias(0.5f);
+        assertEquals(0.5f, renderer.getWorldDepthBias());
+        assertEquals(0.0005f, renderer.getDepthBias(), "world bias does not replace normalized bias");
+        assertThrows(IllegalArgumentException.class, () -> renderer.addReceiver(oldReceiver));
+        Material wrongType = receiverMaterial(false);
+        wrongType.getMaterialDef().addMaterialParam(VarType.Float, "DirectionalShadowCascadeBias", 0f);
+        assertThrows(IllegalArgumentException.class, () -> renderer.addReceiver(wrongType));
+        Material receiver = receiverMaterial();
+        renderer.addReceiver(receiver);
+        assertTrue(renderer.removeReceiver(receiver));
+        assertThrows(IllegalArgumentException.class, () -> renderer.setWorldDepthBias(-1f));
+        assertThrows(IllegalArgumentException.class, () -> renderer.setWorldDepthBias(Float.NaN));
+        assertThrows(IllegalArgumentException.class, () -> renderer.setWorldDepthBias(Float.POSITIVE_INFINITY));
+    }
+
+    @Test
+    void zeroWorldBiasRejectsMistypedOptionalParameterAtRegistration() {
+        DirectionalLightVisibilityRenderer renderer = newRenderer();
+        Material material = receiverMaterial(false);
+        material.getMaterialDef().addMaterialParam(VarType.Float, "DirectionalShadowCascadeBias", 0f);
+        assertEquals(0f, renderer.getWorldDepthBias());
+        assertThrows(IllegalArgumentException.class, () -> renderer.addReceiver(material));
+        assertFalse(renderer.removeReceiver(material), "invalid definitions must not claim the receiver");
+        Material older = receiverMaterial(false);
+        renderer.addReceiver(older);
+        assertTrue(renderer.removeReceiver(older), "absence remains supported when world bias is zero");
+    }
+
+    @Test
+    void mutatedOptionalTypeAtZeroBiasFailsBeforeAnyReceiverParameterPublication() {
+        DirectionalLightVisibilityRenderer renderer = newRenderer();
+        renderer.setLight(new DirectionalLight(new Vector3f(-1f, -2f, -3f).normalizeLocal()));
+        Material first = receiverMaterial(), second = receiverMaterial();
+        renderer.addReceiver(first); renderer.addReceiver(second);
+        ViewPort viewPort = casterViewPort(first);
+        renderer.initialize(renderManager(EnumSet.of(Caps.GLSL150)), viewPort);
+        second.getMaterialDef().addMaterialParam(VarType.Float, "DirectionalShadowCascadeBias", 0f);
+        assertEquals(0f, renderer.getWorldDepthBias());
+        assertThrows(IllegalArgumentException.class, () -> renderer.postQueue(viewPort.getQueue()));
+        for (Material material : new Material[]{first, second}) {
+            assertFalse((Boolean) material.getParamValue("UseDirectionalVisibility"));
+            assertEquals(0f, (Float) material.getParamValue("DirectionalShadowBias"),
+                    "even scalar receiver parameters must remain unpublished on type failure");
+            assertTrue(material.getParam("DirectionalShadowCascadeBias") == null);
+            assertTrue(material.getParam("DirectionalLightViewProjectionMatrix0") == null);
+        }
+        renderer.cleanup();
+    }
+
+    @Test
+    void worldBiasRepresentsTheSameLightAxisDistanceAcrossFittedDepthRanges() {
+        // Rotated depth axis with norm 2/100, followed by a 500-unit depth range.
+        Matrix4f first = new Matrix4f();
+        first.m20 = 0.012f; first.m21 = 0.016f; first.m22 = 0f;
+        first.m23 = -0.7f;
+        Matrix4f second = new Matrix4f();
+        second.m20 = 0f; second.m21 = 0f; second.m22 = -0.004f;
+        second.m23 = 0.2f;
+        float firstBias = DirectionalLightVisibilityRenderer.worldDepthBiasToNormalized(first, 2f);
+        float secondBias = DirectionalLightVisibilityRenderer.worldDepthBiasToNormalized(second, 2f);
+        assertEquals(0.02f, firstBias, 1e-8f);
+        assertEquals(0.004f, secondBias, 1e-8f);
+        assertEquals(2f, firstBias * 100f, 1e-6f);
+        assertEquals(2f, secondBias * 500f, 1e-6f);
+        assertEquals(0f, DirectionalLightVisibilityRenderer.worldDepthBiasToNormalized(first, 0f));
+    }
+
+    @Test
+    void rejectsNonfinitePerspectiveDegenerateAndUnrepresentableWorldBiasMappings() {
+        assertThrows(IllegalArgumentException.class,
+                () -> DirectionalLightVisibilityRenderer.worldDepthBiasToNormalized(null, 1f));
+        Matrix4f matrix = new Matrix4f();
+        matrix.m03 = Float.NaN;
+        assertThrows(IllegalStateException.class,
+                () -> DirectionalLightVisibilityRenderer.worldDepthBiasToNormalized(matrix, 1f));
+        matrix.loadIdentity(); matrix.m23 = Float.POSITIVE_INFINITY;
+        assertThrows(IllegalStateException.class,
+                () -> DirectionalLightVisibilityRenderer.worldDepthBiasToNormalized(matrix, 1f));
+        matrix.loadIdentity(); matrix.m32 = -1f;
+        assertThrows(IllegalStateException.class,
+                () -> DirectionalLightVisibilityRenderer.worldDepthBiasToNormalized(matrix, 1f));
+        matrix.loadIdentity(); matrix.m22 = 0f;
+        assertThrows(IllegalStateException.class,
+                () -> DirectionalLightVisibilityRenderer.worldDepthBiasToNormalized(matrix, 1f));
+        matrix.m22 = Float.MAX_VALUE;
+        assertThrows(IllegalStateException.class,
+                () -> DirectionalLightVisibilityRenderer.worldDepthBiasToNormalized(matrix, Float.MAX_VALUE));
+        matrix.m22 = Float.MIN_VALUE;
+        assertThrows(IllegalStateException.class,
+                () -> DirectionalLightVisibilityRenderer.worldDepthBiasToNormalized(matrix, Float.MIN_VALUE));
     }
 
     @Test
@@ -115,6 +220,8 @@ class DirectionalLightVisibilityRendererTest {
         Material material = receiverMaterial();
         material.setBoolean("UseDirectionalVisibility", false);
         material.setFloat("DirectionalShadowBias", 0.125f);
+        Vector4f originalBias = new Vector4f(0.01f, 0.02f, 0.03f, 0.04f);
+        material.setVector4("DirectionalShadowCascadeBias", originalBias);
         ColorRGBA originalSplits = new ColorRGBA(2f, 4f, 8f, 16f);
         material.setColor("DirectionalShadowSplits", originalSplits);
         material.setInt("DirectionalShadowFilterMode", 1);
@@ -125,12 +232,14 @@ class DirectionalLightVisibilityRendererTest {
         renderer.addReceiver(material);
         material.setBoolean("UseDirectionalVisibility", true);
         material.setFloat("DirectionalShadowBias", 0.5f);
+        material.setVector4("DirectionalShadowCascadeBias", new Vector4f(1f, 1f, 1f, 1f));
 
         assertTrue(renderer.removeReceiver(material));
         assertFalse(renderer.removeReceiver(material));
         assertFalse((Boolean) material.getParamValue("UseDirectionalVisibility"));
         assertEquals(0.125f, (Float) material.getParamValue("DirectionalShadowBias"));
         assertEquals(originalSplits, material.getParamValue("DirectionalShadowSplits"));
+        assertEquals(originalBias, material.getParamValue("DirectionalShadowCascadeBias"));
         assertEquals(1, (Integer) material.getParamValue("DirectionalShadowFilterMode"));
         assertEquals(0.125f, (Float) material.getParamValue("DirectionalCascadeBlendFraction"));
         assertEquals(new Vector4f(1f, 2f, 3f, 4f),
@@ -159,6 +268,7 @@ class DirectionalLightVisibilityRendererTest {
         renderer.setShadowFilterMode(DirectionalLightVisibilityRenderer.ShadowFilterMode.PCF_5X5);
         renderer.setCascadeBlendFraction(0.1f);
         assertTrue(renderer.removeReceiver(oldReceiver));
+        assertTrue(oldReceiver.getParam("DirectionalShadowCascadeBias") == null);
         assertTrue(oldReceiver.getParam("DirectionalShadowFilterMode") == null);
         assertTrue(oldReceiver.getParam("DirectionalCascadeBlendFraction") == null);
         assertTrue(oldReceiver.getParam("DirectionalCascadeBlendStarts") == null);
@@ -288,6 +398,8 @@ class DirectionalLightVisibilityRendererTest {
         assertFalse((Boolean) material.getParamValue("UseDirectionalVisibility"));
         assertEquals(2, trackingRenderer.deletedFrameBuffers);
         assertEquals(3, trackingRenderer.deletedImages);
+        assertTrue(material.getParam("DirectionalShadowCascadeBias") == null,
+                "cleanup clears an originally absent optional contribution");
         renderer.cleanup();
         assertEquals(2, trackingRenderer.deletedFrameBuffers);
         assertEquals(3, trackingRenderer.deletedImages);
@@ -303,6 +415,74 @@ class DirectionalLightVisibilityRendererTest {
         Material material = receiverMaterial();
         renderer.addReceiver(material);
 
+        ViewPort viewPort = casterViewPort(material);
+        renderer.initialize(renderManager(EnumSet.of(Caps.GLSL150)), viewPort);
+
+        renderer.postQueue(viewPort.getQueue());
+
+        assertTrue((Boolean) material.getParamValue("UseDirectionalVisibility"),
+                "caster presence must be captured before renderShadowQueue clears the GeometryList");
+        renderer.postFrame(null);
+        assertFalse((Boolean) material.getParamValue("UseDirectionalVisibility"));
+        renderer.cleanup();
+    }
+
+    @Test
+    void publishesWorldBiasForEveryCascadeThenResetsItWhenDisabled() {
+        DirectionalLightVisibilityRenderer renderer = newRenderer();
+        renderer.setLight(new DirectionalLight(new Vector3f(-1f, -2f, -3f).normalizeLocal()));
+        renderer.setWorldDepthBias(0.37f);
+        Material material = receiverMaterial();
+        renderer.addReceiver(material);
+        ViewPort viewPort = casterViewPort(material);
+        renderer.initialize(renderManager(EnumSet.of(Caps.GLSL150)), viewPort);
+        renderer.postQueue(viewPort.getQueue());
+        Vector4f bias = (Vector4f) material.getParamValue("DirectionalShadowCascadeBias");
+        assertTrue((Boolean) material.getParamValue("UseDirectionalVisibility"));
+        for (int i = 0; i < 4; i++) {
+            assertEquals(DirectionalLightVisibilityRenderer.worldDepthBiasToNormalized(
+                    renderer.lightViewProjectionsMatrices[Math.min(i, 1)], 0.37f), bias.get(i));
+        }
+        assertEquals(renderer.getDepthBias(), (Float) material.getParamValue("DirectionalShadowBias"));
+        renderer.postFrame(null);
+        renderer.setWorldDepthBias(0f);
+        renderer.postQueue(viewPort.getQueue());
+        assertEquals(new Vector4f(), material.getParamValue("DirectionalShadowCascadeBias"));
+        renderer.cleanup();
+    }
+
+    @Test
+    void invalidWorldMappingLeavesAllReceiversDisabled() {
+        DirectionalLightVisibilityRenderer renderer = new DirectionalLightVisibilityRenderer(assetManager(), 128, 2) {
+            @Override
+            protected void renderShadowMap(int index) {
+                super.renderShadowMap(index);
+                if (index == 1) lightViewProjectionsMatrices[index].m22 = Float.NaN;
+            }
+        };
+        renderer.setLight(new DirectionalLight(new Vector3f(-1f, -2f, -3f).normalizeLocal()));
+        renderer.setWorldDepthBias(0.37f);
+        Material first = receiverMaterial(), second = receiverMaterial();
+        renderer.addReceiver(first); renderer.addReceiver(second);
+        ViewPort viewPort = casterViewPort(first);
+        renderer.initialize(renderManager(EnumSet.of(Caps.GLSL150)), viewPort);
+        assertThrows(IllegalStateException.class, () -> renderer.postQueue(viewPort.getQueue()));
+        assertFalse((Boolean) first.getParamValue("UseDirectionalVisibility"));
+        assertFalse((Boolean) second.getParamValue("UseDirectionalVisibility"));
+        renderer.cleanup();
+    }
+
+    @Test
+    void rejectsCloneAndSerializationEntryPoints() {
+        DirectionalLightVisibilityRenderer renderer = newRenderer();
+
+        assertThrows(UnsupportedOperationException.class, renderer::jmeClone);
+        assertThrows(UnsupportedOperationException.class, () -> renderer.cloneFields(new Cloner(), renderer));
+        assertThrows(IOException.class, () -> renderer.write(null));
+        assertThrows(IOException.class, () -> renderer.read(null));
+    }
+
+    private static ViewPort casterViewPort(Material material) {
         Camera camera = new Camera(640, 480);
         camera.setFrustumPerspective(45f, 640f / 480f, 1f, 100f);
         camera.lookAt(new Vector3f(0f, 0f, -1f), Vector3f.UNIT_Y);
@@ -316,25 +496,7 @@ class DirectionalLightVisibilityRendererTest {
         scene.attachChild(casterAndReceiver);
         scene.updateGeometricState();
         viewPort.attachScene(scene);
-        renderer.initialize(renderManager(EnumSet.of(Caps.GLSL150)), viewPort);
-
-        renderer.postQueue(viewPort.getQueue());
-
-        assertTrue((Boolean) material.getParamValue("UseDirectionalVisibility"),
-                "caster presence must be captured before renderShadowQueue clears the GeometryList");
-        renderer.postFrame(null);
-        assertFalse((Boolean) material.getParamValue("UseDirectionalVisibility"));
-        renderer.cleanup();
-    }
-
-    @Test
-    void rejectsCloneAndSerializationEntryPoints() {
-        DirectionalLightVisibilityRenderer renderer = newRenderer();
-
-        assertThrows(UnsupportedOperationException.class, renderer::jmeClone);
-        assertThrows(UnsupportedOperationException.class, () -> renderer.cloneFields(new Cloner(), renderer));
-        assertThrows(IOException.class, () -> renderer.write(null));
-        assertThrows(IOException.class, () -> renderer.read(null));
+        return viewPort;
     }
 
     private static DirectionalLightVisibilityRenderer newRenderer() {
@@ -458,6 +620,7 @@ class DirectionalLightVisibilityRendererTest {
         def.addMaterialParam(VarType.Vector4, "DirectionalShadowSplits", null);
         def.addMaterialParam(VarType.Vector2, "DirectionalShadowFade", null);
         if (includeOptionalParameters) {
+            def.addMaterialParam(VarType.Vector4, "DirectionalShadowCascadeBias", null);
             def.addMaterialParam(VarType.Int, "DirectionalShadowFilterMode", 0);
             def.addMaterialParam(VarType.Float, "DirectionalCascadeBlendFraction", 0f);
             def.addMaterialParam(VarType.Vector4, "DirectionalCascadeBlendStarts", null);

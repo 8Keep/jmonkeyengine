@@ -7,6 +7,8 @@ uniform mat4 g_ViewMatrix;
 uniform int m_DirectionalCascadeCount;
 uniform float m_DirectionalShadowMapSize;
 uniform float m_DirectionalShadowBias;
+// Zero for older receiver definitions or when world depth bias is disabled.
+uniform vec4 m_DirectionalShadowCascadeBias;
 uniform float m_DirectionalShadowStrength;
 uniform vec4 m_DirectionalShadowSplits;
 uniform vec2 m_DirectionalShadowFade;
@@ -152,7 +154,7 @@ float DirectionalVisibilitySample(
         #else
         sampler2D shadowMap,
         #endif
-        mat4 lightViewProjection, vec3 worldPosition) {
+        mat4 lightViewProjection, vec3 worldPosition, float comparisonBias) {
     vec4 lightClip = lightViewProjection * vec4(worldPosition, 1.0);
     if (lightClip.w <= 0.0) {
         return 1.0;
@@ -165,9 +167,9 @@ float DirectionalVisibilitySample(
         return 1.0;
     }
 
-    // Bias is subtracted from normalized depth; its world-space equivalent depends
-    // on the projection depth range.
-    depth -= m_DirectionalShadowBias;
+    // Both legacy normalized bias and the per-cascade world contribution are
+    // expressed in normalized depth before either comparison kernel runs.
+    depth -= comparisonBias;
     if (m_DirectionalShadowFilterMode == 1) {
         return DirectionalVisibilitySamplePcf5x5(shadowMap, uv, depth);
     }
@@ -180,11 +182,27 @@ float DirectionalVisibilitySample(
     return visibility * 0.25;
 }
 
+// Preserve direct callers of the original scalar-bias sample helper.
+float DirectionalVisibilitySample(
+        #ifdef DIRECTIONAL_HARDWARE_SHADOWS
+        sampler2DShadow shadowMap,
+        #else
+        sampler2D shadowMap,
+        #endif
+        mat4 lightViewProjection, vec3 worldPosition) {
+    return DirectionalVisibilitySample(shadowMap, lightViewProjection, worldPosition,
+            m_DirectionalShadowBias);
+}
+
 float DirectionalVisibilityForCascade(int cascade, vec3 worldPosition) {
-    if (cascade == 0) return DirectionalVisibilitySample(m_DirectionalShadowMap0, m_DirectionalLightViewProjectionMatrix0, worldPosition);
-    if (cascade == 1) return DirectionalVisibilitySample(m_DirectionalShadowMap1, m_DirectionalLightViewProjectionMatrix1, worldPosition);
-    if (cascade == 2) return DirectionalVisibilitySample(m_DirectionalShadowMap2, m_DirectionalLightViewProjectionMatrix2, worldPosition);
-    return DirectionalVisibilitySample(m_DirectionalShadowMap3, m_DirectionalLightViewProjectionMatrix3, worldPosition);
+    if (cascade == 0) return DirectionalVisibilitySample(m_DirectionalShadowMap0, m_DirectionalLightViewProjectionMatrix0, worldPosition,
+            m_DirectionalShadowBias + m_DirectionalShadowCascadeBias[0]);
+    if (cascade == 1) return DirectionalVisibilitySample(m_DirectionalShadowMap1, m_DirectionalLightViewProjectionMatrix1, worldPosition,
+            m_DirectionalShadowBias + m_DirectionalShadowCascadeBias[1]);
+    if (cascade == 2) return DirectionalVisibilitySample(m_DirectionalShadowMap2, m_DirectionalLightViewProjectionMatrix2, worldPosition,
+            m_DirectionalShadowBias + m_DirectionalShadowCascadeBias[2]);
+    return DirectionalVisibilitySample(m_DirectionalShadowMap3, m_DirectionalLightViewProjectionMatrix3, worldPosition,
+            m_DirectionalShadowBias + m_DirectionalShadowCascadeBias[3]);
 }
 
 // The single-pass PBR light packer sets this marker by Java object identity.

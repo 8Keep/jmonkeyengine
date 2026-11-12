@@ -125,6 +125,8 @@ MaterialDef PBR Lighting {
         Int DirectionalCascadeCount : 1
         Float DirectionalShadowMapSize : 1024.0
         Float DirectionalShadowBias : 0.0005
+        // Optional additive world-depth contribution, converted per cascade by the renderer.
+        Vector4 DirectionalShadowCascadeBias : 0.0 0.0 0.0 0.0
         Float DirectionalShadowStrength : 1.0
         Color DirectionalShadowSplits : 100.0 300.0 900.0 3000.0
         Vector2 DirectionalShadowFade : 0.0 0.0

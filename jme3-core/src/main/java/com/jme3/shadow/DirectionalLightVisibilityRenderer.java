@@ -39,6 +39,7 @@ import com.jme3.light.DirectionalLight;
 import com.jme3.material.Material;
 import com.jme3.material.MatParam;
 import com.jme3.math.ColorRGBA;
+import com.jme3.math.Matrix4f;
 import com.jme3.math.Vector2f;
 import com.jme3.math.Vector4f;
 import com.jme3.renderer.Camera;
@@ -52,6 +53,7 @@ import com.jme3.texture.FrameBuffer;
 import com.jme3.texture.Image;
 import com.jme3.texture.Image.Format;
 import com.jme3.texture.Texture2D;
+import com.jme3.shader.VarType;
 import java.lang.ref.WeakReference;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -100,12 +102,16 @@ public class DirectionalLightVisibilityRenderer extends DirectionalLightShadowRe
     }
 
     private static final String ENABLED = "UseDirectionalVisibility";
+    private static final String CASCADE_BIAS = "DirectionalShadowCascadeBias";
     private static final String[] OWNED_PARAMETERS = createParameterNames();
     private static final List<ReceiverClaim> RECEIVER_CLAIMS = new ArrayList<>();
     private final Map<Material, Map<String, MatParam>> receivers = new IdentityHashMap<>();
     private final ColorRGBA worldSplits = new ColorRGBA();
     private final Vector4f worldBlendStarts = new Vector4f();
     private float depthBias = 0.0005f;
+    private float worldDepthBias;
+    private final Vector4f cascadeBias = new Vector4f();
+    private final Vector4f nextCascadeBias = new Vector4f();
     private ShadowFilterMode shadowFilterMode = ShadowFilterMode.LEGACY;
     private float cascadeBlendFraction;
     private boolean anyShadowCasters;
@@ -138,7 +144,7 @@ public class DirectionalLightVisibilityRenderer extends DirectionalLightShadowRe
     private static String[] createParameterNames() {
         List<String> names = new ArrayList<>();
         Collections.addAll(names, ENABLED, "DirectionalHardwareShadows", "DirectionalCascadeCount",
-                "DirectionalShadowMapSize", "DirectionalShadowBias", "DirectionalShadowStrength",
+                "DirectionalShadowMapSize", "DirectionalShadowBias", CASCADE_BIAS, "DirectionalShadowStrength",
                 "DirectionalShadowSplits", "DirectionalShadowFade",
                 "DirectionalShadowFilterMode", "DirectionalCascadeBlendFraction",
                 "DirectionalCascadeBlendStarts");
@@ -170,6 +176,7 @@ public class DirectionalLightVisibilityRenderer extends DirectionalLightShadowRe
                 throw new IllegalArgumentException("Material definition does not declare " + name);
             }
         }
+        validateWorldBiasParameter(material, worldDepthBias > 0f);
         MatParam enabled = material.getParam(ENABLED);
         if (enabled != null && Boolean.TRUE.equals(enabled.getValue())) {
             throw new IllegalArgumentException("Material already has directional visibility enabled");
@@ -186,7 +193,8 @@ public class DirectionalLightVisibilityRenderer extends DirectionalLightShadowRe
     }
 
     private static boolean isOptionalParameter(String name) {
-        return "DirectionalShadowFilterMode".equals(name)
+        return CASCADE_BIAS.equals(name)
+                || "DirectionalShadowFilterMode".equals(name)
                 || "DirectionalCascadeBlendFraction".equals(name)
                 || "DirectionalCascadeBlendStarts".equals(name);
     }
@@ -327,6 +335,100 @@ public class DirectionalLightVisibilityRenderer extends DirectionalLightShadowRe
         this.depthBias = depthBias;
     }
 
+    /**
+     * Returns the additional receiver comparison bias in world units along the
+     * light depth axis. This is not an offset along the surface normal.
+     *
+     * @return finite nonnegative world depth bias, initially zero
+     */
+    public float getWorldDepthBias() {
+        return worldDepthBias;
+    }
+
+    /**
+     * Adds a world-space receiver comparison bias to {@link #setDepthBias(float)}.
+     * Each fitted orthographic cascade converts this distance independently, so
+     * changing caster bounds does not change the world-space contribution. Set
+     * normalized bias to zero to use only this bias. Caster polygon offset is
+     * independent and is not changed by this method.
+     * <p>
+     * Nonzero values require every registered receiver to declare the optional
+     * Vector4 DirectionalShadowCascadeBias parameter and use the corresponding
+     * directional visibility shader module. A zero value retains support for
+     * older receiver definitions and preserves the normalized bias behavior.
+     *
+     * @param worldDepthBias finite nonnegative distance in world units
+     * @throws IllegalArgumentException for an invalid distance or a receiver
+     *         without the required optional parameter
+     */
+    public void setWorldDepthBias(float worldDepthBias) {
+        if (!Float.isFinite(worldDepthBias) || worldDepthBias < 0f) {
+            throw new IllegalArgumentException("worldDepthBias must be finite and nonnegative");
+        }
+        if (worldDepthBias > 0f) {
+            for (Material material : receivers.keySet()) {
+                validateWorldBiasParameter(material, true);
+            }
+        }
+        this.worldDepthBias = worldDepthBias;
+    }
+
+    private static void validateWorldBiasParameter(Material material, boolean required) {
+        MatParam parameter = material.getMaterialDef().getMaterialParam(CASCADE_BIAS);
+        if ((parameter == null && required) || (parameter != null && parameter.getVarType() != VarType.Vector4)) {
+            throw new IllegalArgumentException("World depth bias requires Vector4 " + CASCADE_BIAS);
+        }
+    }
+
+    /** Convert a world distance using the actual orthographic light projection. */
+    static float worldDepthBiasToNormalized(Matrix4f matrix, float worldBias) {
+        if (!Float.isFinite(worldBias) || worldBias < 0f || matrix == null) {
+            throw new IllegalArgumentException("finite world bias and light matrix required");
+        }
+        // Perspective projections do not have one constant depth scale in world units.
+        for (int row = 0; row < 4; row++) {
+            for (int column = 0; column < 4; column++) {
+                if (!Float.isFinite(matrix.get(row, column))) {
+                    throw new IllegalStateException("World depth bias requires a finite orthographic light matrix");
+                }
+            }
+        }
+        if (matrix.m30 != 0f || matrix.m31 != 0f || matrix.m32 != 0f || matrix.m33 != 1f) {
+            throw new IllegalStateException("World depth bias requires an affine orthographic light matrix");
+        }
+        double x = matrix.m20, y = matrix.m21, z = matrix.m22;
+        // NDC spans [-1, 1], whereas the depth comparison spans [0, 1].
+        double scale = 0.5d * Math.sqrt(x * x + y * y + z * z);
+        float result = (float) (worldBias * scale);
+        if (!(scale > 0d) || !Double.isFinite(scale) || !Float.isFinite(result)
+                || (worldBias > 0f && !(result > 0f))) {
+            throw new IllegalStateException("World depth bias cannot be represented by the light depth range");
+        }
+        return result;
+    }
+
+    private void updateWorldDepthBias() {
+        // Definitions can change after registration. Preflight every receiver,
+        // including the zero-bias path, before publishing any owned parameter.
+        for (Material material : receivers.keySet()) {
+            validateWorldBiasParameter(material, worldDepthBias > 0f);
+        }
+        if (worldDepthBias == 0f) {
+            cascadeBias.set(0f, 0f, 0f, 0f);
+            return;
+        }
+        // Validate every active cascade before publishing any receiver parameters.
+        for (int i = 0; i < 4; i++) {
+            float bias = worldDepthBiasToNormalized(
+                    lightViewProjectionsMatrices[Math.min(i, nbShadowMaps - 1)], worldDepthBias);
+            if (!Float.isFinite(depthBias + bias)) {
+                throw new IllegalStateException("Combined directional depth bias is not finite");
+            }
+            nextCascadeBias.set(i, bias);
+        }
+        cascadeBias.set(nextCascadeBias);
+    }
+
     @Override
     public void setLambda(float lambda) {
         if (!Float.isFinite(lambda) || lambda < 0 || lambda > 1) {
@@ -461,6 +563,7 @@ public class DirectionalLightVisibilityRenderer extends DirectionalLightShadowRe
             return;
         }
         setWorldSplits();
+        updateWorldDepthBias();
         for (Material material : receivers.keySet()) {
             MatParam enabled = material.getParam(ENABLED);
             if (enabled != null && Boolean.TRUE.equals(enabled.getValue())) {
@@ -494,6 +597,9 @@ public class DirectionalLightVisibilityRenderer extends DirectionalLightShadowRe
         material.setInt("DirectionalCascadeCount", nbShadowMaps);
         material.setFloat("DirectionalShadowMapSize", shadowMapSize);
         material.setFloat("DirectionalShadowBias", depthBias);
+        if (material.getMaterialDef().getMaterialParam(CASCADE_BIAS) != null) {
+            material.setVector4(CASCADE_BIAS, cascadeBias);
+        }
         material.setFloat("DirectionalShadowStrength", shadowIntensity);
         material.setColor("DirectionalShadowSplits", worldSplits);
         if (material.getMaterialDef().getMaterialParam("DirectionalShadowFilterMode") != null) {
