@@ -33,7 +33,7 @@ package com.jme3.renderer.opengl;
 
 import com.jme3.renderer.Renderer;
 import com.jme3.util.NativeObject;
-
+import java.lang.ref.WeakReference;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -53,6 +53,19 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class GLFence extends NativeObject {
     private final static AtomicInteger nextUniqueId = new AtomicInteger(1);
     private Object nativeSync;
+    // Shared by the real wrapper and its destructor clones. Retiring either
+    // prevents a stale clone from deleting a subsequently reused native handle.
+    private final FenceState state;
+
+    private static final class FenceState {
+        Object ownerToken;
+        boolean retired;
+        final WeakReference<GLFence> original;
+
+        FenceState(GLFence original) {
+            this.original = new WeakReference<>(original);
+        }
+    }
 
 
     /**
@@ -71,6 +84,7 @@ public class GLFence extends NativeObject {
     public GLFence(long fenceId, Object nativeSync) {
         super();
         this.fenceId = fenceId;
+        this.state = new FenceState(this);
         this.id = nextUniqueId.getAndIncrement();
         this.nativeSync = nativeSync;
         clearUpdateNeeded();
@@ -80,6 +94,7 @@ public class GLFence extends NativeObject {
         this.fenceId = source.fenceId;
         this.nativeSync = source.nativeSync;
         this.id = source.id;
+        this.state = source.state;
     }
 
     /**
@@ -93,6 +108,29 @@ public class GLFence extends NativeObject {
     public Object getNativeSync() {
         return nativeSync;
     }
+
+    void claimOwner(Object token) {
+        validateOwner(token);
+        if (state.retired) {
+            throw new IllegalArgumentException("Fence is retired");
+        }
+        state.ownerToken = token;
+    }
+
+    void validateOwner(Object token) {
+        if (state.ownerToken != null && state.ownerToken != token) {
+            throw new IllegalArgumentException("Fence is registered with a different renderer or context");
+        }
+    }
+
+    boolean isRetired() {
+        return state.retired;
+    }
+
+    GLFence getOriginal() {
+        return state.original.get();
+    }
+
     public long getFenceId() {
         return fenceId;
     }
@@ -100,6 +138,7 @@ public class GLFence extends NativeObject {
     @Override
     public void resetObject() {
         this.nativeSync = null;
+        this.state.retired = true;
         this.id = INVALID_ID;
         setUpdateNeeded();
     }

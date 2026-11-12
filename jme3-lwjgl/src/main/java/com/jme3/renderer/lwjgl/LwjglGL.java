@@ -81,7 +81,7 @@ public final class LwjglGL implements GL, GL2, GL3, GL4 {
     @Override
     public GLFence glFenceSync(final int condition, final int flags) {
         GLSync nativeSync = GL32.glFenceSync(condition, flags);
-        return new GLFence(nativeSync.getPointer(), nativeSync);
+        return nativeSync == null ? null : new GLFence(nativeSync.getPointer(), nativeSync);
     }
 
     @Override
