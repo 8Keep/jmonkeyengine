@@ -264,7 +264,17 @@ public class SafeArrayList<E> implements List<E>, Cloneable {
 
     @Override
     public void clear() {
-        getBuffer().clear();
+        if (size == 0) {
+            return;
+        }
+        if (buffer != null) {
+            buffer.clear();
+        } else {
+            // Preserve refill capacity without copying the discarded elements.
+            // Allocate first so allocation failure leaves the published snapshot intact.
+            buffer = new ArrayList<>(backingArray.length);
+            backingArray = null;
+        }
         size = 0;
     }
 
